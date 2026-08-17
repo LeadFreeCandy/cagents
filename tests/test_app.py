@@ -20,8 +20,20 @@ from cagents.views import GroupedView, KanbanView, QueueView, SessionList
 
 def widget_text(app, selector: str) -> str:
     """Plain text currently shown by a Static widget."""
-    content = app.query_one(selector).content
-    return content.plain if hasattr(content, "plain") else str(content)
+    return render_text(app.query_one(selector).content)
+
+
+def render_text(content) -> str:
+    if hasattr(content, "plain"):
+        return content.plain
+    import io
+
+    from rich.console import Console
+
+    buffer = io.StringIO()
+    console = Console(width=200, file=buffer, force_terminal=False)
+    console.print(content)
+    return buffer.getvalue()
 
 
 def select_session(app, session_id: str) -> None:

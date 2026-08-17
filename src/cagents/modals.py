@@ -237,6 +237,8 @@ HELP_TEXT = """\
 
 [bold cyan]Act on a session[/bold cyan]
   enter         attach (the real Claude CLI; detach: ctrl-b d)
+  space         peek — read the transcript without attaching
+  o             open the newest recorded link (PR, artifact)
   r             mark reviewed / unmark
   e             edit note
   L             edit label
@@ -246,6 +248,9 @@ HELP_TEXT = """\
   n             start a new session
   a             track an existing session
   R             refresh now
+
+[bold cyan]Fleet assistant[/bold cyan]
+  :             ask in plain English (proposes a plan; you confirm)
 
   ?             this help · q quit\
 """
@@ -272,3 +277,98 @@ class HelpModal(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class PaletteModal(ModalScreen[str | None]):
+    """The fleet palette input. Clearly labeled as the AI-assisted surface
+    (spec §10): everything else in cagents is deterministic; this one line
+    is where you talk to the assistant about your *fleet*, not your code."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    PaletteModal { align: center top; }
+    PaletteModal > Vertical {
+        width: 90; max-width: 95%; height: auto; margin-top: 2;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    PaletteModal Label { text-style: bold; }
+    PaletteModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(": fleet assistant")
+            yield Static(
+                "Plain English; proposes changes to cagents' bookkeeping only "
+                "(review/notes/labels/tracking). You confirm before anything applies.",
+                classes="hint",
+            )
+            yield Input(placeholder="e.g. mark everything in dealpilot reviewed — it's merged")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        self.dismiss(text or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PlanConfirmModal(ModalScreen[bool]):
+    """Show the assistant's proposed plan; nothing applies without a yes."""
+
+    BINDINGS = [
+        Binding("escape", "no", "No"),
+        Binding("n", "no", "No"),
+        Binding("y", "yes", "Apply"),
+    ]
+
+    DEFAULT_CSS = """
+    PlanConfirmModal { align: center middle; }
+    PlanConfirmModal > Vertical {
+        width: 100; max-width: 95%; height: auto; max-height: 80%;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    PlanConfirmModal .reply { margin-bottom: 1; }
+    PlanConfirmModal .keys { color: $text-muted; margin-top: 1; }
+    """
+
+    def __init__(self, plan, titles: dict[str, str]) -> None:
+        super().__init__()
+        self.plan = plan
+        self.titles = titles  # session_id -> display title
+
+    def compose(self) -> ComposeResult:
+        from rich.text import Text
+
+        body = Text()
+        for act in self.plan.actions:
+            title = self.titles.get(act.session_id, act.session_id[:8])
+            body.append("  → ", style="bold green")
+            body.append(f"{act.action.replace('_', ' ')}", style="bold")
+            if act.value:
+                body.append(f' "{act.value}"')
+            body.append(f"  {title}\n", style="cyan")
+            if act.reason:
+                body.append(f"      {act.reason}\n", style="dim italic")
+        if not self.plan.actions:
+            body.append("  (no actions proposed)\n", style="dim")
+        for drop in self.plan.dropped:
+            body.append("  ✗ refused: ", style="red")
+            body.append(f"{drop}\n", style="dim")
+
+        with Vertical():
+            yield Label("Proposed plan")
+            yield Static(self.plan.reply or "", classes="reply")
+            yield Static(body)
+            keys = "y — apply    n / esc — cancel" if self.plan.actions else "esc — close"
+            yield Static(keys, classes="keys")
+
+    def action_yes(self) -> None:
+        self.dismiss(bool(self.plan.actions))
+
+    def action_no(self) -> None:
+        self.dismiss(False)

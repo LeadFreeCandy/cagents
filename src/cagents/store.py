@@ -31,6 +31,7 @@ class TrackedSession:
     label: str = ""
     note: str = ""
     reviewed_at: str = ""  # ISO 8601, empty = never reviewed
+    archived: bool = False  # hidden from session views; history kept
 
     def reviewed_datetime(self) -> datetime | None:
         if not self.reviewed_at:
@@ -47,6 +48,7 @@ class TrackedSession:
             "label": self.label,
             "note": self.note,
             "reviewed_at": self.reviewed_at,
+            "archived": self.archived,
         }
 
     @classmethod
@@ -58,6 +60,48 @@ class TrackedSession:
             label=str(data.get("label", "")),
             note=str(data.get("note", "")),
             reviewed_at=str(data.get("reviewed_at", "")),
+            archived=bool(data.get("archived", False)),
+        )
+
+
+@dataclass
+class Todo:
+    """A unit of intent. Todos can spawn sessions (and worktrees); completing
+    one is the natural moment to archive the workspaces it spawned."""
+
+    todo_id: str
+    text: str
+    created_at: str  # ISO 8601
+    done_at: str = ""  # ISO 8601, empty = open
+    project_dir: str = ""  # default place its sessions start
+    worktree: str = ""  # worktree created for this todo, if any
+    session_ids: list[str] = field(default_factory=list)
+
+    @property
+    def done(self) -> bool:
+        return bool(self.done_at)
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text,
+            "created_at": self.created_at,
+            "done_at": self.done_at,
+            "project_dir": self.project_dir,
+            "worktree": self.worktree,
+            "session_ids": list(self.session_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, todo_id: str, data: dict) -> "Todo":
+        raw_ids = data.get("session_ids", [])
+        return cls(
+            todo_id=todo_id,
+            text=str(data.get("text", "")),
+            created_at=str(data.get("created_at", "")),
+            done_at=str(data.get("done_at", "")),
+            project_dir=str(data.get("project_dir", "")),
+            worktree=str(data.get("worktree", "")),
+            session_ids=[str(s) for s in raw_ids] if isinstance(raw_ids, list) else [],
         )
 
 
@@ -65,6 +109,7 @@ class TrackedSession:
 class Store:
     path: Path
     sessions: dict[str, TrackedSession] = field(default_factory=dict)
+    todos: dict[str, Todo] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Store":
@@ -79,12 +124,18 @@ class Store:
             for sid, data in sessions.items():
                 if isinstance(data, dict):
                     store.sessions[sid] = TrackedSession.from_dict(sid, data)
+        todos = raw.get("todos")
+        if isinstance(todos, dict):
+            for tid, data in todos.items():
+                if isinstance(data, dict):
+                    store.todos[tid] = Todo.from_dict(tid, data)
         return store
 
     def save(self) -> None:
         payload = {
             "version": STORE_VERSION,
             "sessions": {sid: t.to_dict() for sid, t in self.sessions.items()},
+            "todos": {tid: t.to_dict() for tid, t in self.todos.items()},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -132,4 +183,48 @@ class Store:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
             tracked.label = label
+            self.save()
+
+    def set_archived(self, session_id: str, archived: bool) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.archived != archived:
+            tracked.archived = archived
+            self.save()
+
+    # -- todos ----------------------------------------------------------------
+
+    def add_todo(self, text: str, created_at: str, project_dir: str = "") -> Todo:
+        import uuid
+
+        todo = Todo(
+            todo_id=uuid.uuid4().hex[:12],
+            text=text,
+            created_at=created_at,
+            project_dir=project_dir,
+        )
+        self.todos[todo.todo_id] = todo
+        self.save()
+        return todo
+
+    def delete_todo(self, todo_id: str) -> None:
+        if self.todos.pop(todo_id, None) is not None:
+            self.save()
+
+    def set_todo_done(self, todo_id: str, done_at: str) -> None:
+        """done_at empty string reopens the todo."""
+        todo = self.todos.get(todo_id)
+        if todo is not None:
+            todo.done_at = done_at
+            self.save()
+
+    def link_todo_session(self, todo_id: str, session_id: str) -> None:
+        todo = self.todos.get(todo_id)
+        if todo is not None and session_id not in todo.session_ids:
+            todo.session_ids.append(session_id)
+            self.save()
+
+    def set_todo_worktree(self, todo_id: str, worktree: str) -> None:
+        todo = self.todos.get(todo_id)
+        if todo is not None:
+            todo.worktree = worktree
             self.save()

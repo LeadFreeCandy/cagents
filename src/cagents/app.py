@@ -24,7 +24,17 @@ from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 
 from .claude_data import default_claude_dir, parse_session_file, utcnow
 from .format import header_summary, preview_renderable
-from .modals import ConfirmModal, HelpModal, InputModal, NewSessionModal, TrackModal
+from .modals import (
+    ConfirmModal,
+    HelpModal,
+    InputModal,
+    NewSessionModal,
+    PaletteModal,
+    PlanConfirmModal,
+    TrackModal,
+)
+from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
+from .peek import PeekScreen, deep_view
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .store import Store
 from .tmuxctl import TmuxClient
@@ -62,6 +72,9 @@ class CagentsApp(App):
         Binding("3", "switch_view('kanban')", "Kanban"),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("enter", "attach", "Attach", priority=False, show=True),
+        Binding("space", "peek", "Peek"),
+        Binding("o", "open_link", "Open link", show=False),
+        Binding("colon", "palette", "Fleet ':'", show=False),
         Binding("n", "new_session", "New"),
         Binding("a", "track_session", "Track"),
         Binding("r", "toggle_reviewed", "Reviewed"),
@@ -79,8 +92,10 @@ class CagentsApp(App):
         registry: SessionRegistry | None = None,
         tmux: TmuxClient | None = None,
         claude_dir: Path | None = None,
+        claude_runner=None,
     ):
         super().__init__()
+        self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
         self.store = store or Store.load()
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
@@ -375,6 +390,71 @@ class CagentsApp(App):
         self.store.untrack(session_id)
         if self.selected_session_id == session_id:
             self.selected_session_id = None
+        self.refresh_data()
+
+    # -- peek / links ------------------------------------------------------------
+
+    def action_peek(self) -> None:
+        view = self.selected_view()
+        if view is None:
+            self.notify("No session selected.", severity="warning")
+            return
+        deep = deep_view(view)
+        self.push_screen(PeekScreen(deep), lambda r: self._peek_closed(view.session_id, r))
+
+    def _peek_closed(self, session_id: str, result: str | None) -> None:
+        if result == "reviewed":
+            self.store.mark_reviewed(session_id, utcnow().isoformat())
+            self.notify("Marked reviewed.")
+            self.refresh_data()
+
+    def action_open_link(self) -> None:
+        view = self.selected_view()
+        if view is None or not view.parsed or not view.parsed.links:
+            self.notify("No links recorded for this session.", severity="warning")
+            return
+        link = view.parsed.links[-1]
+        import subprocess
+
+        try:
+            subprocess.run(["open", link.url], check=True, timeout=10)
+            self.notify(f"Opened {link.label}.")
+        except Exception as error:
+            self.notify(f"Could not open {link.label}: {error}", severity="error")
+
+    # -- fleet palette (the explicitly-labeled AI surface) ------------------------
+
+    def action_palette(self) -> None:
+        self.push_screen(PaletteModal(), self._palette_submitted)
+
+    def _palette_submitted(self, request: str | None) -> None:
+        if not request:
+            return
+        self.notify("Asking the fleet assistant… (plan will need your confirmation)")
+        self._run_palette_request(request)
+
+    @work(thread=True, exclusive=True, group="palette")
+    def _run_palette_request(self, request: str) -> None:
+        snapshot = self.snapshot
+        runner = self.claude_runner or CliClaudeRunner(claude_bin=self._claude_bin())
+        try:
+            raw = runner.run(build_prompt(snapshot, request))
+            plan = parse_plan(raw, snapshot)
+        except Exception as error:  # loud, specific (spec §11)
+            self.call_from_thread(
+                self.notify, f"Fleet assistant failed: {error}", severity="error", timeout=10
+            )
+            return
+        titles = {v.session_id: v.title for v in snapshot.views}
+        self.call_from_thread(
+            self.push_screen, PlanConfirmModal(plan, titles), lambda yes: self._plan_confirmed(plan, yes)
+        )
+
+    def _plan_confirmed(self, plan, yes: bool) -> None:
+        if not yes:
+            return
+        done = apply_plan(plan, self.store, utcnow().isoformat())
+        self.notify("Applied: " + ", ".join(done) if done else "Nothing to apply.")
         self.refresh_data()
 
     # -- misc -------------------------------------------------------------------

@@ -59,6 +59,40 @@ class PreviewItem:
 
 
 @dataclass
+class Link:
+    """Something linkable that Claude recorded in the transcript."""
+
+    kind: str  # "pr" | "artifact" | ...
+    label: str
+    url: str
+
+
+# "Claude writes it, cagents shows it": record types that carry a link.
+# Growing with Claude means adding one entry here when a new *-link record
+# type appears in transcripts — nothing else changes.
+_LINK_EXTRACTORS = {
+    "pr-link": lambda r: Link(
+        kind="pr",
+        label=f"PR #{r['prNumber']}" if r.get("prNumber") else "PR",
+        url=str(r.get("prUrl", "")),
+    ),
+    "frame-link": lambda r: Link(
+        kind="artifact",
+        label="artifact",
+        url=str(r.get("frameUrl", "")),
+    ),
+}
+
+# Tool calls that modify files, and where the path lives in their input.
+_FILE_TOOLS = {
+    "Edit": "file_path",
+    "Write": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+
+
+@dataclass
 class ParsedSession:
     session_id: str
     path: Path
@@ -80,6 +114,11 @@ class ParsedSession:
     pending_tool_name: str = ""
     last_record_role: str = ""  # "user" | "assistant" | "" if neither seen
     truncated: bool = False  # tail parse did not cover the whole file
+    # Derived extras, all read straight from records Claude already writes:
+    links: list[Link] = field(default_factory=list)
+    files_touched: list[str] = field(default_factory=list)  # ordered, deduped
+    pending_agents: int = 0  # background agents, per Claude's system records
+    last_turn_duration_ms: int = 0
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -173,6 +212,8 @@ def parse_session_file(
     open_tool_uses: dict[str, str] = {}  # id -> tool name
     fallback_title = ""
     last_prompt = ""
+    seen_links: set[str] = set()
+    seen_files: set[str] = set()
 
     for line in lines:
         line = line.strip()
@@ -206,6 +247,27 @@ def parse_session_file(
             text = record.get("lastPrompt")
             if isinstance(text, str):
                 last_prompt = text
+            continue
+
+        extractor = _LINK_EXTRACTORS.get(rtype)
+        if extractor is not None:
+            try:
+                link = extractor(record)
+            except (KeyError, TypeError):
+                link = None
+            if link is not None and link.url and link.url not in seen_links:
+                seen_links.add(link.url)
+                parsed.links.append(link)
+            continue
+
+        if rtype == "system":
+            agents = record.get("pendingBackgroundAgentCount")
+            if isinstance(agents, int):
+                parsed.pending_agents = agents
+            if record.get("subtype") == "turn_duration":
+                duration = record.get("durationMs")
+                if isinstance(duration, int):
+                    parsed.last_turn_duration_ms = duration
             continue
 
         if rtype not in ("user", "assistant"):
@@ -273,7 +335,14 @@ def parse_session_file(
                 tool_id = block.get("id")
                 if isinstance(tool_id, str):
                     open_tool_uses[tool_id] = name
-                summary = _summarize_tool_input(name, block.get("input"))
+                tool_input = block.get("input")
+                path_key = _FILE_TOOLS.get(name)
+                if path_key and isinstance(tool_input, dict):
+                    file_path = tool_input.get(path_key)
+                    if isinstance(file_path, str) and file_path and file_path not in seen_files:
+                        seen_files.add(file_path)
+                        parsed.files_touched.append(file_path)
+                summary = _summarize_tool_input(name, tool_input)
                 preview.append(PreviewItem("tool", summary, ts, tool_name=name))
 
     if not parsed.title:

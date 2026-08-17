@@ -72,6 +72,10 @@ def session_row(view: SessionView, now: datetime | None = None, show_project: bo
         row.append("  ⇄", style="dim")  # someone is attached right now
     if view.tracked.note:
         row.append("  ✎", style="dim yellow")
+    if view.parsed and view.parsed.links:
+        row.append("  ⇗", style="dim blue")  # PR / artifact recorded
+    if view.parsed and view.parsed.pending_agents:
+        row.append(f"  ⑂{view.parsed.pending_agents}", style="dim green")
     return row
 
 
@@ -120,10 +124,38 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
         if view.started:
             meta.append(f"· started {human_age(view.started, now)} ago ")
         meta.append(f"· active {human_age(view.last_activity, now)} ago")
+        if view.parsed.pending_agents:
+            meta.append(f" · ⑂ {view.parsed.pending_agents} agents", style="green")
     if view.live:
         meta.append(f" · tmux:{view.tmux_name}", style="green")
     head.append_text(meta)
     parts.append(head)
+
+    if view.parsed and view.parsed.links:
+        links = Text()
+        for i, link in enumerate(view.parsed.links[-4:]):
+            if i:
+                links.append("   ")
+            links.append("⇗ ", style="blue")
+            links.append(f"{link.label} ", style="bold blue")
+            links.append(_truncate(link.url, 60), style="dim")
+        links.append("   (o opens newest)", style="dim italic")
+        parts.append(links)
+
+    if view.parsed and view.parsed.files_touched:
+        files = view.parsed.files_touched
+        shown = files[-8:]
+        try:
+            import os
+
+            common = os.path.commonpath(shown) if len(shown) > 1 else ""
+        except ValueError:
+            common = ""
+        touched = Text()
+        touched.append(f"Δ {len(files)} file{'s' if len(files) != 1 else ''}  ", style="yellow")
+        names = [f[len(common) :].lstrip("/") if common and f.startswith(common) else f for f in shown]
+        touched.append(_truncate(" · ".join(names), width * 2), style="dim")
+        parts.append(touched)
 
     if view.tracked.note:
         note = Text()
