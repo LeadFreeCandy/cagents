@@ -1,0 +1,338 @@
+"""Read-only access to Claude Code's own session store (~/.claude/projects).
+
+cagents never writes here. Everything in this module is derived from what
+Claude Code already persists: one JSONL transcript per session, stored under
+a directory whose name encodes the project path.
+
+Large transcripts are never read in full: we read a bounded head (for session
+metadata like cwd and start time) and a bounded tail (for the recent
+conversation and turn-state signals).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+# How much of a transcript we read. Head covers session metadata (cwd shows up
+# on the first user/assistant record); tail covers the preview and turn state.
+HEAD_BYTES = 64 * 1024
+TAIL_BYTES = 512 * 1024
+
+_NON_PATH_CHARS = re.compile(r"[^A-Za-z0-9-]")
+
+
+def encode_project_dir(path: str) -> str:
+    """Encode a project path the way Claude Code names its per-project dirs.
+
+    e.g. /Users/samir/Documents/my_proj -> -Users-samir-Documents-my-proj
+    The encoding is lossy; cagents only ever uses it to *locate* a session
+    file from a known real path, never to reverse it.
+    """
+    return _NON_PATH_CHARS.sub("-", path)
+
+
+def default_claude_dir() -> Path:
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / ".claude"
+
+
+def session_file_path(claude_dir: Path, project_dir: str, session_id: str) -> Path:
+    return claude_dir / "projects" / encode_project_dir(project_dir) / f"{session_id}.jsonl"
+
+
+@dataclass
+class PreviewItem:
+    """One renderable line-group of the conversation tail."""
+
+    kind: str  # "user" | "assistant" | "tool" | "thinking"
+    text: str
+    timestamp: datetime | None = None
+    # For kind == "tool": the tool name (text carries a short input summary).
+    tool_name: str = ""
+
+
+@dataclass
+class ParsedSession:
+    session_id: str
+    path: Path
+    cwd: str = ""
+    git_branch: str = ""
+    title: str = ""
+    model: str = ""
+    version: str = ""
+    first_timestamp: datetime | None = None
+    last_timestamp: datetime | None = None
+    mtime: float = 0.0
+    size: int = 0
+    preview: list[PreviewItem] = field(default_factory=list)
+    # Turn-state signals, all derived from the transcript tail:
+    last_stop_reason: str = ""  # stop_reason of the last assistant record seen
+    # True when the newest assistant tool_use has no later tool_result — i.e.
+    # a tool call is either still running or waiting on a permission decision.
+    pending_tool_use: bool = False
+    pending_tool_name: str = ""
+    last_record_role: str = ""  # "user" | "assistant" | "" if neither seen
+    truncated: bool = False  # tail parse did not cover the whole file
+
+
+def _parse_ts(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _first_line(text: str, limit: int = 200) -> str:
+    line = text.strip().split("\n", 1)[0].strip()
+    if len(line) > limit:
+        line = line[: limit - 1] + "…"
+    return line
+
+
+def _summarize_tool_input(name: str, tool_input: object) -> str:
+    """A one-line human summary of a tool call's input."""
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "description", "file_path", "pattern", "prompt", "url", "query"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return _first_line(value, 120)
+    return ""
+
+
+def _iter_content_blocks(message: object):
+    if not isinstance(message, dict):
+        return
+    content = message.get("content")
+    if isinstance(content, str):
+        yield {"type": "text", "text": content}
+        return
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                yield block
+
+
+_SYSTEMISH_USER = re.compile(
+    r"^\s*(<system-reminder>|<task-notification>|<local-command|<command-name>|\[Request interrupted)"
+)
+
+
+def _read_lines(path: Path, head_bytes: int, tail_bytes: int) -> tuple[list[str], bool]:
+    """Read the transcript as (lines, truncated).
+
+    For small files this is every line. For large ones it is the head lines
+    followed by the tail lines, with the seam marked by `truncated=True`
+    (head metadata and tail preview/state never straddle the seam in
+    practice, since metadata lives on the first records and state on the
+    last).
+    """
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        if size <= head_bytes + tail_bytes:
+            data = f.read()
+            return data.decode("utf-8", "replace").splitlines(), False
+        head = f.read(head_bytes)
+        f.seek(size - tail_bytes)
+        tail = f.read()
+    head_lines = head.decode("utf-8", "replace").splitlines()[:-1]  # drop partial
+    tail_lines = tail.decode("utf-8", "replace").splitlines()[1:]  # drop partial
+    return head_lines + tail_lines, True
+
+
+def parse_session_file(
+    path: Path,
+    head_bytes: int = HEAD_BYTES,
+    tail_bytes: int = TAIL_BYTES,
+    preview_items: int = 60,
+) -> ParsedSession:
+    """Parse one session transcript into everything cagents displays.
+
+    Raises OSError if the file cannot be read.
+    """
+    stat = path.stat()
+    parsed = ParsedSession(
+        session_id=path.stem,
+        path=path,
+        mtime=stat.st_mtime,
+        size=stat.st_size,
+    )
+    lines, parsed.truncated = _read_lines(path, head_bytes, tail_bytes)
+
+    preview: list[PreviewItem] = []
+    # tool_use id -> preview index, so tool_results can be matched up.
+    open_tool_uses: dict[str, str] = {}  # id -> tool name
+    fallback_title = ""
+    last_prompt = ""
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+
+        rtype = record.get("type")
+
+        if rtype == "ai-title":
+            title = record.get("aiTitle")
+            if isinstance(title, str) and title.strip():
+                parsed.title = title.strip()
+            continue
+        if rtype == "agent-name":
+            name = record.get("agentName")
+            if isinstance(name, str) and name.strip() and not parsed.title:
+                parsed.title = name.strip()
+            continue
+        if rtype == "summary":
+            text = record.get("summary")
+            if isinstance(text, str) and text.strip() and not parsed.title:
+                parsed.title = text.strip()
+            continue
+        if rtype == "last-prompt":
+            text = record.get("lastPrompt")
+            if isinstance(text, str):
+                last_prompt = text
+            continue
+
+        if rtype not in ("user", "assistant"):
+            continue
+        if record.get("isSidechain"):
+            continue
+
+        ts = _parse_ts(record.get("timestamp"))
+        if ts is not None:
+            if parsed.first_timestamp is None:
+                parsed.first_timestamp = ts
+            parsed.last_timestamp = ts
+
+        cwd = record.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            parsed.cwd = parsed.cwd or cwd
+        branch = record.get("gitBranch")
+        if isinstance(branch, str) and branch:
+            parsed.git_branch = branch
+        version = record.get("version")
+        if isinstance(version, str) and version:
+            parsed.version = version
+
+        message = record.get("message")
+
+        if rtype == "user":
+            parsed.last_record_role = "user"
+            for block in _iter_content_blocks(message):
+                btype = block.get("type")
+                if btype == "tool_result":
+                    tool_id = block.get("tool_use_id")
+                    if isinstance(tool_id, str):
+                        open_tool_uses.pop(tool_id, None)
+                elif btype == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and text.strip() and not _SYSTEMISH_USER.match(text):
+                        if not fallback_title:
+                            fallback_title = _first_line(text, 80)
+                        preview.append(PreviewItem("user", text.strip(), ts))
+            continue
+
+        # assistant
+        parsed.last_record_role = "assistant"
+        if isinstance(message, dict):
+            stop = message.get("stop_reason")
+            if isinstance(stop, str) and stop:
+                parsed.last_stop_reason = stop
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                parsed.model = model
+        for block in _iter_content_blocks(message):
+            btype = block.get("type")
+            if btype == "text":
+                text = block.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    preview.append(PreviewItem("assistant", text.strip(), ts))
+            elif btype == "thinking":
+                text = block.get("thinking", "")
+                if isinstance(text, str) and text.strip():
+                    preview.append(PreviewItem("thinking", _first_line(text, 160), ts))
+            elif btype == "tool_use":
+                name = block.get("name", "")
+                if not isinstance(name, str):
+                    name = ""
+                tool_id = block.get("id")
+                if isinstance(tool_id, str):
+                    open_tool_uses[tool_id] = name
+                summary = _summarize_tool_input(name, block.get("input"))
+                preview.append(PreviewItem("tool", summary, ts, tool_name=name))
+
+    if not parsed.title:
+        parsed.title = fallback_title or _first_line(last_prompt, 80) or parsed.session_id[:8]
+
+    if open_tool_uses:
+        parsed.pending_tool_use = True
+        # The most recently opened tool call is the interesting one.
+        parsed.pending_tool_name = next(reversed(open_tool_uses.values()))
+
+    parsed.preview = preview[-preview_items:]
+    return parsed
+
+
+@dataclass
+class DiscoveredSession:
+    """A session found in Claude's store that cagents may not be tracking."""
+
+    session_id: str
+    path: Path
+    encoded_project: str
+    mtime: float
+    size: int
+
+
+def discover_sessions(claude_dir: Path, min_size: int = 1) -> list[DiscoveredSession]:
+    """List every session transcript in Claude's store, newest first."""
+    projects = claude_dir / "projects"
+    found: list[DiscoveredSession] = []
+    if not projects.is_dir():
+        return found
+    for project in projects.iterdir():
+        if not project.is_dir():
+            continue
+        try:
+            entries = list(project.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.suffix != ".jsonl":
+                continue
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            if stat.st_size < min_size:
+                continue
+            found.append(
+                DiscoveredSession(
+                    session_id=entry.stem,
+                    path=entry,
+                    encoded_project=project.name,
+                    mtime=stat.st_mtime,
+                    size=stat.st_size,
+                )
+            )
+    found.sort(key=lambda s: s.mtime, reverse=True)
+    return found
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
