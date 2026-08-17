@@ -169,6 +169,9 @@ async def test_view_switching(world):
         assert app.active_view_id == "kanban"
         await pilot.press("tab")
         await pilot.pause()
+        assert app.active_view_id == "todos"
+        await pilot.press("tab")
+        await pilot.pause()
         assert app.active_view_id == "grouped"
 
 

@@ -24,6 +24,8 @@ from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 
 from .claude_data import default_claude_dir, parse_session_file, utcnow
 from .format import header_summary, preview_renderable
+from . import gitops
+from .diffview import DiffResult, DiffScreen
 from .modals import (
     ConfirmModal,
     HelpModal,
@@ -31,6 +33,7 @@ from .modals import (
     NewSessionModal,
     PaletteModal,
     PlanConfirmModal,
+    TodoModal,
     TrackModal,
 )
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
@@ -38,11 +41,11 @@ from .peek import PeekScreen, deep_view
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .store import Store
 from .tmuxctl import TmuxClient
-from .views import GroupedView, KanbanView, QueueView, SelectionChanged
+from .views import GroupedView, KanbanView, QueueView, SelectionChanged, TodoSelected, TodoView
 
 REFRESH_SECONDS = 2.0
 
-VIEW_IDS = ["grouped", "queue", "kanban"]
+VIEW_IDS = ["grouped", "queue", "kanban", "todos"]
 
 
 class CagentsApp(App):
@@ -70,6 +73,8 @@ class CagentsApp(App):
         Binding("1", "switch_view('grouped')", "Grouped"),
         Binding("2", "switch_view('queue')", "Queue"),
         Binding("3", "switch_view('kanban')", "Kanban"),
+        Binding("4", "switch_view('todos')", "Todos"),
+        Binding("D", "show_diff", "Diff"),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("enter", "attach", "Attach", priority=False, show=True),
         Binding("space", "peek", "Peek"),
@@ -115,6 +120,7 @@ class CagentsApp(App):
                 yield GroupedView(id="grouped")
                 yield QueueView(id="queue")
                 yield KanbanView(id="kanban")
+                yield TodoView(id="todos")
             with VerticalScroll(id="preview-pane"):
                 yield Static(id="preview-content")
         yield Footer()
@@ -166,6 +172,19 @@ class CagentsApp(App):
             self.selected_session_id = event.session_id
             self._update_preview()
 
+    def on_todo_selected(self, event: TodoSelected) -> None:
+        # In the todo view, session-level actions (attach/peek/diff/review)
+        # target the todo's newest session.
+        if self.active_view_id == "todos":
+            self.selected_session_id = event.session_id
+            self._update_preview()
+
+    def selected_todo(self):
+        todo_view = self.query_one("#todos", TodoView)
+        if todo_view.selected_todo_id is None:
+            return None
+        return self.store.todos.get(todo_view.selected_todo_id)
+
     def _update_preview(self) -> None:
         content = self.query_one("#preview-content", Static)
         view = self.selected_view()
@@ -194,9 +213,17 @@ class CagentsApp(App):
     # -- attaching (the core of the core loop) ---------------------------------
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option.id is not None:
-            self.selected_session_id = event.option.id
-            self.action_attach()
+        if event.option.id is None:
+            return
+        if event.option.id.startswith("todo:"):
+            # Enter on a todo: attach to its newest session (if any).
+            if self.selected_session_id:
+                self.action_attach()
+            else:
+                self.notify("No sessions for this todo yet — press 'n' to start one.")
+            return
+        self.selected_session_id = event.option.id
+        self.action_attach()
 
     def action_attach(self) -> None:
         view = self.selected_view()
@@ -260,6 +287,14 @@ class CagentsApp(App):
     # -- creating / tracking sessions ------------------------------------------
 
     def action_new_session(self) -> None:
+        self._pending_todo_link = None
+        if self.active_view_id == "todos":
+            todo = self.selected_todo()
+            if todo is not None:
+                self._pending_todo_link = todo.todo_id
+                initial = todo.worktree or todo.project_dir or os.getcwd()
+                self.push_screen(NewSessionModal(initial), self._new_session_chosen)
+                return
         view = self.selected_view()
         initial = view.project_dir if view else os.getcwd()
         self.push_screen(NewSessionModal(initial), self._new_session_chosen)
@@ -284,6 +319,10 @@ class CagentsApp(App):
             self.notify(f"Could not start session: {error}", severity="error", timeout=10)
             return
         self.store.track(session_id, directory, utcnow().isoformat(), label=label)
+        pending = getattr(self, "_pending_todo_link", None)
+        if pending:
+            self.store.link_todo_session(pending, session_id)
+            self._pending_todo_link = None
         self.selected_session_id = session_id
         self._suspend_and_run(lambda: self.tmux.attach(name))
         self.refresh_data()
@@ -456,6 +495,235 @@ class CagentsApp(App):
         done = apply_plan(plan, self.store, utcnow().isoformat())
         self.notify("Applied: " + ", ".join(done) if done else "Nothing to apply.")
         self.refresh_data()
+
+    # -- todos ---------------------------------------------------------------------
+
+    def action_add_todo(self) -> None:
+        view = self.selected_view()
+        initial = view.project_dir if view else ""
+        self.push_screen(TodoModal(initial), self._todo_added)
+
+    def _todo_added(self, result: tuple[str, str] | None) -> None:
+        if not result:
+            return
+        text, directory = result
+        self.store.add_todo(text, utcnow().isoformat(), project_dir=directory)
+        self.refresh_data()
+        self.notify("Todo added.")
+
+    def action_toggle_todo_done(self) -> None:
+        todo = self.selected_todo()
+        if todo is None:
+            return
+        if todo.done:
+            self.store.set_todo_done(todo.todo_id, "")
+            for sid in todo.session_ids:
+                self.store.set_archived(sid, False)
+            self.notify("Todo reopened; its workspaces are back in the views.")
+            self.refresh_data()
+            return
+        self.store.set_todo_done(todo.todo_id, utcnow().isoformat())
+        linked = [sid for sid in todo.session_ids if sid in self.store.sessions]
+        if not linked and not todo.worktree:
+            self.notify("Todo done.")
+            self.refresh_data()
+            return
+        what = []
+        if linked:
+            what.append(f"{len(linked)} session{'s' if len(linked) != 1 else ''}")
+        if todo.worktree:
+            what.append(f"worktree {todo.worktree}")
+        self.push_screen(
+            ConfirmModal(
+                f"Todo done. Archive its workspace ({', '.join(what)})?\n\n"
+                "Sessions are hidden from views (history kept); a clean worktree "
+                "is removed — a dirty one refuses loudly."
+            ),
+            lambda yes: self._archive_todo_workspace(todo.todo_id, bool(yes)),
+        )
+
+    def _archive_todo_workspace(self, todo_id: str, yes: bool) -> None:
+        if not yes:
+            self.refresh_data()
+            return
+        todo = self.store.todos.get(todo_id)
+        if todo is None:
+            return
+        for sid in todo.session_ids:
+            self.store.set_archived(sid, True)
+        if todo.worktree:
+            self._remove_worktree_worker(todo_id)
+        else:
+            self.notify("Workspace archived.")
+        self.refresh_data()
+
+    @work(thread=True, exclusive=True, group="worktree")
+    def _remove_worktree_worker(self, todo_id: str) -> None:
+        todo = self.store.todos.get(todo_id)
+        if todo is None or not todo.worktree:
+            return
+        try:
+            gitops.remove_worktree(todo.project_dir or todo.worktree, todo.worktree)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify,
+                f"Worktree kept: {error}",
+                severity="warning",
+                timeout=10,
+            )
+            return
+        self.call_from_thread(self._worktree_removed, todo_id)
+
+    def _worktree_removed(self, todo_id: str) -> None:
+        self.store.set_todo_worktree(todo_id, "")
+        self.notify("Workspace archived; worktree removed.")
+        self.refresh_data()
+
+    def action_delete_todo(self) -> None:
+        todo = self.selected_todo()
+        if todo is None:
+            return
+        self.push_screen(
+            ConfirmModal(
+                f"Delete todo '{todo.text}'?\n\nIts sessions and worktree are untouched."
+            ),
+            lambda yes: self._todo_deleted(todo.todo_id, bool(yes)),
+        )
+
+    def _todo_deleted(self, todo_id: str, yes: bool) -> None:
+        if not yes:
+            return
+        self.store.delete_todo(todo_id)
+        self.refresh_data()
+
+    def action_todo_worktree(self) -> None:
+        todo = self.selected_todo()
+        if todo is None:
+            return
+        if todo.worktree:
+            self.notify(f"This todo already has a worktree: {todo.worktree}")
+            return
+        repo = todo.project_dir
+        if not repo or not gitops.is_git_repo(repo):
+            self.notify(
+                "Todo needs a project directory that is a git repo (edit the todo's project).",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        self.notify("Creating worktree…")
+        self._create_worktree_worker(todo.todo_id, repo, todo.text)
+
+    @work(thread=True, exclusive=True, group="worktree")
+    def _create_worktree_worker(self, todo_id: str, repo: str, name: str) -> None:
+        try:
+            path = gitops.create_worktree(repo, name)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify, f"Worktree failed: {error}", severity="error", timeout=10
+            )
+            return
+        self.call_from_thread(self._worktree_created, todo_id, path)
+
+    def _worktree_created(self, todo_id: str, path: str) -> None:
+        self.store.set_todo_worktree(todo_id, path)
+        claude_bin = self._claude_bin()
+        if not claude_bin:
+            self.notify(f"Worktree ready at {path} (claude CLI not found to start a session).")
+            return
+        session_id = str(uuid.uuid4())
+        try:
+            name = self.tmux.new_claude_session(
+                path, ["--session-id", session_id], session_id=session_id, claude_bin=claude_bin
+            )
+        except Exception as error:
+            self.notify(f"Worktree ready at {path}, but session failed: {error}", severity="error")
+            return
+        self.store.track(session_id, path, utcnow().isoformat())
+        self.store.link_todo_session(todo_id, session_id)
+        self.selected_session_id = session_id
+        self._suspend_and_run(lambda: self.tmux.attach(name))
+        self.refresh_data()
+
+    # -- diff review ------------------------------------------------------------------
+
+    def action_show_diff(self) -> None:
+        view = self.selected_view()
+        directory = ""
+        if self.active_view_id == "todos":
+            todo = self.selected_todo()
+            if todo is not None:
+                directory = todo.worktree or todo.project_dir
+        if not directory and view is not None:
+            directory = view.project_dir
+        if not directory:
+            self.notify("Nothing selected to diff.", severity="warning")
+            return
+        self.notify("Building diff…")
+        self._diff_worker(directory)
+
+    @work(thread=True, exclusive=True, group="diff")
+    def _diff_worker(self, directory: str) -> None:
+        try:
+            diff = gitops.worktree_diff(directory)
+        except gitops.GitError as error:
+            self.call_from_thread(self.notify, f"Diff failed: {error}", severity="error", timeout=10)
+            return
+        self.call_from_thread(self._show_diff_screen, diff)
+
+    def _show_diff_screen(self, diff) -> None:
+        view = self.selected_view()
+        target = f"'{view.title}'" if view else "the session"
+        screen = DiffScreen(
+            diff,
+            target_desc=target,
+            github_puller=lambda d=diff.directory: gitops.github_pr_comments(d),
+        )
+        session_id = view.session_id if view else None
+        self.push_screen(screen, lambda result: self._diff_closed(session_id, result))
+
+    def _diff_closed(self, session_id: str | None, result: DiffResult | None) -> None:
+        if result is None or not result.send_message:
+            return
+        if session_id is None:
+            self.notify("No session to send the comments to.", severity="warning")
+            return
+        view = self.snapshot.by_id(session_id)
+        if view is None:
+            self.notify("Session vanished from the snapshot.", severity="error")
+            return
+        self._send_review_worker(view, result.send_message, result.comment_count)
+
+    @work(thread=True, exclusive=True, group="send")
+    def _send_review_worker(self, view: SessionView, message: str, count: int) -> None:
+        import time
+
+        try:
+            tmux_name = view.tmux_name
+            if not view.live:
+                # Resume the session first, give the CLI a moment to boot.
+                tmux_name = self.tmux.new_claude_session(
+                    view.project_dir,
+                    ["--resume", view.session_id],
+                    session_id=view.session_id,
+                    claude_bin=self._claude_bin(),
+                )
+                time.sleep(4.0)
+            self.tmux.send_text(tmux_name, message)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify,
+                f"Could not deliver comments: {error}",
+                severity="error",
+                timeout=10,
+            )
+            return
+        self.call_from_thread(
+            self.notify,
+            f"Sent {count} review comment{'s' if count != 1 else ''} to Claude "
+            f"(attach with Enter to watch).",
+        )
+        self.call_from_thread(self.refresh_data)
 
     # -- misc -------------------------------------------------------------------
 

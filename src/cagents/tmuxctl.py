@@ -138,6 +138,37 @@ class TmuxClient:
         )
         return proc.returncode
 
+    def send_text(self, session_name: str, text: str, submit: bool = True) -> None:
+        """Type `text` into a session's Claude prompt via bracketed paste
+        (so newlines don't submit early), then press Enter.
+
+        Raises RuntimeError on failure — sending review comments into the
+        wrong void must never be silent."""
+        import time
+
+        try:
+            load = subprocess.run(
+                [self.tmux_bin, "-L", self.socket, "load-buffer", "-b", "cagents-send", "-"],
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            if load.returncode != 0:
+                raise RuntimeError(f"tmux load-buffer failed: {load.stderr.strip()}")
+            paste = self._run(
+                "paste-buffer", "-p", "-d", "-b", "cagents-send", "-t", f"={session_name}:"
+            )
+            if paste.returncode != 0:
+                raise RuntimeError(f"tmux paste-buffer failed: {paste.stderr.strip()}")
+            if submit:
+                time.sleep(0.3)  # let the CLI ingest the paste before Enter
+                enter = self._run("send-keys", "-t", f"={session_name}:", "Enter")
+                if enter.returncode != 0:
+                    raise RuntimeError(f"tmux send-keys failed: {enter.stderr.strip()}")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"tmux send failed: {error}")
+
     def new_claude_session(
         self,
         directory: str,

@@ -286,7 +286,9 @@ class SessionRegistry:
         tmux_sessions = self.tmux.list_sessions()
 
         pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
-        for tracked in self.store.sessions.values():
+        for tracked in list(self.store.sessions.values()):
+            if tracked.archived:
+                continue  # hidden from views; still in the store's history
             path = self._find_session_file(tracked)
             parsed: ParsedSession | None = None
             if path is not None:

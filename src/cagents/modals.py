@@ -227,7 +227,7 @@ HELP_TEXT = """\
 [bold]cagents — keys[/bold]
 
 [bold cyan]Views[/bold cyan]
-  1 / 2 / 3     grouped · queue · kanban
+  1 / 2 / 3 / 4 grouped · queue · kanban · todos
   tab           next view
 
 [bold cyan]Navigate[/bold cyan]
@@ -238,6 +238,8 @@ HELP_TEXT = """\
 [bold cyan]Act on a session[/bold cyan]
   enter         attach (the real Claude CLI; detach: ctrl-b d)
   space         peek — read the transcript without attaching
+  D             diff — review the worktree's changes, comment,
+                send comments to Claude (g pulls GitHub comments)
   o             open the newest recorded link (PR, artifact)
   r             mark reviewed / unmark
   e             edit note
@@ -248,6 +250,12 @@ HELP_TEXT = """\
   n             start a new session
   a             track an existing session
   R             refresh now
+
+[bold cyan]Todos (view 4)[/bold cyan]
+  A             add todo        n   new session for the todo
+  W             grow a git worktree + session for the todo
+  d             done (offers to archive its workspaces) / reopen
+  x             delete todo     enter  attach to its newest session
 
 [bold cyan]Fleet assistant[/bold cyan]
   :             ask in plain English (proposes a plan; you confirm)
@@ -372,3 +380,55 @@ class PlanConfirmModal(ModalScreen[bool]):
 
     def action_no(self) -> None:
         self.dismiss(False)
+
+
+class TodoModal(ModalScreen["tuple[str, str] | None"]):
+    """New todo: what, and (optionally) which project it belongs to."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("tab", "app.focus_next", "Next field", show=False),
+        Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    TodoModal { align: center middle; }
+    TodoModal > Vertical {
+        width: 80; max-width: 95%; height: auto;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    TodoModal Label { text-style: bold; }
+    TodoModal .hint { color: $text-muted; margin-bottom: 1; }
+    TodoModal Input { margin-bottom: 1; }
+    """
+
+    def __init__(self, initial_dir: str = "") -> None:
+        super().__init__()
+        self.initial_dir = initial_dir
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("New todo")
+            yield Static("Sessions and worktrees can be spawned from it later.", classes="hint")
+            yield Input(placeholder="what needs doing?", id="todo-text")
+            yield Input(value=self.initial_dir, placeholder="project directory (optional)", id="todo-dir")
+
+    def on_mount(self) -> None:
+        self.query_one("#todo-text", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = self.query_one("#todo-text", Input).value.strip()
+        directory = self.query_one("#todo-dir", Input).value.strip()
+        if not text:
+            self.query_one("#todo-text", Input).focus()
+            return
+        if directory:
+            directory = str(Path(directory).expanduser())
+            if not Path(directory).is_dir():
+                self.query_one(".hint", Static).update(f"[red]Not a directory: {directory}[/red]")
+                self.query_one("#todo-dir", Input).focus()
+                return
+        self.dismiss((text, directory))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

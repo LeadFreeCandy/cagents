@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
@@ -302,3 +303,138 @@ class KanbanView(BaseSessionView):
                     self.active_column = i
                     self._emit_selection(self._current_selection())
                 break
+
+
+class TodoSelected(Message):
+    """Highlight moved to a todo; session_id is its newest linked session."""
+
+    def __init__(self, todo_id: str | None, session_id: str | None) -> None:
+        self.todo_id = todo_id
+        self.session_id = session_id
+        super().__init__()
+
+
+class TodoView(Widget):
+    """Todos: units of intent that spawn sessions and worktrees.
+
+    Enter attaches to a todo's newest session; `n` starts a new session for
+    it; `W` grows it a git worktree; `d` completes it (and offers to
+    archive the workspaces it spawned). The todo row shows the live state
+    of its sessions, straight from the snapshot.
+    """
+
+    can_focus = False
+
+    DEFAULT_CSS = """
+    TodoView { height: 1fr; }
+    TodoView > SessionList { height: 1fr; }
+    """
+
+    BINDINGS = [
+        Binding("A", "app.add_todo", "Add todo"),
+        Binding("d", "app.toggle_todo_done", "Done"),
+        Binding("x", "app.delete_todo", "Delete todo"),
+        Binding("W", "app.todo_worktree", "Worktree"),
+    ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.snapshot: Snapshot = Snapshot()
+        self.selected_todo_id: str | None = None
+
+    def compose(self):
+        yield SessionList(id="todos-list")
+
+    def _store(self):
+        return self.app.store  # type: ignore[attr-defined]
+
+    def newest_session_id(self, todo) -> str | None:
+        """The todo's most recently active session present in the snapshot."""
+        best: tuple[float, str] | None = None
+        for sid in todo.session_ids:
+            view = self.snapshot.by_id(sid)
+            if view is None:
+                continue
+            ts = view.last_activity.timestamp() if view.last_activity else 0.0
+            if view.live:
+                ts += 1e12  # live always wins
+            if best is None or ts > best[0]:
+                best = (ts, sid)
+        return best[1] if best else None
+
+    def _todo_row(self, todo, now: datetime) -> Text:
+        from .format import STATE_STYLE, human_age
+
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if todo.done:
+            row.append(" ✓ ", style="green")
+            row.append(f"{todo.text[:52]:<52}  ", style="dim strike")
+        else:
+            row.append(" ○ ", style="bold")
+            row.append(f"{todo.text[:52]:<52}  ", style="bold")
+        project = todo.project_dir.rsplit("/", 1)[-1] if todo.project_dir else ""
+        row.append(f"{project:<16.16} ", style="dim cyan")
+
+        in_snapshot = [v for sid in todo.session_ids if (v := self.snapshot.by_id(sid))]
+        archived = len(todo.session_ids) - len(in_snapshot)
+        if in_snapshot:
+            most_urgent = min(in_snapshot, key=lambda v: v.attention_rank)
+            glyph, style, label = STATE_STYLE[most_urgent.state]
+            row.append(f"{glyph} ", style=style)
+            row.append(f"{label} ", style=style)
+            if len(in_snapshot) > 1:
+                row.append(f"×{len(in_snapshot)} ", style="dim")
+            row.append(human_age(most_urgent.last_activity, now), style="dim")
+        if archived:
+            row.append(f"  {archived} archived", style="dim")
+        if todo.worktree:
+            row.append("  ⎇", style="dim magenta")
+        return row
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+        now = datetime.now(timezone.utc)
+        todos = list(self._store().todos.values())
+        todos.sort(key=lambda t: (t.done, t.created_at if not t.done else t.done_at), reverse=False)
+        open_todos = [t for t in todos if not t.done]
+        done_todos = [t for t in todos if t.done]
+        open_todos.sort(key=lambda t: t.created_at, reverse=True)
+        done_todos.sort(key=lambda t: t.done_at, reverse=True)
+
+        options: list[Option] = []
+        header = Text()
+        header.append("▍", style="bold blue")
+        header.append("Todos ", style="bold")
+        header.append(f"· {len(open_todos)} open · {len(done_todos)} done", style="dim")
+        options.append(Option(header, disabled=True))
+        for todo in open_todos + done_todos:
+            options.append(Option(self._todo_row(todo, now), id=f"todo:{todo.todo_id}"))
+        if not open_todos and not done_todos:
+            options.append(
+                Option("  No todos — press 'A' to add one.", disabled=True)
+            )
+        session_list = self.query_one("#todos-list", SessionList)
+        keep = f"todo:{self.selected_todo_id}" if self.selected_todo_id else None
+        session_list.rebuild(options, keep)
+        self._emit_current()
+
+    def _emit_current(self) -> None:
+        session_list = self.query_one("#todos-list", SessionList)
+        option_id = session_list.highlighted_session_id
+        todo_id = option_id[5:] if option_id and option_id.startswith("todo:") else None
+        self.selected_todo_id = todo_id
+        session_id = None
+        if todo_id:
+            todo = self._store().todos.get(todo_id)
+            if todo is not None:
+                session_id = self.newest_session_id(todo)
+        self.post_message(TodoSelected(todo_id, session_id))
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option.disabled:
+            return
+        self._emit_current()
+
+    def focus_list(self) -> None:
+        self.query_one("#todos-list", SessionList).focus()
+        self._emit_current()
