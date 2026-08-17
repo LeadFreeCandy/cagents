@@ -40,6 +40,26 @@ Liveness comes from tmux: sessions started through `cagents` carry a `CAGENTS_SE
 tmux environment variable and map back exactly; sessions started outside it are matched by
 working directory + transcript recency.
 
+## This branch (feature/todos-and-diffs)
+
+On top of v0.1.0 (which lives on `main`, runnable as `cagents`; this branch is
+`cagents-feature` with its own store):
+
+- **Peek** (`space`), **badges** (`⇗` links / `Δ` files touched / `⑂` agents, `o` opens),
+  **fleet palette** (`:`) — promoted from the cagents-next prototypes.
+- **Todos (view `4`)** — units of intent. `A` add; `n` starts a session for the selected
+  todo (linked, prefilled); `W` grows it a dedicated **git worktree** (branch
+  `todo/<slug>`, sibling `<repo>-worktrees/<slug>` dir) with a session inside; `enter`
+  attaches to its newest session; the row shows its sessions' live states. `d` completes
+  the todo and offers to **archive the workspace**: linked sessions hidden from the views
+  (history kept), a clean worktree removed — a dirty one refuses loudly. Reopening
+  un-archives.
+- **Diff review (`D`)** — everything the selected worktree changed (committed + uncommitted
+  vs the default branch, untracked included), pretty and line-numbered. Move the cursor,
+  `c` to comment on a line, `g` to pull the PR's review comments from GitHub (`gh`),
+  `s` to send the whole comment set into the session's Claude — pasted into the real CLI
+  via tmux (resuming the session first if it's not running).
+
 ## Keys
 
 `?` inside the app shows the full list. The short version: `1/2/3` views, `j/k` move,
