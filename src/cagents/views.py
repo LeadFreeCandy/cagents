@@ -129,9 +129,12 @@ class GroupedView(BaseSessionView):
         groups: dict[str, list[SessionView]] = {}
         for view in snapshot.views:
             groups.setdefault(view.project_dir, []).append(view)
+        compact = bool(getattr(self.app, "compact", False))
         for project_dir in sorted(groups):
             views = groups[project_dir]
-            options.append(Option(group_header(project_dir, len(views)), disabled=True))
+            options.append(
+                Option(group_header(project_dir, len(views), compact=compact), disabled=True)
+            )
             # Inside a group: most urgent first, then newest.
             views.sort(
                 key=lambda v: (
@@ -140,7 +143,7 @@ class GroupedView(BaseSessionView):
                 )
             )
             for view in views:
-                options.append(Option(session_row(view, now), id=view.session_id))
+                options.append(Option(session_row(view, now, compact=compact), id=view.session_id))
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#grouped-list", SessionList)
@@ -172,8 +175,12 @@ class QueueView(BaseSessionView):
                 -(v.last_activity.timestamp() if v.last_activity else 0),
             ),
         )
+        compact = bool(getattr(self.app, "compact", False))
         options = [
-            Option(session_row(view, now, show_project=True), id=view.session_id)
+            Option(
+                session_row(view, now, show_project=not compact, compact=compact),
+                id=view.session_id,
+            )
             for view in ordered
         ]
         if not options:
@@ -365,13 +372,14 @@ class TodoView(Widget):
     def _todo_row(self, todo, now: datetime) -> Text:
         from .format import STATE_STYLE, human_age
 
+        width = 22 if getattr(self.app, "compact", False) else 52
         row = Text(no_wrap=True, overflow="ellipsis")
         if todo.done:
             row.append(" ✓ ", style="green")
-            row.append(f"{todo.text[:52]:<52}  ", style="dim strike")
+            row.append(f"{todo.text[:width]:<{width}}  ", style="dim strike")
         else:
             row.append(" ○ ", style="bold")
-            row.append(f"{todo.text[:52]:<52}  ", style="bold")
+            row.append(f"{todo.text[:width]:<{width}}  ", style="bold")
         project = todo.project_dir.rsplit("/", 1)[-1] if todo.project_dir else ""
         row.append(f"{project:<16.16} ", style="dim cyan")
 

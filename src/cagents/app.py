@@ -39,11 +39,13 @@ from .modals import (
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .peek import PeekScreen, deep_view
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
+from .sidecar import Sidecar, nested_attach_command
 from .store import Store
 from .tmuxctl import TmuxClient
 from .views import GroupedView, KanbanView, QueueView, SelectionChanged, TodoSelected, TodoView
 
 REFRESH_SECONDS = 2.0
+COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 
 VIEW_IDS = ["grouped", "queue", "kanban", "todos"]
 
@@ -67,6 +69,7 @@ class CagentsApp(App):
         padding: 0 1;
     }
     #body.kanban #preview-pane { display: none; }
+    #body.compact #preview-pane { display: none; }
     """
 
     BINDINGS = [
@@ -98,9 +101,12 @@ class CagentsApp(App):
         tmux: TmuxClient | None = None,
         claude_dir: Path | None = None,
         claude_runner=None,
+        sidecar: Sidecar | None = None,
     ):
         super().__init__()
         self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
+        self.sidecar = sidecar if sidecar is not None else (Sidecar() if Sidecar.enabled() else None)
+        self.compact = False
         self.store = store or Store.load()
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
@@ -126,9 +132,27 @@ class CagentsApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_compact(self.size.width)
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.query_one("#grouped", GroupedView).focus_list()
+
+    def on_resize(self, event) -> None:
+        self._apply_compact(event.size.width)
+
+    def _apply_compact(self, width: int) -> None:
+        """Below ~60 columns (the collapsed sidecar rail) drop the preview
+        pane and switch rows to their dense form. States keep ticking."""
+        compact = width < COMPACT_WIDTH
+        if compact == self.compact:
+            return
+        self.compact = compact
+        try:
+            self.query_one("#body").set_class(compact, "compact")
+        except Exception:
+            return  # before compose finishes
+        for view_id in VIEW_IDS:
+            self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
 
     def check_action(self, action: str, parameters) -> bool:
         # App-level keys must not fire behind a modal (e.g. 'q' while a
@@ -235,12 +259,20 @@ class CagentsApp(App):
             return
         try:
             if view.live:
-                self._suspend_and_run(lambda: self.tmux.attach(view.tmux_name))
+                self._attach_tmux_session(view.tmux_name)
             else:
                 self._resume_dead_session(view)
         except Exception as error:  # loud, specific failure (spec §11)
             self.notify(f"Attach failed: {error}", severity="error", timeout=10)
         self.refresh_data()
+
+    def _attach_tmux_session(self, name: str) -> None:
+        """Hand off to the real CLI: full-terminal suspend normally, or the
+        right-hand pane when running as a sidecar rail."""
+        if self.sidecar is not None:
+            self.sidecar.open(nested_attach_command(self.tmux.socket, name))
+        else:
+            self._suspend_and_run(lambda: self.tmux.attach(name))
 
     def _resume_dead_session(self, view: SessionView) -> None:
         if view.missing:
@@ -264,7 +296,7 @@ class CagentsApp(App):
             session_id=view.session_id,
             claude_bin=claude_bin,
         )
-        self._suspend_and_run(lambda: self.tmux.attach(name))
+        self._attach_tmux_session(name)
 
     def _suspend_and_run(self, fn) -> None:
         from textual.app import SuspendNotSupported
@@ -324,7 +356,7 @@ class CagentsApp(App):
             self.store.link_todo_session(pending, session_id)
             self._pending_todo_link = None
         self.selected_session_id = session_id
-        self._suspend_and_run(lambda: self.tmux.attach(name))
+        self._attach_tmux_session(name)
         self.refresh_data()
 
     def action_track_session(self) -> None:
@@ -642,7 +674,7 @@ class CagentsApp(App):
         self.store.track(session_id, path, utcnow().isoformat())
         self.store.link_todo_session(todo_id, session_id)
         self.selected_session_id = session_id
-        self._suspend_and_run(lambda: self.tmux.attach(name))
+        self._attach_tmux_session(name)
         self.refresh_data()
 
     # -- diff review ------------------------------------------------------------------

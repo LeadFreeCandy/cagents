@@ -51,6 +51,8 @@ def select_session(app, session_id: str) -> None:
 
 
 class FakeTmux:
+    socket = "claude"
+
     def __init__(self):
         self.sessions: list[TmuxSession] = []
         self.panes: dict[str, str] = {}

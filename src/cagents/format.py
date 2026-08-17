@@ -58,9 +58,21 @@ def state_badge(view: SessionView) -> Text:
     return badge
 
 
-def session_row(view: SessionView, now: datetime | None = None, show_project: bool = False) -> Text:
-    """One list row: glyph, title, state, age (and optionally the project)."""
+def session_row(
+    view: SessionView,
+    now: datetime | None = None,
+    show_project: bool = False,
+    compact: bool = False,
+) -> Text:
+    """One list row: glyph, title, state, age (and optionally the project).
+    Compact form (sidecar rail): glyph, short title, age — nothing else."""
     glyph, style, label = STATE_STYLE[view.state]
+    if compact:
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(f" {glyph} ", style=style)
+        row.append(f"{_truncate(view.title, 22):<22} ", style="bold" if view.live else "")
+        row.append(f"{human_age(view.last_activity, now):>3}", style="dim")
+        return row
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append(f" {glyph} ", style=style)
     row.append(f"{_truncate(view.title, 44):<44}  ", style="bold" if view.live else "")
@@ -79,12 +91,13 @@ def session_row(view: SessionView, now: datetime | None = None, show_project: bo
     return row
 
 
-def group_header(project_dir: str, count: int) -> Text:
+def group_header(project_dir: str, count: int, compact: bool = False) -> Text:
     header = Text(no_wrap=True, overflow="ellipsis")
     name = project_dir.rsplit("/", 1)[-1] or project_dir
     header.append("▍", style="bold blue")
     header.append(f"{name} ", style="bold")
-    header.append(f"({project_dir}) ", style="dim")
+    if not compact:
+        header.append(f"({project_dir}) ", style="dim")
     header.append(f"· {count}", style="dim")
     return header
 
