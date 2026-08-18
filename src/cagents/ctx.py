@@ -64,10 +64,11 @@ def diff_popup_command(directory: str) -> str:
         "refs/remotes/origin/HEAD 2>/dev/null || echo main) HEAD 2>/dev/null || "
         "git merge-base master HEAD 2>/dev/null); "
         'if [ "$(git rev-parse HEAD 2>/dev/null)" = "$base" ]; then base=""; fi; '
-        "{ echo \"# ${PWD##*/} $(git branch --show-current) vs "
-        "${base:+$(git name-rev --name-only $base)}${base:-uncommitted}\"; "
+        'if [ -n "$base" ]; then vs=$(git name-rev --name-only "$base"); '
+        'else vs=uncommitted; fi; '
+        '{ echo "# ${PWD##*/} $(git branch --show-current) vs $vs"; '
         "git status --short; echo; "
-        "git diff --color ${base:+$base}; } | less -R"
+        'git diff --color ${base:+"$base"}; } | less -R'
     )
 
 

@@ -363,3 +363,31 @@ async def test_settings_modal_toggles_and_persists(world):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, SettingsModal)
+
+
+class TestActiveElsewhere:
+    def test_fresh_transcript_without_tmux_is_working(self, claude_dir, now):
+        # Hosted by cmux or a bare terminal: no tmux session visible, but the
+        # transcript is being written right now.
+        b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(3))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 3))
+        state, detail = derive_state(parsed, _tracked(), live=False, now=now)
+        assert state == SessionState.WORKING
+        assert "outside" in detail
+
+
+async def test_enter_refuses_duplicate_cli_for_active_elsewhere(world, claude_dir, now):
+    app, store, tmux = world
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/tmp").user("busy", ts=ts_ago(2)).write(claude_dir, mtime=now - 2)
+    store.track(sid, "/tmp", "2026-08-18T09:00:00+00:00")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        from conftest import select_session
+
+        select_session(app, sid)
+        await pilot.pause()
+        assert app.snapshot.by_id(sid).state == SessionState.WORKING
+        app.action_attach()
+        await pilot.pause()
+        assert tmux.created == []  # no duplicate claude was spawned

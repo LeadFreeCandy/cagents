@@ -170,15 +170,37 @@ class TestTmuxMapping:
         mapping = map_tmux_sessions(pairs, [_tmux(created=now - 600)])
         assert set(mapping) == {SID2}
 
-    def test_pane_in_ancestor_dir_matches(self, claude_dir: Path, now: float):
+    def test_pane_in_ancestor_dir_matches_with_content(self, claude_dir: Path, now: float):
         # `claude` launched from $HOME, session working in a project subdir.
+        # Ancestor matches must be content-verified: the pane really shows
+        # this conversation (wrapping-insensitive).
         b = TranscriptBuilder(SID1, "/home/u/projects/deep").user("a")
+        b.assistant_text("The quick brown fox refactor is complete now.")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 10))
+        tmux = _tmux(name="home", path="/home/u", created=now - 60)
+        pane = "…\n  The quick brown fox\nrefactor is complete now.\n❯ "
+        mapping = map_tmux_sessions(
+            [(_tracked(SID1, project="/home/u/projects/deep"), parsed)], [tmux],
+            pane_text_fn=lambda t: pane,
+        )
+        assert mapping[SID1].name == "home"
+
+    def test_ancestor_match_rejected_without_content(self, claude_dir: Path, now: float):
+        # Regression (found live): unrelated tmux sessions in a parent dir
+        # must NOT claim a stale transcript just because mtimes line up.
+        b = TranscriptBuilder(SID1, "/home/u/projects/deep").user("a")
+        b.assistant_text("Oculus Quest pricing estimate follows.")
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 10))
         tmux = _tmux(name="home", path="/home/u", created=now - 60)
         mapping = map_tmux_sessions(
-            [(_tracked(SID1, project="/home/u/projects/deep"), parsed)], [tmux]
+            [(_tracked(SID1, project="/home/u/projects/deep"), parsed)], [tmux],
+            pane_text_fn=lambda t: "a completely different conversation about agents",
         )
-        assert mapping[SID1].name == "home"
+        assert mapping == {}
+        # ...and with no pane text available at all, same refusal:
+        assert map_tmux_sessions(
+            [(_tracked(SID1, project="/home/u/projects/deep"), parsed)], [tmux]
+        ) == {}
 
     def test_exact_match_beats_ancestor_match(self, claude_dir: Path, now: float):
         p1 = parse_session_file(

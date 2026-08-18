@@ -152,3 +152,41 @@ The complete conversation transcripts are Claude Code sessions on the build mach
 `4e1578b7-1526-412c-98dd-2f2d574c764b`). Companion docs in this repo: `SPEC.md` (the
 product contract), `README.md` (what's implemented), `GUIDE.md` (how to drive it),
 `IDEAS.md` (judged backlog), `OPEN_QUESTIONS.md` (honest unknowns).
+
+## 9. The v2 rebuild (Aug 18)
+
+A second machine (Sonnet-driven) added 13 commits of features on `origin/main` and made
+things flakier. Rebuilt from the last-good state (`v2` branch) keeping Sonnet's three
+*verified* findings and redesigning around them:
+
+- **Socket collision is fatal** (their repro, 6/6): a claude spawned on a tmux socket
+  hosting a live claude dies instantly. v2 spawns on a private `cagents-sessions`
+  socket — but unlike their fix, still *discovers/attaches* wrapper sessions on
+  `claude` (attaching is only a client; the crash is spawn-only).
+- **The viewer pane IS the session.** Browsing points one persistent right pane at a
+  real attach (or the transcript when dead); Enter = focus; ← = a 3-state layout
+  cycle (small rail → 50/50 list → rail hidden). Preview/attach divergence is
+  impossible by construction; the internal Rich preview survives only in
+  --fullscreen where there is no tmux to embed.
+- **Ancestor-tier mapping must be content-verified** (found live, again): unrelated
+  tmux sessions in a parent dir claimed a stale transcript (mtime lined up thanks to
+  resume-touch) and Enter attached the wrong session. Tier-3 matches now require the
+  pane to actually display text from the transcript (whitespace-normalized so
+  wrapping can't break it). No match → honest "dead", never confident-wrong.
+- **"Active elsewhere"**: a transcript being written with no visible tmux host (cmux,
+  bare terminal) shows working — and Enter refuses to resume it, because resuming an
+  active conversation doubles the CLI.
+- **Global keys via a context file**: the app mirrors the selection into
+  `context.json`; tmux root bindings call `cagents-ctx shell|diff` which reads it. So
+  C-s (split shell in the worktree) and C-d (diff-vs-master popup) work from inside
+  the session. Accepted collisions, chosen by Samir: ← (layout) and C-d (Claude's
+  quit-on-empty-prompt).
+- **Deleted for leanness** (explicit audit): todos + pause/wake scripts + per-todo
+  worktrees, plugins + meta session, peek, lazygit key, split-shell list key,
+  ctrl+\\ and alt navigation, `=`, manual monitoring. Keys re-lettered: d done,
+  f fork, h handoff, w waiting.
+- **New states**: MONITORING / BACKGROUND from verified fire-and-forget ack
+  signatures ("Monitor started (task…", "running in background with ID"), reset by
+  the next human message; WAITING_EXTERNAL (w) tied to a PR, gh-polled (no push API
+  exists): comments → re-alert "github comments", merge → done "merged".
+- Orphan containers (pane 0 not cagents) are killed and rebuilt, never reattached.

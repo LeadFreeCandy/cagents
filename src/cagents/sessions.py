@@ -188,7 +188,12 @@ def derive_state(
             return (SessionState.NEEDS_INPUT, "at the prompt")
         return _finished_state(parsed, tracked)
 
-    # Not live: the CLI process is gone.
+    # Not live in any tmux we can see. If the transcript is being written
+    # RIGHT NOW, some other host (e.g. cmux, a bare terminal) is running it:
+    # that's working, not stopped — but cagents can't attach to it.
+    conversation_ts = parsed.last_timestamp.timestamp() if parsed.last_timestamp else None
+    if conversation_ts is not None and now - conversation_ts < FRESH_WRITE_SECONDS:
+        return (SessionState.WORKING, "active outside cagents' tmux")
     if parsed.pending_tool_use or parsed.last_record_role == "user":
         return (SessionState.STOPPED, "ended mid-turn")
     if parsed.last_record_role == "":
@@ -261,9 +266,24 @@ def _is_ancestor_dir(ancestor: str, descendant: str) -> bool:
     return d.startswith(a.rstrip("/") + "/")
 
 
+def _content_match(parsed: ParsedSession, pane_text: str) -> bool:
+    """Does this pane actually display this conversation? Whitespace is
+    stripped from both sides so terminal line-wrapping can't break the
+    containment check."""
+    if not pane_text:
+        return False
+    pane_norm = "".join(pane_text.split())
+    for fragment in (parsed.last_assistant_text, parsed.title):
+        frag_norm = "".join(fragment.split())[:60]
+        if len(frag_norm) >= 12 and frag_norm in pane_norm:
+            return True
+    return False
+
+
 def map_tmux_sessions(
     tracked_views: list[tuple[TrackedSession, ParsedSession | None]],
     tmux_sessions: list[TmuxSession],
+    pane_text_fn=None,
 ) -> dict[str, TmuxSession]:
     """Map Claude session id -> hosting tmux session.
 
@@ -271,7 +291,11 @@ def map_tmux_sessions(
     1. CAGENTS_SESSION_ID env var on the tmux session — exact.
     2. Pane cwd == session cwd; newest qualifying transcript claims it.
     3. Pane cwd is an *ancestor* of the session cwd — covers launching
-       `claude` from e.g. $HOME for a project deeper in the tree.
+       `claude` from e.g. $HOME for a project deeper in the tree. Because
+       a parent directory can shelter many unrelated sessions, tier 3
+       additionally requires the pane to actually display text from the
+       transcript (content verification) — mapping the WRONG live session
+       is far worse than showing a live one as dead.
 
     In tiers 2–3 a transcript only qualifies if it was written after the
     tmux session was created (otherwise it's an older conversation that
@@ -287,7 +311,9 @@ def map_tmux_sessions(
             result[tracked.session_id] = tmux
             claimed.add(tmux.key)
 
-    def match_pass(dir_matches) -> None:
+    parsed_by_id = {t.session_id: p for t, p in tracked_views}
+
+    def match_pass(dir_matches, verify_content: bool) -> None:
         for tmux in sorted(tmux_sessions, key=lambda t: t.created, reverse=True):
             if tmux.key in claimed:
                 continue
@@ -301,14 +327,19 @@ def map_tmux_sessions(
                 if parsed.mtime < tmux.created - 5:
                     continue
                 candidates.append((parsed.mtime, tracked.session_id))
-            if candidates:
-                candidates.sort(reverse=True)
-                sid = candidates[0][1]
+            candidates.sort(reverse=True)
+            for _mtime, sid in candidates:
+                if verify_content:
+                    if pane_text_fn is None:
+                        continue
+                    if not _content_match(parsed_by_id[sid], pane_text_fn(tmux)):
+                        continue
                 result[sid] = tmux
                 claimed.add(tmux.key)
+                break
 
-    match_pass(_same_dir)
-    match_pass(_is_ancestor_dir)
+    match_pass(_same_dir, verify_content=False)
+    match_pass(_is_ancestor_dir, verify_content=True)
     return result
 
 
@@ -370,15 +401,20 @@ class SessionRegistry:
                     parsed = None
             pairs.append((tracked, parsed))
 
-        mapping = map_tmux_sessions(pairs, tmux_sessions)
+        pane_cache: dict[str, str] = {}
+
+        def pane_text_of(tmux: TmuxSession) -> str:
+            if tmux.key not in pane_cache:
+                pane_cache[tmux.key] = self.tmux.capture_pane(tmux.name, socket=tmux.socket)
+            return pane_cache[tmux.key]
+
+        mapping = map_tmux_sessions(pairs, tmux_sessions, pane_text_fn=pane_text_of)
 
         views: list[SessionView] = []
         for tracked, parsed in pairs:
             tmux = mapping.get(tracked.session_id)
             live = tmux is not None
-            pane_text = ""
-            if tmux is not None:
-                pane_text = self.tmux.capture_pane(tmux.name, socket=tmux.socket)
+            pane_text = pane_text_of(tmux) if tmux is not None else ""
             state, detail = derive_state(parsed, tracked, live, pane_text, now)
             state, detail = self._debounce(tracked.session_id, state, detail)
             did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)

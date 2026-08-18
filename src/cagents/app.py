@@ -355,6 +355,16 @@ class CagentsApp(App):
             self._fullscreen_attach(view.tmux_name, view.tmux_socket or None)
 
     def _resume_dead_session(self, view: SessionView) -> None:
+        if view.state == SessionState.WORKING:
+            # Actively writing its transcript but hosted somewhere cagents
+            # can't see (cmux, a bare terminal). Resuming would put a second
+            # live CLI on one conversation — refuse.
+            self.notify(
+                "This session is running outside cagents' tmux right now — "
+                "attach from wherever it lives, or wait for it to finish.",
+                severity="warning", timeout=8,
+            )
+            return
         if view.missing:
             self.notify(
                 "This session's transcript is gone from Claude's store; nothing to resume.",
