@@ -28,6 +28,19 @@ from cagents.tmuxctl import TmuxClient
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
 
+def test_default_socket_is_not_shared_with_the_users_other_claude_usage():
+    """Regression guard for the actual root cause of "flickers/can't find
+    session, completely unusable": starting a second real `claude` process
+    on a tmux socket that already hosts a live one crashes it every time
+    (Bun ENOENT — see tmuxctl.py's module docstring and DECISIONS.md).
+    cagents' default socket must never be the conventional "claude" socket
+    a user's own wrapper might already have a live session on. Deliberately
+    a cheap static check, not a live collision repro: reproducing the crash
+    needs two real `claude` processes and is exercised manually, not as a
+    routine (and CI-flaky, environment-dependent) test."""
+    assert TmuxClient().socket != "claude"
+
+
 @pytest.fixture
 def real_tmux():
     socket = f"cagents-pytest-{uuid.uuid4().hex[:10]}"

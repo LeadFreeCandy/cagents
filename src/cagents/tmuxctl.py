@@ -1,18 +1,25 @@
-"""Talking to the user's tmux server for Claude sessions.
+"""Talking to a dedicated tmux server for Claude sessions.
 
-Claude sessions on this machine run inside tmux on a dedicated socket
-(`tmux -L claude`), created by the user's `claude` wrapper. cagents uses
-that same socket, so:
-
-- attaching from cagents hands off to the *real* live CLI, and detaching
-  never kills anything;
-- liveness is real (a tmux session exists or it doesn't), not inferred
-  from process tables.
+Attaching from cagents hands off to the *real* CLI running in a real tmux
+session, so detaching never kills anything, and liveness is real (a tmux
+session exists or it doesn't), not inferred from process tables.
 
 Sessions cagents itself creates get a CAGENTS_SESSION_ID tmux environment
 variable so they can be mapped back to a Claude session id exactly. For
 sessions created outside cagents we fall back to matching the pane's
 working directory (see sessions.py).
+
+`SOCKET` is cagents' own, private tmux server — deliberately NOT shared
+with any tmux socket the user's own `claude` wrapper might use (the
+original design ran everything on socket `claude` for exactly that
+interop). Reproduced against the real CLI (v2.1.234): starting a second
+`claude` process on a tmux socket that already hosts a live one crashes
+it immediately every time ("ENOENT: Bun could not find a file, and the
+code that produces this error is missing a better error") — 100%
+reproducible, not a rare race, and unrelated to the session id, the
+working directory, or --resume vs a fresh --session-id. An isolated
+socket never collides, even with other real claude sessions alive
+elsewhere on the machine. See DECISIONS.md.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-SOCKET = "claude"
+SOCKET = "cagents-sessions"
 _FIELD_SEP = "\x1f"
 
 _LIST_FORMAT = _FIELD_SEP.join(

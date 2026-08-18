@@ -12,11 +12,25 @@ constraint, not taste. Newest epochs last.
   widgets, CSS-ish styling, `App.suspend()` for terminal handoff, and above all a
   first-class headless test harness (`run_test()` pilot) — which is why the project has
   ~180 UI-level tests instead of prayers.
-- **tmux is the attach mechanism because the user already lives there.** Discovery:
-  `claude` is aliased to `~/.claude/bin/claude-tmux`, which runs every session on a
-  dedicated socket (`tmux -L claude`), with `cs` to attach (including from a phone).
-  So cagents never spawns/owns Claude processes: attach = `tmux attach` on that socket;
-  liveness = "does the tmux session exist". Detach can never kill work.
+- **tmux is the attach mechanism** — attach = `tmux attach` on a tmux session; liveness
+  = "does the tmux session exist", not inferred from process tables. Detach can never
+  kill work.
+- **The tmux socket is cagents' own, private one — NOT shared with the user's other
+  claude usage (revised).** Originally: `claude` is aliased to `~/.claude/bin/claude-
+  tmux`, which runs every session on a dedicated socket (`tmux -L claude`), with `cs`
+  to attach (including from a phone) — so cagents used that same socket, for free
+  interop with sessions started outside it. **Reproduced against the real CLI
+  (v2.1.234) and it's fatal**: starting a second `claude` process on a tmux socket that
+  already hosts a live one crashes the new one immediately, every single time —
+  `ENOENT: Bun could not find a file, and the code that produces this error is missing
+  a better error`. 100% reproducible (6/6, then more), unrelated to session id,
+  directory, or `--resume` vs a fresh `--session-id`; an isolated socket never
+  collides, even with other real claude sessions alive elsewhere on the machine at the
+  same time. Since the `claude-tmux` alias is commonly disabled/not in effect anyway,
+  and the crash makes creating or resuming *any* session fail outright the moment the
+  user has any other claude session open (i.e. almost always), safety wins: cagents
+  now runs its own sessions on a private socket (`cagents-sessions`), losing the
+  free-interop-with-external-sessions upside in exchange for actually working.
 - **Session data is read straight from `~/.claude/projects/*/*.jsonl`** — format
   reverse-engineered from real transcripts, not docs. Bounded head+tail reads (a 9MB
   transcript parses in ~4ms); the full-file read was rejected to protect spec §4.1
