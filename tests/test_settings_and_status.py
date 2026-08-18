@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import SID1, SID2, TranscriptBuilder
+from conftest import SID1, SID2, TranscriptBuilder, ts_ago
 from test_app import FakeTmux, render_text
 
 from cagents.app import CagentsApp
@@ -107,7 +107,7 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
         "Fixed the token check; added a regression test."
     ).write(claude_dir, mtime=now - 900)
     TranscriptBuilder(SID2, "/proj/beta").ai_title("Refactor db").user("go").assistant_tool_use(
-        "t1", "Bash", {"command": "pytest"}
+        "t1", "Bash", {"command": "pytest"}, ts=ts_ago(1)
     ).write(claude_dir, mtime=now - 1)
 
     store = Store.load(tmp_path / "state.json")

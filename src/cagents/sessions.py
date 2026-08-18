@@ -120,8 +120,11 @@ def derive_state(
 
     - live pane showing a permission/question prompt  -> NEEDS_INPUT
     - live pane showing an in-progress turn           -> WORKING
-    - transcript written to in the last few seconds,
-      while live                                      -> WORKING
+    - a conversation record (user/assistant) written
+      in the last few seconds, while live             -> WORKING
+      (the *conversation clock*, never the file mtime: merely resuming or
+      attaching a session touches the file without appending anything, and
+      must not read as "working")
     - live with an unanswered tool call               -> NEEDS_INPUT
       (tool_use recorded, no result, no fresh writes: almost always a
       permission prompt; a genuinely long-running quiet tool shows its
@@ -147,7 +150,10 @@ def derive_state(
                 return (SessionState.NEEDS_INPUT, detail)
             if pane_shows_working(pane_text):
                 return (SessionState.WORKING, _working_detail(parsed))
-        if now - parsed.mtime < FRESH_WRITE_SECONDS:
+        conversation_ts = (
+            parsed.last_timestamp.timestamp() if parsed.last_timestamp else None
+        )
+        if conversation_ts is not None and now - conversation_ts < FRESH_WRITE_SECONDS:
             return (SessionState.WORKING, _working_detail(parsed))
         if parsed.pending_tool_use:
             detail = "waiting on you"
@@ -157,6 +163,9 @@ def derive_state(
         if parsed.last_record_role == "user":
             # A user message with no reply and no writes: waiting to start,
             # or the human is mid-conversation at the prompt.
+            return (SessionState.NEEDS_INPUT, "at the prompt")
+        if parsed.last_record_role == "":
+            # A live session with no conversation yet: it's waiting for you.
             return (SessionState.NEEDS_INPUT, "at the prompt")
         return _finished_state(parsed, tracked)
 

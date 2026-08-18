@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import SID1, SID2, SID3, TranscriptBuilder
+from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
 
 from cagents.claude_data import parse_session_file
 from cagents.sessions import (
@@ -45,7 +45,7 @@ class TestDeriveState:
         assert "missing" in detail
 
     def test_live_fresh_writes_is_working(self, claude_dir: Path, now: float):
-        b = TranscriptBuilder(SID1, "/proj/alpha").user("go")
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.WORKING
@@ -114,6 +114,23 @@ class TestDeriveState:
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
         state, _ = derive_state(parsed, _tracked(), live=False, now=now)
         assert state == SessionState.NEEDS_REVIEW
+
+    def test_resume_touch_is_not_working(self, claude_dir: Path, now: float):
+        # THE bug: entering a conversation and leaving it touches the file
+        # mtime without appending records. Fresh mtime + old conversation
+        # must not read as "working".
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("fix it").assistant_text("done", ts="2026-08-17T10:00:00.000Z")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 1))  # just touched
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_empty_live_session_is_at_the_prompt(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha").ai_title("fresh")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 1))
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_INPUT
+        assert detail == "at the prompt"
 
     def test_live_at_prompt_no_reply_yet(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha").user("hello?")
@@ -219,9 +236,9 @@ class TestRegistry:
         TranscriptBuilder(SID1, "/proj/alpha").ai_title("Alpha work").user("go").assistant_text(
             "done"
         ).write(claude_dir, mtime=now - 400)
-        TranscriptBuilder(SID2, "/proj/beta").ai_title("Beta work").user("go").write(
-            claude_dir, mtime=now - 1
-        )
+        TranscriptBuilder(SID2, "/proj/beta").ai_title("Beta work").user(
+            "go", ts=ts_ago(1)
+        ).write(claude_dir, mtime=now - 1)
 
         tmux = FakeTmux([_tmux(name="beta", path="/proj/beta", created=now - 30)])
         registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)

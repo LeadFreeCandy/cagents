@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import SID1, SID2, SID3, TranscriptBuilder
+from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
 
 from cagents.app import CagentsApp
 from cagents.sessions import SessionRegistry, SessionState
@@ -96,7 +96,7 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
         "done with auth"
     ).write(claude_dir, mtime=now - 900)
     TranscriptBuilder(SID2, "/proj/alpha").ai_title("Alpha: add tests").user("go").assistant_tool_use(
-        "t1", "Bash", {"command": "pytest"}
+        "t1", "Bash", {"command": "pytest"}, ts=ts_ago(2)
     ).write(claude_dir, mtime=now - 2)
     TranscriptBuilder(SID3, "/proj/beta").ai_title("Beta: refactor").user("go").assistant_text(
         "refactored"

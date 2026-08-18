@@ -158,3 +158,14 @@ def now() -> float:
 SID1 = "11111111-1111-1111-1111-111111111111"
 SID2 = "22222222-2222-2222-2222-222222222222"
 SID3 = "33333333-3333-3333-3333-333333333333"
+
+
+def ts_ago(seconds: float) -> str:
+    """ISO timestamp `seconds` ago — for tests that mean 'recent activity'.
+    (State freshness runs on record timestamps, not file mtime.)"""
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+
+    return _dt.fromtimestamp(_time.time() - seconds, tz=_tz.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
