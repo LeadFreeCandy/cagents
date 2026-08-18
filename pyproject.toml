@@ -15,6 +15,7 @@ dev = [
 
 [project.scripts]
 cagents = "cagents.__main__:main"
+cagents-ctx = "cagents.ctx:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
+from conftest import SID1, SID2, SID3, FakeTmux, TranscriptBuilder, ts_ago
 
 from cagents.claude_data import parse_session_file
 from cagents.sessions import (
@@ -213,20 +213,6 @@ class TestTmuxMapping:
         assert mapping[SID1].name != mapping[SID2].name
 
 
-class FakeTmux:
-    """Test double for TmuxClient."""
-
-    def __init__(self, sessions: list[TmuxSession] | None = None, panes: dict[str, str] | None = None):
-        self.sessions = sessions or []
-        self.panes = panes or {}
-
-    def list_sessions(self):
-        return self.sessions
-
-    def capture_pane(self, name: str, lines: int = 40) -> str:
-        return self.panes.get(name, "")
-
-
 class TestRegistry:
     def test_refresh_builds_views(self, claude_dir: Path, tmp_path: Path, now: float):
         store = Store.load(tmp_path / "state.json")
@@ -240,7 +226,8 @@ class TestRegistry:
             "go", ts=ts_ago(1)
         ).write(claude_dir, mtime=now - 1)
 
-        tmux = FakeTmux([_tmux(name="beta", path="/proj/beta", created=now - 30)])
+        tmux = FakeTmux()
+        tmux.sessions.append(_tmux(name="beta", path="/proj/beta", created=now - 30))
         registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
         snap = registry.refresh(now=now)
 
@@ -291,10 +278,9 @@ class TestRegistry:
         TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_tool_use(
             "t1", "Bash", {"command": "make deploy"}
         ).write(claude_dir, mtime=now - 3)
-        tmux = FakeTmux(
-            [_tmux(name="alpha", path="/proj/alpha", created=now - 60)],
-            panes={"alpha": "Do you want to proceed?\n❯ 1. Yes"},
-        )
+        tmux = FakeTmux()
+        tmux.sessions.append(_tmux(name="alpha", path="/proj/alpha", created=now - 60))
+        tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
         registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
         snap = registry.refresh(now=now)
         assert snap.views[0].state == SessionState.NEEDS_INPUT

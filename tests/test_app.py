@@ -1,7 +1,9 @@
 """End-to-end UI tests driven through Textual's pilot.
 
 A fake tmux client and a temp Claude store give the app a fully
-controlled world; no real tmux server or ~/.claude is touched.
+controlled world; no real tmux server or ~/.claude is touched. These run
+with sidecar=None (fullscreen mode) unless a test injects a Sidecar —
+sidecar-specific behavior lives in test_sidecar.py.
 """
 
 from __future__ import annotations
@@ -9,84 +11,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
+from conftest import (
+    SID1,
+    SID2,
+    SID3,
+    FakeTmux,
+    TranscriptBuilder,
+    select_session,
+    ts_ago,
+    widget_text,
+)
 
 from cagents.app import CagentsApp
 from cagents.sessions import SessionRegistry, SessionState
 from cagents.store import Store
 from cagents.tmuxctl import TmuxSession
-from cagents.views import GroupedView, KanbanView, QueueView, SessionList
-
-
-def widget_text(app, selector: str) -> str:
-    """Plain text currently shown by a Static widget."""
-    return render_text(app.query_one(selector).content)
-
-
-def render_text(content) -> str:
-    if hasattr(content, "plain"):
-        return content.plain
-    import io
-
-    from rich.console import Console
-
-    buffer = io.StringIO()
-    console = Console(width=200, file=buffer, force_terminal=False)
-    console.print(content)
-    return buffer.getvalue()
-
-
-def select_session(app, session_id: str) -> None:
-    """Select a session the way a user would: by moving the list highlight.
-
-    (Assigning app.selected_session_id directly is not enough — the next
-    refresh re-asserts the list's real highlight, by design.)
-    """
-    session_list = app.query_one(f"#{app.active_view_id}-list", SessionList)
-    for i in range(session_list.option_count):
-        if session_list.get_option_at_index(i).id == session_id:
-            session_list.highlighted = i
-            return
-    raise AssertionError(f"session {session_id} not in {app.active_view_id} list")
-
-
-class FakeTmux:
-    socket = "claude"
-
-    def __init__(self):
-        self.sessions: list[TmuxSession] = []
-        self.panes: dict[str, str] = {}
-        self.attached_to: list[str] = []
-        self.created: list[tuple[str, list[str], str]] = []
-
-    def available(self) -> bool:
-        return True
-
-    def list_sessions(self):
-        return self.sessions
-
-    def capture_pane(self, name: str, lines: int = 40) -> str:
-        return self.panes.get(name, "")
-
-    def attach(self, name: str) -> int:
-        self.attached_to.append(name)
-        return 0
-
-    def new_claude_session(self, directory, claude_args, session_id="", claude_bin=""):
-        name = Path(directory).name or "session"
-        self.created.append((directory, claude_args, session_id))
-        self.sessions.append(
-            TmuxSession(
-                name=name,
-                created=1e12,
-                activity=1e12,
-                attached=False,
-                pane_pid=1,
-                pane_path=directory,
-                cagents_session_id=session_id,
-            )
-        )
-        return name
+from cagents.views import KanbanView, SessionList
 
 
 @pytest.fixture
@@ -103,19 +43,15 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
     ).write(claude_dir, mtime=now - 4000)
 
     store = Store.load(tmp_path / "state.json")
-    store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
-    store.track(SID2, "/proj/alpha", "2026-08-17T09:10:00+00:00")
-    store.track(SID3, "/proj/beta", "2026-08-17T08:00:00+00:00")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    store.track(SID2, "/proj/alpha", "2026-08-18T09:10:00+00:00")
+    store.track(SID3, "/proj/beta", "2026-08-18T08:00:00+00:00")
 
     tmux = FakeTmux()
     tmux.sessions.append(
         TmuxSession(
-            name="alpha",
-            created=now - 300,
-            activity=now,
-            attached=False,
-            pane_pid=42,
-            pane_path="/proj/alpha",
+            name="alpha", created=now - 300, activity=now, attached=False,
+            pane_pid=42, pane_path="/proj/alpha", socket="claude",
         )
     )
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
@@ -127,18 +63,18 @@ async def test_startup_shows_grouped_sessions(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
+        # Always starts on the grouped view, no persisted view state exists.
+        assert app.active_view_id == "grouped"
         assert app.snapshot.views and len(app.snapshot.views) == 3
-        # Live one is WORKING (fresh writes), others finished -> NEEDS_REVIEW
         by_id = {v.session_id: v for v in app.snapshot.views}
         assert by_id[SID2].state == SessionState.WORKING
         assert by_id[SID2].live is True
+        assert by_id[SID2].tmux_socket == "claude"  # discovered on the wrapper socket
         assert by_id[SID1].state == SessionState.NEEDS_REVIEW
         assert by_id[SID3].state == SessionState.NEEDS_REVIEW
 
-        # Grouped list: 2 group headers + 3 rows
         grouped = app.query_one("#grouped-list", SessionList)
-        assert grouped.option_count == 5
-        # Summary line shows counts
+        assert grouped.option_count == 5  # 2 group headers + 3 rows
         summary = widget_text(app, "#summary")
         assert "3 sessions" in summary
         assert "1 working" in summary
@@ -153,10 +89,10 @@ async def test_navigation_updates_preview(world):
         await pilot.press("j")
         await pilot.pause()
         assert app.selected_session_id != first
-        assert widget_text(app, "#preview-content")  # preview renders the selection
+        assert widget_text(app, "#preview-content")  # fullscreen mode renders internally
 
 
-async def test_view_switching(world):
+async def test_view_switching_cycles_three_views(world):
     app, *_ = world
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
@@ -164,14 +100,10 @@ async def test_view_switching(world):
         await pilot.press("2")
         await pilot.pause()
         assert app.active_view_id == "queue"
-        queue = app.query_one("#queue-list", SessionList)
-        assert queue.option_count == 3
+        assert app.query_one("#queue-list", SessionList).option_count == 3
         await pilot.press("3")
         await pilot.pause()
         assert app.active_view_id == "kanban"
-        await pilot.press("tab")
-        await pilot.pause()
-        assert app.active_view_id == "todos"
         await pilot.press("tab")
         await pilot.pause()
         assert app.active_view_id == "grouped"
@@ -185,39 +117,41 @@ async def test_queue_orders_by_attention(world):
         await pilot.press("2")
         await pilot.pause()
         queue = app.query_one("#queue-list", SessionList)
-        # SID2 (needs input via pane prompt) must be first
-        assert queue.get_option_at_index(0).id == SID2
-        by_id = {v.session_id: v for v in app.snapshot.views}
-        assert by_id[SID2].state == SessionState.NEEDS_INPUT
+        assert queue.get_option_at_index(0).id == SID2  # needs input first
+        assert app.snapshot.by_id(SID2).state == SessionState.NEEDS_INPUT
 
 
-async def test_kanban_columns_populated(world):
+async def test_kanban_columns_and_arrow_navigation(world):
     app, *_ = world
     async with app.run_test(size=(160, 45)) as pilot:
         await pilot.pause()
         await pilot.press("3")
         await pilot.pause()
-        kanban = app.query_one("#kanban", KanbanView)
         working = app.query_one("#kb-working", SessionList)
         review = app.query_one("#kb-review", SessionList)
-        needs_you = app.query_one("#kb-needs-you", SessionList)
         assert working.option_count == 1
         assert review.option_count == 2
-        assert needs_you.option_count == 0
+        kanban = app.query_one("#kanban", KanbanView)
+        start = kanban.active_column
+        await pilot.press("right")
+        await pilot.pause()
+        assert kanban.active_column != start  # arrows move between columns
 
 
-async def test_attach_live_session(world):
+async def test_attach_live_session_fullscreen(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        select_session(app, SID2)  # the live one
+        select_session(app, SID2)
         await pilot.pause()
         app.action_attach()
         await pilot.pause()
-        assert tmux.attached_to == ["alpha"]
+        # Attached on the session's own socket, statusline shown+restored.
+        assert tmux.attached_to == [("alpha", "claude")]
+        assert "status-on:alpha" in tmux.log and "status-off:alpha" in tmux.log
 
 
-async def test_attach_dead_session_resumes_in_tmux(world):
+async def test_attach_dead_session_resumes_on_private_socket(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
@@ -228,8 +162,6 @@ async def test_attach_dead_session_resumes_in_tmux(world):
         await pilot.pause()
         assert tmux.attached_to == []
 
-        # Point the project somewhere real and retry (mutate the *current*
-        # snapshot: a background refresh may have replaced the old one)
         store.sessions[SID3].project_dir = "/tmp"
         view = app.snapshot.by_id(SID3)
         if view.parsed:
@@ -237,35 +169,34 @@ async def test_attach_dead_session_resumes_in_tmux(world):
         app.action_attach()
         await pilot.pause()
         assert tmux.created and tmux.created[-1][1] == ["--resume", SID3]
-        assert tmux.attached_to  # attached to the fresh tmux session
+        # Resume spawns on the PRIVATE socket (spawning next to a live
+        # claude on a shared socket crashes it).
+        assert tmux.attached_to[-1][1] == "cagents-sessions"
 
 
-async def test_mark_reviewed_flow(world):
+async def test_done_key_flow(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         select_session(app, SID1)  # needs review
         await pilot.pause()
-        await pilot.press("r")
+        await pilot.press("d")
         await pilot.pause(0.1)
         assert store.sessions[SID1].reviewed_at != ""
-        view = app.snapshot.by_id(SID1)
-        assert view.state == SessionState.DONE
-
-        # Toggle back
-        await pilot.press("r")
+        assert app.snapshot.by_id(SID1).state == SessionState.DONE
+        await pilot.press("d")  # un-done
         await pilot.pause(0.1)
         assert store.sessions[SID1].reviewed_at == ""
         assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
 
 
-async def test_reviewing_working_session_refuses(world):
+async def test_done_refuses_while_working(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         select_session(app, SID2)  # working
         await pilot.pause()
-        await pilot.press("r")
+        await pilot.press("d")
         await pilot.pause(0.1)
         assert store.sessions[SID2].reviewed_at == ""
 
@@ -295,13 +226,11 @@ async def test_untrack_with_confirm(world):
         await pilot.press("n")  # decline
         await pilot.pause(0.1)
         assert SID3 in store.sessions
-
         await pilot.press("x")
         await pilot.pause()
-        await pilot.press("y")  # confirm
+        await pilot.press("y")
         await pilot.pause(0.1)
         assert SID3 not in store.sessions
-        assert len(app.snapshot.views) == 2
 
 
 async def test_app_keys_do_not_fire_inside_modal(world):
@@ -310,10 +239,9 @@ async def test_app_keys_do_not_fire_inside_modal(world):
         await pilot.pause()
         select_session(app, SID1)
         await pilot.pause()
-        await pilot.press("e")  # open note modal
+        await pilot.press("e")
         await pilot.pause()
-        # 'q' typed into the note input must not quit the app
-        await pilot.press("q")
+        await pilot.press("q")  # typed into the note input, must not quit
         await pilot.pause()
         assert app.is_running
         await pilot.press("escape")
@@ -321,26 +249,41 @@ async def test_app_keys_do_not_fire_inside_modal(world):
         assert store.sessions[SID1].note == ""
 
 
-async def test_new_session_modal_creates_and_tracks(world, tmp_path):
+async def test_new_session_defaults_to_launch_cwd(world, tmp_path, monkeypatch):
     app, store, tmux, _ = world
-    project = tmp_path / "newproj"
-    project.mkdir()
+    launch_dir = tmp_path / "launchhere"
+    launch_dir.mkdir()
+    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(launch_dir))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)  # selection must NOT influence the default
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        dir_input = app.screen.query_one("#dir")
+        assert dir_input.value == str(launch_dir)
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        directory, args, sid = tmux.created[-1]
+        assert directory == str(launch_dir)
+        assert args[0] == "--session-id"
+        assert sid in store.sessions
+
+
+async def test_new_session_dir_tab_completion(world, tmp_path, monkeypatch):
+    app, store, tmux, _ = world
+    base = tmp_path / "complete"
+    (base / "projects-here").mkdir(parents=True)
+    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(tmp_path))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.press("n")
         await pilot.pause()
         dir_input = app.screen.query_one("#dir")
-        dir_input.value = str(project)
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-        # A new session was created in tmux with a generated session id...
-        assert tmux.created
-        directory, args, sid = tmux.created[-1]
-        assert directory == str(project)
-        assert args[0] == "--session-id"
-        # ...tracked in the store, and attached
-        assert sid in store.sessions
-        assert tmux.attached_to
+        dir_input.value = str(base / "proj")
+        await pilot.press("tab")
+        await pilot.pause()
+        assert dir_input.value == str(base / "projects-here") + "/"
 
 
 async def test_track_modal_lists_untracked(world, claude_dir, now):
@@ -352,7 +295,7 @@ async def test_track_modal_lists_untracked(world, claude_dir, now):
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.press("a")
-        await pilot.pause(0.2)  # worker loads candidates
+        await pilot.pause(0.2)
         from cagents.modals import TrackModal
 
         assert isinstance(app.screen, TrackModal)
@@ -365,7 +308,7 @@ async def test_track_modal_lists_untracked(world, claude_dir, now):
 
 
 async def test_selection_survives_refresh(world):
-    app, store, tmux, _ = world
+    app, *_ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.press("j")

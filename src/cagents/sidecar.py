@@ -1,14 +1,22 @@
-"""Sidecar mode: cagents as a persistent left rail.
+"""Sidecar: cagents as a rail beside one persistent viewer pane.
 
-When cagents runs inside a tmux container (the `cagents-shell` script,
-which sets CAGENTS_SIDECAR=1), attaching stops meaning "hand over the
-whole terminal". Instead the session opens in a pane to the right — a
-nested attach onto the user's existing `claude` socket — and cagents
-stays alive on the left, collapsed to a slim rail, states still ticking.
+The design invariant that makes everything fall out: **the right pane is
+always just a tmux client (or a static transcript render) — never a
+re-implementation.** Browsing shows the highlighted session there (a real
+attach, pixel-identical because it IS Claude Code); Enter merely moves
+focus into it; ← moves focus back. Preview and attach cannot disagree
+because they are the same thing.
 
-Focus movement and rail width are the container's job (tmux hooks in
-cagents-shell); this module only opens/replaces the right pane. All tmux
-calls here talk to the *outer* server via $TMUX, never the claude socket.
+Layout is a 3-state cycle on ←:
+
+    SMALL (session focused, 34-col rail)
+      ← -> WIDE   (50/50, rail focused — "back to the list")
+      ← -> HIDDEN (rail zoomed away, session full-width)   [app-driven]
+      ← -> SMALL  ...
+
+The SMALL->WIDE and HIDDEN->SMALL steps are pure tmux (root binding); the
+WIDE->HIDDEN step is the app's (← reaches cagents when the rail has
+focus, so views like kanban can consume it first).
 """
 
 from __future__ import annotations
@@ -24,7 +32,8 @@ class Sidecar:
         # runner: (args: list[str]) -> str, injectable for tests.
         self._run = runner or _outer_tmux
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
-        self.pane_id: str = ""  # the session pane we manage on the right
+        self.pane_id: str = ""  # the viewer pane on the right
+        self.current_command: str = ""  # what the viewer currently runs
 
     @staticmethod
     def enabled() -> bool:
@@ -35,9 +44,14 @@ class Sidecar:
             return False
         return bool(os.environ.get("TMUX"))
 
-    def open(self, shell_command: str) -> None:
-        """Run `shell_command` in the right pane (creating or replacing it),
-        collapse the rail, and move focus to the session."""
+    # -- the viewer pane -------------------------------------------------------
+
+    def show_viewer(self, shell_command: str) -> None:
+        """Point the right pane at `shell_command` (live attach or static
+        preview). Never steals focus and never resizes — browsing must not
+        disturb the layout."""
+        if shell_command == self.current_command and self._pane_alive():
+            return
         if self.pane_id and self._pane_alive():
             self._run(["respawn-pane", "-k", "-t", self.pane_id, shell_command])
         else:
@@ -46,30 +60,37 @@ class Sidecar:
                  "-t", self.own_pane, shell_command]
             )
             self.pane_id = out.strip()
+            if self.own_pane:
+                # Fresh split: the rail keeps its browsing share.
+                self._run(["resize-pane", "-t", self.own_pane, "-x", "50%"])
+        self.current_command = shell_command
+
+    def focus_session(self) -> None:
+        if self.pane_id:
+            self._run(["select-pane", "-t", self.pane_id])
+
+    def focus_rail(self) -> None:
         if self.own_pane:
-            self._run(["resize-pane", "-t", self.own_pane, "-x", str(COLLAPSED_WIDTH)])
-        self._run(["select-pane", "-t", self.pane_id])
+            self._run(["select-pane", "-t", self.own_pane])
+
+    def hide_rail(self) -> None:
+        """WIDE -> HIDDEN: zoom the viewer to full width and focus it."""
+        if self.pane_id and self._pane_alive():
+            self._run(["select-pane", "-t", self.pane_id])
+            self._run(["resize-pane", "-Z", "-t", self.pane_id])
 
     def split_shell(self, directory: str) -> None:
-        """A throwaway shell pane below the session (or the rail), cwd'd
-        into the worktree/project. Exits with the shell."""
+        """A throwaway shell pane below the viewer, cwd'd into the
+        worktree/project. Exits with the shell."""
         target = self.pane_id if (self.pane_id and self._pane_alive()) else self.own_pane
         args = ["split-window", "-v", "-l", "12", "-c", directory]
         if target:
             args += ["-t", target]
         self._run(args)
 
-    def open_command(self, shell_command: str) -> None:
-        """Run an arbitrary full-screen tool (e.g. lazygit) in the right
-        pane — same slot the session uses; ← closes it the same way."""
-        self.open(shell_command)
-
-    def expand(self, width: str = "50%") -> None:
-        """Grow the rail back out (used when no container hook will)."""
-        if self.own_pane:
-            self._run(["resize-pane", "-t", self.own_pane, "-x", width])
-
     def _pane_alive(self) -> bool:
+        if not self.pane_id:
+            return False
         try:
             out = self._run(["list-panes", "-F", "#{pane_id}"])
         except RuntimeError:
@@ -86,10 +107,32 @@ def _outer_tmux(args: list[str]) -> str:
 
 
 def nested_attach_command(socket: str, session_name: str) -> str:
-    """The command the right pane runs: attach to the claude-socket session,
-    with $TMUX cleared so tmux allows the (deliberate) nesting."""
+    """The command the viewer pane runs for a live session: attach to it on
+    its own socket, with $TMUX cleared so tmux allows the nesting."""
     safe = session_name.replace("'", "'\\''")
     return f"env -u TMUX tmux -L {socket} attach-session -t '={safe}'"
+
+
+def program_invocation(extra_args: list[str]) -> list[str]:
+    """argv that re-runs this cagents installation with extra_args."""
+    import sys
+
+    prog = os.path.abspath(sys.argv[0])
+    if prog.endswith("__main__.py"):
+        return [sys.executable, "-m", "cagents", *extra_args]
+    return [prog, *extra_args]
+
+
+def preview_command(session_id: str, store_path: str, claude_dir: str = "") -> str:
+    """The viewer command for a dead session: print its transcript (real
+    parse, ANSI colors) and hold the pane. Scrolling comes free from the
+    outer tmux (wheel enters copy-mode over a quiet pane)."""
+    import shlex
+
+    args = ["--preview-session", session_id, "--store", store_path]
+    if claude_dir:
+        args += ["--claude-dir", claude_dir]
+    return " ".join(shlex.quote(p) for p in program_invocation(args))
 
 
 # ------------------------------------------------------- the container --
@@ -104,22 +147,34 @@ _FOCUS_HOOK = (
     f"'resize-pane -t :.0 -x {COLLAPSED_WIDTH}'"
 )
 
+# ← from inside the session pane: HIDDEN -> SMALL (unzoom, slim rail,
+# stay in the session) or SMALL -> WIDE (focus the rail; the hook widens
+# it). From the rail, ← passes through to the app (kanban columns, or the
+# WIDE -> HIDDEN step).
+_LEFT_CYCLE = [
+    "bind", "-n", "Left",
+    "if", "-F", "#{==:#{pane_index},0}",
+    "send-keys Left",
+    "if -F '#{window_zoomed_flag}' "
+    "'resize-pane -Z -t :.1 ; select-pane -t :.1' "
+    "'select-pane -t :.0'",
+]
+
 
 def container_setup_commands() -> list[list[str]]:
     """tmux commands that shape the container. Esc is deliberately NOT
     bound — inside a session it is Claude's interrupt key."""
     return [
         ["set", "-g", "escape-time", "10"],  # keep Esc snappy for Claude
-        ["set", "-g", "mouse", "on"],  # click a pane to focus it
+        ["set", "-g", "mouse", "on"],  # click to focus; wheel scrolls the hovered pane
         # A slim statusline under everything showing the cagents keys.
         ["set", "-g", "status", "on"],
         ["set", "-g", "status-position", "bottom"],
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right",
-         " ← back · ctrl+\\ toggle · t shell · V diff · = expand "],
-        ["set", "-g", "status-right-length", "70"],
+        ["set", "-g", "status-right", " ← layout · C-s shell · C-d diff "],
+        ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
         ["set", "-g", "focus-events", "on"],
@@ -127,39 +182,17 @@ def container_setup_commands() -> list[list[str]]:
         # after-select-pane fires for keys AND mouse clicks (pane-focus-in
         # would need terminal focus reporting, which many terminals lack).
         ["set-hook", "-g", "after-select-pane", _FOCUS_HOOK],
-        # Back to the list / back to the session. M-q needs the terminal to
-        # send Option/Alt as Meta; C-\\ works everywhere. The toggle goes
-        # through select-pane (not last-pane) so the resize hook fires.
-        ["bind", "-n", "M-q", "select-pane", "-t", ":.0"],
-        ["bind", "-n", "M-w", "select-pane", "-t", ":.1"],
-        ["bind", "-n", "C-\\",
-         "if", "-F", "#{==:#{pane_index},0}",
-         "select-pane -t :.1", "select-pane -t :.0"],
     ]
-
-
-# Left-arrow capture: inside a session, Left closes the pane (the session
-# keeps running in the background) and lands you back on the list. In the
-# rail pane, Left passes through to cagents untouched. The trade-off: while
-# the setting is on, Left no longer moves the cursor when editing text in
-# the Claude prompt — Claude's own empty-prompt Left (the agents panel) is
-# what it replaces.
-_LEFT_CAPTURE = [
-    "bind", "-n", "Left",
-    "if", "-F", "#{==:#{pane_index},0}",
-    "send-keys Left", "kill-pane -t :.1",
-]
 
 
 def left_capture_commands(enable: bool) -> list[list[str]]:
     if enable:
-        return [_LEFT_CAPTURE]
+        return [_LEFT_CYCLE]
     return [["unbind", "-n", "Left"]]
 
 
 def apply_left_capture(enable: bool, runner=None) -> None:
-    """Set/unset the Left binding on the enclosing container server. Only
-    meaningful inside the container (callers check CAGENTS_SIDECAR)."""
+    """Set/unset the ← layout binding on the enclosing container server."""
     run = runner or _outer_tmux
     for command in left_capture_commands(enable):
         try:
@@ -169,23 +202,59 @@ def apply_left_capture(enable: bool, runner=None) -> None:
                 raise  # failing to bind is worth surfacing; unbind noise isn't
 
 
+def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
+    """C-s (shell in the session's dir) and C-d (diff vs master popup),
+    available regardless of which pane has focus."""
+    import shlex
+
+    prog = shlex.quote(ctx_prog)
+    ctx = shlex.quote(context_path)
+    return [
+        ["bind", "-n", "C-s", "run-shell", "-b", f"{prog} shell --context {ctx}"],
+        ["bind", "-n", "C-d", "run-shell", "-b", f"{prog} diff --context {ctx}"],
+    ]
+
+
+def apply_ctx_binds(ctx_prog: str, context_path: str, runner=None) -> None:
+    run = runner or _outer_tmux
+    for command in ctx_bind_commands(ctx_prog, context_path):
+        run(command)
+
+
 def self_command(argv: list[str]) -> str:
     """The shell command that re-runs this cagents with the same arguments
     inside the container pane."""
     import shlex
-    import sys
 
-    prog = os.path.abspath(sys.argv[0])
-    if prog.endswith("__main__.py"):
-        parts = [sys.executable, "-m", "cagents", *argv]
-    else:
-        parts = [prog, *argv]
-    return "CAGENTS_SIDECAR=1 " + " ".join(shlex.quote(p) for p in parts)
+    parts = program_invocation(argv)
+    launch_cwd = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
+    return (
+        f"CAGENTS_SIDECAR=1 CAGENTS_LAUNCH_CWD={shlex.quote(launch_cwd)} "
+        + " ".join(shlex.quote(p) for p in parts)
+    )
+
+
+def _container_is_healthy(tmux: list[str]) -> bool:
+    """An existing container session only counts if pane 0 still runs the
+    cagents app. Otherwise it's an orphan (the app died, a session pane got
+    renumbered into slot 0) and reattaching would trap the user in it."""
+    proc = subprocess.run(
+        [*tmux, "list-panes", "-t", f"={CONTAINER_SESSION}",
+         "-F", "#{pane_index}\x1f#{pane_current_command}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        index, _, command = line.partition("\x1f")
+        if index == "0":
+            return "python" in command.lower() or "cagents" in command.lower()
+    return False
 
 
 def bootstrap_container(argv: list[str]) -> "None":
     """Wrap this invocation in the persistent container: cagents in pane 0,
-    sessions opening to the right. Replaces the current process with
+    the viewer to its right. Replaces the current process with
     `tmux attach` — never returns."""
     import shutil
 
@@ -193,6 +262,13 @@ def bootstrap_container(argv: list[str]) -> "None":
     has = subprocess.run(
         [*tmux, "has-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
     )
+    if has.returncode == 0 and not _container_is_healthy(tmux):
+        subprocess.run(
+            [*tmux, "kill-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
+        )
+        has = subprocess.run(
+            [*tmux, "has-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
+        )
     if has.returncode != 0:
         size = shutil.get_terminal_size()
         subprocess.run(

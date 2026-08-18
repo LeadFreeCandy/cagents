@@ -116,6 +116,13 @@ class ParsedSession:
     truncated: bool = False  # tail parse did not cover the whole file
     # First line of the newest assistant text — "what the agent last did/said".
     last_assistant_text: str = ""
+    # Fire-and-forget acks (verified against real transcripts): Claude's
+    # Monitor tool and backgrounded commands resolve IMMEDIATELY with a
+    # distinctive tool_result, then the turn just ends — so an idle prompt
+    # right after one is "watching"/"running things", not "needs you".
+    # Reset whenever the human says something new.
+    monitor_active: bool = False
+    background_active: bool = False
     # Derived extras, all read straight from records Claude already writes:
     links: list[Link] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)  # ordered, deduped
@@ -147,6 +154,18 @@ def _summarize_tool_input(name: str, tool_input: object) -> str:
         value = tool_input.get(key)
         if isinstance(value, str) and value.strip():
             return _first_line(value, 120)
+    return ""
+
+
+def _result_text(block: dict) -> str:
+    """Flatten a tool_result's content to text (string or block list)."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+        )
     return ""
 
 
@@ -216,6 +235,7 @@ def parse_session_file(
     last_prompt = ""
     seen_links: set[str] = set()
     seen_files: set[str] = set()
+    background_tool_ids: set[str] = set()  # tool_use ids with run_in_background
 
     for line in lines:
         line = line.strip()
@@ -302,13 +322,24 @@ def parse_session_file(
                 if btype == "tool_result":
                     tool_id = block.get("tool_use_id")
                     if isinstance(tool_id, str):
-                        open_tool_uses.pop(tool_id, None)
+                        name = open_tool_uses.pop(tool_id, "")
+                        ack = _result_text(block)
+                        if name == "Monitor" and ack.startswith("Monitor started"):
+                            parsed.monitor_active = True
+                        if (
+                            tool_id in background_tool_ids
+                            or "running in background with ID" in ack
+                        ):
+                            parsed.background_active = True
                 elif btype == "text":
                     text = block.get("text", "")
                     if isinstance(text, str) and text.strip() and not _SYSTEMISH_USER.match(text):
                         if not fallback_title:
                             fallback_title = _first_line(text, 80)
                         preview.append(PreviewItem("user", text.strip(), ts))
+                        # A fresh human instruction supersedes old watches.
+                        parsed.monitor_active = False
+                        parsed.background_active = False
             continue
 
         # assistant
@@ -339,6 +370,12 @@ def parse_session_file(
                 if isinstance(tool_id, str):
                     open_tool_uses[tool_id] = name
                 tool_input = block.get("input")
+                if (
+                    isinstance(tool_input, dict)
+                    and tool_input.get("run_in_background")
+                    and isinstance(tool_id, str)
+                ):
+                    background_tool_ids.add(tool_id)
                 path_key = _FILE_TOOLS.get(name)
                 if path_key and isinstance(tool_input, dict):
                     file_path = tool_input.get(path_key)

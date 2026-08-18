@@ -1,9 +1,9 @@
-"""Git operations cagents needs: worktrees for todos, diffs for review,
-and pulling PR review comments via `gh`.
+"""Git operations cagents needs: worktree diffs for review, and PR
+lookup/status via `gh`.
 
 Everything here is deliberately shallow — plain `git`/`gh` subprocesses,
-loud failures (RuntimeError with the tool's own stderr), no state. cagents
-never mutates a repo except for the two explicit worktree operations.
+loud failures (GitError with the tool's own stderr), no state, and strictly
+read-only: cagents never mutates a repository.
 """
 
 from __future__ import annotations
@@ -63,36 +63,6 @@ def default_branch(directory: str) -> str:
         except GitError:
             continue
     return ""
-
-
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
-def slugify(text: str, max_len: int = 40) -> str:
-    slug = _SLUG_RE.sub("-", text.lower()).strip("-")
-    return slug[:max_len].rstrip("-") or "work"
-
-
-def create_worktree(repo_dir: str, name: str) -> str:
-    """Create `<repo>-worktrees/<name>` on a new branch `todo/<name>`.
-    Returns the worktree path. Fails loudly if anything exists already."""
-    repo = Path(repo_dir).resolve()
-    slug = slugify(name)
-    dest = repo.parent / f"{repo.name}-worktrees" / slug
-    if dest.exists():
-        raise GitError(f"worktree path already exists: {dest}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    _run(
-        ["git", "worktree", "add", "-b", f"todo/{slug}", str(dest)],
-        str(repo),
-        timeout=60.0,
-    )
-    return str(dest)
-
-
-def remove_worktree(repo_dir: str, worktree_path: str) -> None:
-    """Remove a worktree. Refuses (loudly) if it has uncommitted changes."""
-    _run(["git", "worktree", "remove", worktree_path], repo_dir, timeout=60.0)
 
 
 # ---------------------------------------------------------------- diffs --
@@ -289,3 +259,51 @@ def github_pr_comments(directory: str, gh_bin: str = "gh") -> list[ReviewComment
             ReviewComment(file="", line=0, body=f"[{state}] {body}", author=author)
         )
     return comments
+
+
+# ------------------------------------------------------ PR lookup / status --
+
+
+@dataclass
+class PRStatus:
+    merged: bool = False
+    state: str = ""  # OPEN / CLOSED / MERGED
+    last_activity: str = ""  # ISO timestamp of newest comment/review, "" if none
+
+
+def _gh_runner_default(args: list[str], cwd: str | None = None) -> str:
+    return _run(args, cwd or ".", timeout=30.0)
+
+
+def find_pr_url(directory: str, runner=None) -> str:
+    """The PR for this worktree's current branch, per gh; '' if none."""
+    run = runner or _gh_runner_default
+    try:
+        out = run(["gh", "pr", "view", "--json", "url", "-q", ".url"], directory)
+    except Exception:
+        return ""
+    url = out.strip()
+    return url if url.startswith("http") else ""
+
+
+def pr_status(pr_url: str, runner=None) -> PRStatus:
+    """Merged? And when did a human last touch it (comment/review)?"""
+    run = runner or _gh_runner_default
+    out = run(
+        ["gh", "pr", "view", pr_url, "--json", "state,mergedAt,comments,reviews"], None
+    )
+    data = json.loads(out)
+    stamps: list[str] = []
+    for item in data.get("comments") or []:
+        created = item.get("createdAt")
+        if isinstance(created, str):
+            stamps.append(created)
+    for item in data.get("reviews") or []:
+        submitted = item.get("submittedAt")
+        if isinstance(submitted, str):
+            stamps.append(submitted)
+    return PRStatus(
+        merged=bool(data.get("mergedAt")) or data.get("state") == "MERGED",
+        state=str(data.get("state", "")),
+        last_activity=max(stamps) if stamps else "",
+    )

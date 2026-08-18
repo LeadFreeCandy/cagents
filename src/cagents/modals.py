@@ -51,6 +51,33 @@ class InputModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+def complete_directory(value: str) -> str:
+    """Tab-completion for directory paths: longest common prefix of matching
+    subdirectories; a unique match gains a trailing slash."""
+    import os
+
+    if not value:
+        return ""
+    expanded = str(Path(value).expanduser())
+    base, partial = os.path.split(expanded)
+    if not base:
+        return value
+    try:
+        entries = sorted(
+            e for e in os.listdir(base or "/")
+            if e.startswith(partial) and os.path.isdir(os.path.join(base, e))
+        )
+    except OSError:
+        return value
+    if not entries:
+        return value
+    common = os.path.commonprefix(entries)
+    completed = os.path.join(base, common)
+    if len(entries) == 1:
+        completed += "/"
+    return completed
+
+
 class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
     """Ask for a directory (and optional label) for a brand-new session.
 
@@ -88,6 +115,19 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
 
     def on_mount(self) -> None:
         self.query_one("#dir", Input).focus()
+
+    def on_key(self, event) -> None:
+        if event.key != "tab":
+            return
+        dir_input = self.query_one("#dir", Input)
+        if not dir_input.has_focus:
+            return
+        completed = complete_directory(dir_input.value)
+        if completed and completed != dir_input.value:
+            event.stop()
+            event.prevent_default()
+            dir_input.value = completed
+            dir_input.cursor_position = len(completed)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         directory = self.query_one("#dir", Input).value.strip()
@@ -227,50 +267,37 @@ HELP_TEXT = """\
 [bold]cagents — keys[/bold]
 
 [bold cyan]Views[/bold cyan]
-  1 / 2 / 3 / 4 grouped · queue · kanban · todos
-  tab           next view
+  1 / 2 / 3     grouped · queue · kanban        tab  next view
 
 [bold cyan]Navigate[/bold cyan]
-  j / k, ↑ / ↓  move
-  h / l, ← / →  kanban: change column
-  g / G         first / last
+  j / k, ↑ / ↓  move          ← / →  kanban columns (when the list has focus)
+  ←             layout cycle: list ↔ sidebar hidden ↔ sidebar small
+  mouse         click focuses; wheel scrolls the hovered pane
+
+[bold cyan]Anywhere — even inside the session[/bold cyan]
+  ctrl+s        split a terminal in the session's worktree/project
+  ctrl+d        diff popup: worktree changes vs master (q closes)
 
 [bold cyan]Act on a session[/bold cyan]
-  enter         attach (the real Claude CLI; detach: ctrl-b d)
-  F             fork — new session from this one, prompt typed by you
-  H             handoff — old session writes a spec, new one starts on it,
-                old is marked done (r restores)
+  enter         attach — the right pane IS the real session; enter focuses it
+  d             mark done / un-done
+  w             waiting on external: parks it on its PR; new comments re-alert,
+                merge marks it done automatically
+  f             fork — new session from this one, prompt typed by you
+  h             handoff — old session writes a spec, new one starts on it,
+                old is marked done (d restores)
   *             related — visit this session's forks/handoffs/parent
-  space         peek — read the transcript without attaching
-  D             diff — review changes, comment, send comments to Claude
-  V             rich diff — lazygit (per-commit + total, PR-style)
-  t             shell — split terminal in the worktree/project
+  D             diff review screen — comment on lines, send comments to Claude
   o             open the newest recorded link (PR, artifact)
-  r             mark reviewed / unmark
-  m             monitoring — seen it, keep watching; re-alerts on activity
-  e             edit note
-  L             edit label
-  x             untrack (never deletes Claude's data)
+  e             edit note    L  edit label    x  untrack
 
 [bold cyan]Sessions[/bold cyan]
-  n             start a new session
+  n             start a new session (defaults to your launch directory; tab completes)
   a             track an existing session
+  :             fleet assistant — plain English, proposes a plan, you confirm
   R             refresh now
 
-[bold cyan]Todos (view 4)[/bold cyan]
-  A             add todo        n   new session for the todo
-  W             grow a git worktree + session for the todo
-  d             done (offers to archive its workspaces) / reopen
-  p             pause / unpause — timer (2d), wake condition, or indefinite
-  x             delete todo     enter  attach to its newest session
-
-[bold cyan]Fleet assistant & plugins[/bold cyan]
-  :             ask in plain English (proposes a plan; you confirm)
-  +             add plugin — the "meta" session writes a new keybind or
-                automation into ~/.local/share/cagents/plugins (hot-loaded)
-
-  ,             settings (sidebar rail · notifications · left-arrow capture)
-  ?             this help · q quit\
+  ,             settings · ? this help · q quit\
 """
 
 
@@ -392,58 +419,6 @@ class PlanConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class TodoModal(ModalScreen["tuple[str, str] | None"]):
-    """New todo: what, and (optionally) which project it belongs to."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("tab", "app.focus_next", "Next field", show=False),
-        Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    TodoModal { align: center middle; }
-    TodoModal > Vertical {
-        width: 80; max-width: 95%; height: auto;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    TodoModal Label { text-style: bold; }
-    TodoModal .hint { color: $text-muted; margin-bottom: 1; }
-    TodoModal Input { margin-bottom: 1; }
-    """
-
-    def __init__(self, initial_dir: str = "") -> None:
-        super().__init__()
-        self.initial_dir = initial_dir
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("New todo")
-            yield Static("Sessions and worktrees can be spawned from it later.", classes="hint")
-            yield Input(placeholder="what needs doing?", id="todo-text")
-            yield Input(value=self.initial_dir, placeholder="project directory (optional)", id="todo-dir")
-
-    def on_mount(self) -> None:
-        self.query_one("#todo-text", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = self.query_one("#todo-text", Input).value.strip()
-        directory = self.query_one("#todo-dir", Input).value.strip()
-        if not text:
-            self.query_one("#todo-text", Input).focus()
-            return
-        if directory:
-            directory = str(Path(directory).expanduser())
-            if not Path(directory).is_dir():
-                self.query_one(".hint", Static).update(f"[red]Not a directory: {directory}[/red]")
-                self.query_one("#todo-dir", Input).focus()
-                return
-        self.dismiss((text, directory))
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
 SETTINGS_META: list[tuple[str, str, str]] = [
     (
         "sidebar",
@@ -458,10 +433,10 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     ),
     (
         "capture_left",
-        "Left arrow returns to list",
-        "In the container: Left inside a session closes its pane (the session keeps "
-        "running in the background). Trade-off: Left no longer moves the cursor while "
-        "editing text in the Claude prompt.",
+        "Left arrow layout key",
+        "← cycles the layout: back to the list, sidebar hidden, sidebar small. "
+        "Trade-off: ← no longer moves the cursor while editing text in the "
+        "Claude prompt.",
     ),
     (
         "desktop_notifications",
@@ -469,14 +444,7 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "macOS notification when a session starts needing you. With terminal-notifier "
         "installed, clicking it selects the task in the list.",
     ),
-    (
-        "auto_pause_days",
-        "Auto-pause idle todos (days)",
-        "Open todos with no session activity for this many days pause themselves. "
-        "0 disables. Enter to type a new number.",
-    ),
 ]
-
 
 class SettingsModal(ModalScreen[None]):
     """`,` — toggles, applied immediately and persisted to the store."""
@@ -521,16 +489,11 @@ class SettingsModal(ModalScreen[None]):
         option_list = self.query_one("#settings-list", OptionList)
         option_list.clear_options()
         for i, (key, label, _desc) in enumerate(SETTINGS_META):
-            value = self.store.get_setting(key)
+            value = bool(self.store.get_setting(key))
             row = Text()
-            if isinstance(value, bool):
-                row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
-                row.append(f"{label:<34}", style="bold" if value else "")
-                row.append("on" if value else "off", style="green" if value else "dim")
-            else:
-                row.append(" # ", style="bold cyan")
-                row.append(f"{label:<34}", style="bold")
-                row.append(str(value), style="cyan")
+            row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
+            row.append(f"{label:<34}", style="bold" if value else "")
+            row.append("on" if value else "off", style="green" if value else "dim")
             option_list.add_option(Option(row, id=key))
             if keep == key:
                 option_list.highlighted = i
@@ -547,131 +510,13 @@ class SettingsModal(ModalScreen[None]):
         key = event.option.id
         if key is None:
             return
-        current = self.store.get_setting(key)
-        if isinstance(current, bool):
-            value = not current
-            self.store.set_setting(key, value)
-            self._refill(keep=key)
-            self.on_change(key, value)
-            return
-        # numeric: type a new value
-        self.app.push_screen(
-            InputModal(f"New value for '{key}'", initial=str(current)),
-            lambda text, k=key: self._numeric_entered(k, text),
-        )
-
-    def _numeric_entered(self, key: str, text: str | None) -> None:
-        if text is None:
-            return
-        try:
-            value = max(0, int(float(text.strip())))
-        except ValueError:
-            self.app.notify(f"Not a number: {text}", severity="warning")
-            return
+        value = not bool(self.store.get_setting(key))
         self.store.set_setting(key, value)
         self._refill(keep=key)
         self.on_change(key, value)
 
     def action_close(self) -> None:
         self.dismiss(None)
-
-
-class PauseModal(ModalScreen["tuple[str, str] | None"]):
-    """Pause a todo. Dismisses with (kind, value):
-    ("timer", "<duration text>") | ("criteria", "<text>") | ("none", "")."""
-
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
-
-    DEFAULT_CSS = """
-    PauseModal { align: center middle; }
-    PauseModal > Vertical {
-        width: 80; max-width: 95%; height: auto;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    PauseModal Label { text-style: bold; }
-    PauseModal .hint { color: $text-muted; margin-bottom: 1; }
-    """
-
-    def __init__(self, todo_text: str) -> None:
-        super().__init__()
-        self.todo_text = todo_text
-
-    def compose(self) -> ComposeResult:
-        from cagents.wake import parse_duration  # noqa: F401 (documented behavior)
-
-        with Vertical():
-            yield Label(f"Pause: {self.todo_text[:60]}")
-            yield Static(
-                "A duration (30m, 4h, 2d, 1w) sets a wake timer. Anything else is a "
-                "wake condition — Claude writes a check script (you approve it first). "
-                "Empty pauses until you unpause.",
-                classes="hint",
-            )
-            yield Input(placeholder="2d · or: when the PR gets an approving review · or empty")
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        from cagents.wake import parse_duration
-
-        text = event.value.strip()
-        if not text:
-            self.dismiss(("none", ""))
-        elif parse_duration(text) is not None:
-            self.dismiss(("timer", text))
-        else:
-            self.dismiss(("criteria", text))
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class ScriptConfirmModal(ModalScreen[bool]):
-    """Show a Claude-written wake script before it's saved. Nothing runs
-    until a human has read it and said yes."""
-
-    BINDINGS = [
-        Binding("escape", "no", "No"),
-        Binding("n", "no", "No"),
-        Binding("y", "yes", "Approve"),
-    ]
-
-    DEFAULT_CSS = """
-    ScriptConfirmModal { align: center middle; }
-    ScriptConfirmModal > Vertical {
-        width: 90; max-width: 95%; height: auto; max-height: 80%;
-        border: round $warning; background: $surface; padding: 1 2;
-    }
-    ScriptConfirmModal .head { text-style: bold; margin-bottom: 1; }
-    ScriptConfirmModal .keys { color: $text-muted; margin-top: 1; }
-    ScriptConfirmModal #script-body { max-height: 20; overflow-y: auto; }
-    """
-
-    def __init__(self, criteria: str, script: str) -> None:
-        super().__init__()
-        self.criteria = criteria
-        self.script = script
-
-    def compose(self) -> ComposeResult:
-        from rich.syntax import Syntax
-
-        with Vertical():
-            yield Static(f"Wake check for: {self.criteria}", classes="head")
-            yield Static(
-                Syntax(self.script, "bash", background_color="default"), id="script-body"
-            )
-            yield Static(
-                "Runs every ~5 min, read-only, 30s timeout; exit 0 wakes the todo.\n"
-                "y — approve and pause    n / esc — pause without the script",
-                classes="keys",
-            )
-
-    def action_yes(self) -> None:
-        self.dismiss(True)
-
-    def action_no(self) -> None:
-        self.dismiss(False)
 
 
 class RelatedModal(ModalScreen[str | None]):

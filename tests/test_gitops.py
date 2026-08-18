@@ -9,14 +9,14 @@ import pytest
 
 from cagents.gitops import (
     GitError,
-    create_worktree,
+    PRStatus,
     current_branch,
     default_branch,
+    find_pr_url,
     github_pr_comments,
     is_git_repo,
     parse_unified_diff,
-    remove_worktree,
-    slugify,
+    pr_status,
     worktree_diff,
 )
 
@@ -49,36 +49,11 @@ def test_is_git_repo(repo: Path, tmp_path: Path):
     assert is_git_repo(str(plain)) is False
 
 
-def test_slugify():
-    assert slugify("Add auth: tests & fixes!") == "add-auth-tests-fixes"
-    assert slugify("   ") == "work"
-    assert len(slugify("x" * 100)) <= 40
-
-
-def test_create_and_remove_worktree(repo: Path):
-    path = create_worktree(str(repo), "Add auth tests")
-    assert Path(path).is_dir()
-    assert current_branch(path) == "todo/add-auth-tests"
-    assert Path(path).name == "add-auth-tests"
-    # creating again fails loudly
-    with pytest.raises(GitError):
-        create_worktree(str(repo), "Add auth tests")
-    remove_worktree(str(repo), path)
-    assert not Path(path).exists()
-
-
-def test_remove_dirty_worktree_refuses(repo: Path):
-    path = create_worktree(str(repo), "risky work")
-    (Path(path) / "new.py").write_text("x = 1\n", "utf-8")
-    with pytest.raises(GitError):
-        remove_worktree(str(repo), path)
-    assert Path(path).exists()  # untouched
-
-
 class TestWorktreeDiff:
     def test_feature_branch_diff_committed_and_uncommitted(self, repo: Path):
-        path = create_worktree(str(repo), "feature work")
-        wt = Path(path)
+        # a real git worktree, the way Claude Code's own worktrees look
+        wt = repo.parent / "wt-feature"
+        _git(repo, "worktree", "add", "-b", "feature-work", str(wt))
         # committed change
         (wt / "app.py").write_text("def main():\n    return 2\n", "utf-8")
         _git(wt, "commit", "-am", "change return")
@@ -88,7 +63,7 @@ class TestWorktreeDiff:
         (wt / "notes.txt").write_text("remember this\n", "utf-8")
 
         diff = worktree_diff(str(wt))
-        assert diff.branch == "todo/feature-work"
+        assert diff.branch == "feature-work"
         assert diff.base == "main"
         assert set(diff.files) == {"app.py", "README.md", "notes.txt"}
         assert diff.additions >= 3  # return 2, more docs, remember this
@@ -157,3 +132,41 @@ class TestGithubComments:
         with pytest.raises(GitError) as err:
             github_pr_comments(str(repo), gh_bin="definitely-not-a-real-binary")
         assert "not installed" in str(err.value)
+
+
+class TestPRStatus:
+    def test_find_pr_url(self):
+        calls = []
+
+        def runner(args, cwd=None):
+            calls.append(args)
+            return "https://github.com/o/r/pull/7\n"
+
+        assert find_pr_url("/proj", runner=runner) == "https://github.com/o/r/pull/7"
+        assert calls[0][:3] == ["gh", "pr", "view"]
+
+    def test_find_pr_url_none(self):
+        def runner(args, cwd=None):
+            raise RuntimeError("no pull requests found")
+
+        assert find_pr_url("/proj", runner=runner) == ""
+
+    def test_pr_status_merged_and_activity(self):
+        import json as _json
+
+        payload = _json.dumps({
+            "state": "MERGED", "mergedAt": "2026-08-18T10:00:00Z",
+            "comments": [{"createdAt": "2026-08-18T09:00:00Z"}],
+            "reviews": [{"submittedAt": "2026-08-18T09:30:00Z"}],
+        })
+        status = pr_status("url", runner=lambda a, cwd=None: payload)
+        assert status.merged is True
+        assert status.last_activity == "2026-08-18T09:30:00Z"
+
+    def test_pr_status_open_no_activity(self):
+        import json as _json
+
+        payload = _json.dumps({"state": "OPEN", "mergedAt": None,
+                               "comments": [], "reviews": []})
+        status = pr_status("url", runner=lambda a, cwd=None: payload)
+        assert status.merged is False and status.last_activity == ""

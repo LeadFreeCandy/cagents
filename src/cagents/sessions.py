@@ -35,20 +35,25 @@ class SessionState(Enum):
     WORKING = "working"
     NEEDS_INPUT = "needs input"  # blocked on a human: permission / question
     NEEDS_REVIEW = "needs review"  # Claude finished; no human has looked yet
-    MONITORING = "monitoring"  # seen it, keeping an eye; new activity re-alerts
+    MONITORING = "monitoring"  # idle, but Claude's own Monitor is watching
+    BACKGROUND = "background"  # idle, but a backgrounded command/agent runs
+    WAITING_EXTERNAL = "waiting"  # done here; parked on a PR (w)
     DONE = "done"  # a human explicitly accepted the result
     STOPPED = "stopped"  # ended without completing normally
 
 
 # Lower number = needs the human sooner. Used by the queue view and for
-# sorting within groups.
+# sorting within groups. Monitoring/background/waiting are all "Claude (or
+# the world) is on it" — lower priority than a genuine needs-review.
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
     SessionState.NEEDS_REVIEW: 1,
     SessionState.MONITORING: 2,
-    SessionState.WORKING: 3,
-    SessionState.STOPPED: 4,
-    SessionState.DONE: 5,
+    SessionState.BACKGROUND: 3,
+    SessionState.WORKING: 4,
+    SessionState.WAITING_EXTERNAL: 5,
+    SessionState.STOPPED: 6,
+    SessionState.DONE: 7,
 }
 
 # If the transcript was written to this recently, Claude is mid-turn even if
@@ -67,6 +72,7 @@ class SessionView:
     state: SessionState
     live: bool  # a tmux session is hosting this Claude session right now
     tmux_name: str = ""
+    tmux_socket: str = ""
     attached: bool = False
     state_detail: str = ""  # e.g. the tool waiting for permission
     missing: bool = False  # transcript file disappeared
@@ -194,13 +200,20 @@ def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[Ses
     reviewed = tracked.reviewed_datetime()
     last = parsed.last_timestamp
     if reviewed is not None and (last is None or reviewed >= last):
-        return (SessionState.DONE, "reviewed")
-    monitoring = tracked.monitoring_datetime()
-    if monitoring is not None and (last is None or monitoring >= last):
-        # Watched, not resolved. Activity after the mark re-alerts (the
-        # comparison above fails and it falls back to needs-review).
-        return (SessionState.MONITORING, "watching")
-    return (SessionState.NEEDS_REVIEW, "finished, unreviewed")
+        detail = tracked.external_update or "done"
+        return (SessionState.DONE, detail)
+    waiting = tracked.waiting_datetime()
+    if waiting is not None and (last is None or waiting >= last):
+        # Parked on the outside world; the PR poller resolves it. New local
+        # activity makes the comparison fail -> back to needs-review.
+        return (SessionState.WAITING_EXTERNAL, "waiting on PR")
+    # Fire-and-forget watches make an idle prompt "not really needs you".
+    if parsed.monitor_active:
+        return (SessionState.MONITORING, "Claude monitor active")
+    if parsed.background_active:
+        return (SessionState.BACKGROUND, "background task running")
+    detail = tracked.external_update or "finished, unreviewed"
+    return (SessionState.NEEDS_REVIEW, detail)
 
 
 def derive_did_needs(
@@ -272,11 +285,11 @@ def map_tmux_sessions(
         tmux = by_id.get(tracked.session_id)
         if tmux is not None:
             result[tracked.session_id] = tmux
-            claimed.add(tmux.name)
+            claimed.add(tmux.key)
 
     def match_pass(dir_matches) -> None:
         for tmux in sorted(tmux_sessions, key=lambda t: t.created, reverse=True):
-            if tmux.name in claimed:
+            if tmux.key in claimed:
                 continue
             candidates = []
             for tracked, parsed in tracked_views:
@@ -292,7 +305,7 @@ def map_tmux_sessions(
                 candidates.sort(reverse=True)
                 sid = candidates[0][1]
                 result[sid] = tmux
-                claimed.add(tmux.name)
+                claimed.add(tmux.key)
 
     match_pass(_same_dir)
     match_pass(_is_ancestor_dir)
@@ -365,7 +378,7 @@ class SessionRegistry:
             live = tmux is not None
             pane_text = ""
             if tmux is not None:
-                pane_text = self.tmux.capture_pane(tmux.name)
+                pane_text = self.tmux.capture_pane(tmux.name, socket=tmux.socket)
             state, detail = derive_state(parsed, tracked, live, pane_text, now)
             state, detail = self._debounce(tracked.session_id, state, detail)
             did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
@@ -377,6 +390,7 @@ class SessionRegistry:
                     state=state,
                     live=live,
                     tmux_name=tmux.name if tmux else "",
+                    tmux_socket=tmux.socket if tmux else "",
                     attached=tmux.attached if tmux else False,
                     state_detail=detail,
                     missing=parsed is None,
