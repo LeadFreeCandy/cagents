@@ -10,11 +10,14 @@ Responsibilities:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger("cagents.app")
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -130,6 +133,10 @@ class CagentsApp(App):
         self.active_view_id = "grouped"
         self.selected_session_id: str | None = None
         self._preview_tmux_name: str | None = None  # what the sidecar's right pane is showing
+        logger.info(
+            "CagentsApp constructed: sidecar=%s sidebar_setting=%s",
+            self.sidecar is not None, self.store.get_setting("sidebar"),
+        )
         self.wake_engine = WakeEngine(self.store)
         self._prev_states: dict[str, SessionState] = {}
         self._seen_first_snapshot = False
@@ -330,16 +337,22 @@ class CagentsApp(App):
         Only touches the pane when the target actually changes, so it never
         interrupts an interactive attach sitting in the same pane."""
         if self.sidecar is None or not self.store.get_setting("sidebar"):
+            logger.debug(
+                "sidecar preview skipped: sidecar_present=%s sidebar_setting=%s",
+                self.sidecar is not None, self.store.get_setting("sidebar"),
+            )
             return
         name = view.tmux_name if (view is not None and view.live) else None
         if name == self._preview_tmux_name:
             return
+        logger.info("sidecar preview: %r -> %r", self._preview_tmux_name, name)
         self._preview_tmux_name = name
         if name is None:
             return
         try:
             self.sidecar.preview(nested_attach_command(self.tmux.socket, name, read_only=True))
         except Exception as error:
+            logger.exception("live preview failed for %r", name)
             self.notify(f"Live preview failed: {error}", severity="warning")
 
     # -- view switching --------------------------------------------------------
@@ -383,15 +396,22 @@ class CagentsApp(App):
             if view.live:
                 self._attach_tmux_session(view.tmux_name)
             else:
+                logger.info("attach: %s is dead, resuming", view.session_id)
                 self._resume_dead_session(view)
         except Exception as error:  # loud, specific failure (spec §11)
+            logger.exception("attach failed for %s", view.session_id)
             self.notify(f"Attach failed: {error}", severity="error", timeout=10)
         self.refresh_data()
 
     def _attach_tmux_session(self, name: str) -> None:
         """Hand off to the real CLI: full-terminal suspend normally, or the
         right-hand pane when running as a sidecar rail."""
-        if self.sidecar is not None and self.store.get_setting("sidebar"):
+        use_sidecar = self.sidecar is not None and self.store.get_setting("sidebar")
+        logger.info(
+            "attach %r: use_sidecar=%s (sidecar_present=%s sidebar_setting=%s)",
+            name, use_sidecar, self.sidecar is not None, self.store.get_setting("sidebar"),
+        )
+        if use_sidecar:
             self.sidecar.open(nested_attach_command(self.tmux.socket, name))
             self._preview_tmux_name = name  # now interactive; the next preview tick leaves it alone
             if not getattr(self, "_sidecar_hint_shown", False):

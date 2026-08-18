@@ -13,8 +13,11 @@ calls here talk to the *outer* server via $TMUX, never the claude socket.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+
+logger = logging.getLogger("cagents.sidecar")
 
 COLLAPSED_WIDTH = 34
 
@@ -90,7 +93,9 @@ def _outer_tmux(args: list[str]) -> str:
     """Talk to the enclosing tmux server (resolved from $TMUX)."""
     proc = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"tmux {args[0]} failed")
+        error = proc.stderr.strip() or f"tmux {args[0]} failed"
+        logger.warning("outer tmux %r failed: %s", args, error)
+        raise RuntimeError(error)
     return proc.stdout
 
 
@@ -206,14 +211,19 @@ def bootstrap_container(argv: list[str]) -> "None":
         [*tmux, "has-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
     )
     if has.returncode != 0:
+        cmd = self_command(argv)
+        logger.info("no %r container session yet; creating one: %s", CONTAINER_SOCKET, cmd)
         size = shutil.get_terminal_size()
         subprocess.run(
             [*tmux, "new-session", "-d", "-s", CONTAINER_SESSION,
-             "-x", str(size.columns), "-y", str(size.lines), self_command(argv)],
+             "-x", str(size.columns), "-y", str(size.lines), cmd],
             check=True,
         )
         for command in container_setup_commands():
             subprocess.run([*tmux, *command], capture_output=True)
+    else:
+        logger.info("reusing existing %r container session", CONTAINER_SOCKET)
+    logger.info("execvp tmux attach-session (this process ends here)")
     os.execvp("tmux", [*tmux, "attach-session", "-t", f"={CONTAINER_SESSION}"])
 
 
