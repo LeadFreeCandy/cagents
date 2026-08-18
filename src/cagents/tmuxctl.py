@@ -227,11 +227,15 @@ def _shquote(value: str) -> str:
 _PROMPT_MARKERS = (
     "Do you want",
     "Would you like",
-    "❯ 1.",
     "Yes, and don't ask again",
     "Waiting for your response",
     "Do you trust the files",
 )
+
+# The selection cursor on a numbered option — the signature of an actual
+# dialog. Claude's *conversation text* frequently contains phrases like
+# "Do you want me to…", so a phrase alone must never count as a prompt.
+_CHOICE_ROW = re.compile(r"❯\s*\d+\.")
 
 # Patterns that mean Claude is actively running a turn.
 _WORKING_MARKERS = (
@@ -241,6 +245,11 @@ _WORKING_MARKERS = (
 
 
 def pane_shows_prompt(pane_text: str) -> bool:
+    """True only for a real dialog: a ❯-cursored numbered choice AND a
+    prompt phrase, both visible. Either alone is too easy to fake with
+    ordinary conversation output."""
+    if not _CHOICE_ROW.search(pane_text):
+        return False
     return any(marker in pane_text for marker in _PROMPT_MARKERS)
 
 

@@ -305,6 +305,11 @@ class SessionRegistry:
         self.store = store
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
+        # Debounce state: a WORKING session must look blocked on two
+        # consecutive refreshes before we say "needs you" — a single frame
+        # of prompt-looking pane content is usually transient.
+        self._last_state: dict[str, SessionState] = {}
+        self._input_streak: dict[str, int] = {}
 
     def refresh(self, now: float | None = None) -> Snapshot:
         import time
@@ -335,6 +340,7 @@ class SessionRegistry:
             if tmux is not None:
                 pane_text = self.tmux.capture_pane(tmux.name)
             state, detail = derive_state(parsed, tracked, live, pane_text, now)
+            state, detail = self._debounce(tracked.session_id, state, detail)
             did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
             views.append(
                 SessionView(
@@ -360,6 +366,23 @@ class SessionRegistry:
             )
         )
         return Snapshot(views=views, generated_at=now)
+
+    def _debounce(
+        self, session_id: str, state: SessionState, detail: str
+    ) -> tuple[SessionState, str]:
+        """Hold a WORKING -> NEEDS_INPUT flip for one extra refresh. First
+        observations (startup) are trusted immediately."""
+        previous = self._last_state.get(session_id)
+        if (
+            state == SessionState.NEEDS_INPUT
+            and previous == SessionState.WORKING
+            and self._input_streak.get(session_id, 0) < 1
+        ):
+            self._input_streak[session_id] = self._input_streak.get(session_id, 0) + 1
+            return (SessionState.WORKING, detail)  # hold; confirm next pass
+        self._input_streak.pop(session_id, None)
+        self._last_state[session_id] = state
+        return (state, detail)
 
     def _find_session_file(self, tracked: TrackedSession) -> Path | None:
         path = session_file_path(self.claude_dir, tracked.project_dir, tracked.session_id)

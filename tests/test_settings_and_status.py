@@ -244,3 +244,75 @@ async def test_sidebar_setting_off_uses_suspend_attach(world, now):
         # sidebar off -> classic suspend attach, no pane split
         assert tmux.attached_to == ["beta"]
         assert not any(c[0] == "split-window" for c in outer.calls)
+
+
+# ------------------------------------------------- transient "needs you" --
+
+
+class TestPromptFalsePositives:
+    def test_conversation_text_is_not_a_prompt(self):
+        from cagents.tmuxctl import pane_shows_prompt
+
+        # Claude *talking about* choices must not read as a dialog
+        assert pane_shows_prompt("Do you want me to also refactor the parser?") is False
+        assert pane_shows_prompt("Would you like a summary when I finish?") is False
+        # ...and a numbered list in output isn't one either
+        assert pane_shows_prompt("Steps:\n 1. build\n 2. deploy") is False
+
+    def test_real_dialog_is_a_prompt(self):
+        from cagents.tmuxctl import pane_shows_prompt
+
+        pane = "Bash command: make deploy\nDo you want to proceed?\n❯ 1. Yes\n  2. No"
+        assert pane_shows_prompt(pane) is True
+
+    def test_choice_row_without_phrase_is_not_enough(self):
+        from cagents.tmuxctl import pane_shows_prompt
+
+        assert pane_shows_prompt("❯ 1. some quoted menu") is False
+
+
+class TestDebounce:
+    def _registry(self, claude_dir, tmp_path, now, pane):
+        from test_app import FakeTmux
+
+        TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_tool_use(
+            "t1", "Bash", {"command": "ls"}
+        ).write(claude_dir, mtime=now - 1)
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
+        tmux = FakeTmux()
+        tmux.sessions.append(
+            TmuxSession(name="alpha", created=now - 60, activity=now, attached=False,
+                        pane_pid=1, pane_path="/proj/alpha")
+        )
+        tmux.panes["alpha"] = pane
+        return SessionRegistry(store, tmux=tmux, claude_dir=claude_dir), tmux
+
+    def test_working_to_input_held_one_cycle(self, claude_dir, tmp_path, now):
+        registry, tmux = self._registry(claude_dir, tmp_path, now, "✻ Running… (esc to interrupt)")
+        assert registry.refresh(now=now).views[0].state == SessionState.WORKING
+        # pane flips to a dialog
+        tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+        held = registry.refresh(now=now + 2).views[0]
+        assert held.state == SessionState.WORKING  # held one cycle
+        confirmed = registry.refresh(now=now + 4).views[0]
+        assert confirmed.state == SessionState.NEEDS_INPUT  # confirmed
+        assert confirmed.needs_line == "Do you want to proceed?"
+
+    def test_flicker_never_surfaces(self, claude_dir, tmp_path, now):
+        registry, tmux = self._registry(claude_dir, tmp_path, now, "✻ Running… (esc to interrupt)")
+        registry.refresh(now=now)
+        tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+        registry.refresh(now=now + 2)  # held
+        tmux.panes["alpha"] = "✻ Running… (esc to interrupt)"  # dialog resolved itself
+        back = registry.refresh(now=now + 4).views[0]
+        assert back.state == SessionState.WORKING
+        # streak must have reset: a later real dialog is held exactly once again
+        tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+        assert registry.refresh(now=now + 6).views[0].state == SessionState.WORKING
+        assert registry.refresh(now=now + 8).views[0].state == SessionState.NEEDS_INPUT
+
+    def test_first_observation_trusted_immediately(self, claude_dir, tmp_path, now):
+        registry, _ = self._registry(claude_dir, tmp_path, now, "Do you want to proceed?\n❯ 1. Yes")
+        # fresh startup with a visible dialog: no artificial delay
+        assert registry.refresh(now=now).views[0].state == SessionState.NEEDS_INPUT
