@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +52,52 @@ class InputModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class DirectoryInput(Input):
+    """An Input with shell-like Tab completion for directory paths, cycling
+    through matches on repeated presses (like a shell with only one
+    candidate shown at a time instead of a menu)."""
+
+    BINDINGS = [Binding("tab", "complete_path", "Complete", show=False)]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._completions: list[str] = []
+        self._completion_index = -1
+        self._last_set_value: str | None = None
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.value != self._last_set_value:
+            self._completions = []
+            self._completion_index = -1
+
+    def action_complete_path(self) -> None:
+        if not self._completions:
+            typed = os.path.expanduser(self.value)
+            if typed.endswith(os.sep):
+                parent_str, prefix = typed, ""
+            else:
+                parent_str, prefix = os.path.split(typed)
+                parent_str = parent_str or "."
+            try:
+                names = sorted(
+                    name for name in os.listdir(parent_str)
+                    if os.path.isdir(os.path.join(parent_str, name))
+                    and name.startswith(prefix)
+                    and (prefix.startswith(".") or not name.startswith("."))
+                )
+            except OSError:
+                return
+            if not names:
+                return
+            self._completions = [os.path.join(parent_str, name) + os.sep for name in names]
+            self._completion_index = -1
+        self._completion_index = (self._completion_index + 1) % len(self._completions)
+        new_value = self._completions[self._completion_index]
+        self._last_set_value = new_value
+        self.value = new_value
+        self.cursor_position = len(new_value)
+
+
 class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
     """Ask for a directory (and optional label) for a brand-new session.
 
@@ -60,8 +107,7 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("tab", "app.focus_next", "Next field", show=False),
-        Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
+        Binding("ctrl+t", "pick_via_shell", "Shell", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -82,12 +128,24 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Start a new Claude session")
-            yield Static("Enter to start — you'll be talking to Claude directly.", classes="hint")
-            yield Input(value=self.initial_dir, placeholder="project directory", id="dir")
+            yield Static(
+                "Enter to start · tab completes directories · ctrl+t: cd/zoxide in a real "
+                "shell, use wherever you end up",
+                classes="hint",
+            )
+            yield DirectoryInput(value=self.initial_dir, placeholder="project directory", id="dir")
             yield Input(placeholder="optional label (for you, not Claude)", id="label")
 
     def on_mount(self) -> None:
         self.query_one("#dir", Input).focus()
+
+    def action_pick_via_shell(self) -> None:
+        dir_input = self.query_one("#dir", Input)
+        start = dir_input.value.strip() or self.initial_dir
+        directory = self.app.pick_directory_via_shell(start)  # type: ignore[attr-defined]
+        dir_input.value = directory
+        dir_input.cursor_position = len(directory)
+        dir_input.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         directory = self.query_one("#dir", Input).value.strip()

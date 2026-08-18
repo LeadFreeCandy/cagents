@@ -134,6 +134,7 @@ class CagentsApp(App):
         self.snapshot = Snapshot()
         self.active_view_id = "grouped"
         self.selected_session_id: str | None = None
+        self._launch_cwd = os.getcwd()  # wherever the user actually ran `cagents` from
         self._preview_tmux_name: str | None = None  # what the sidecar's right pane is showing
         self._recently_started: dict[str, str] = {}  # session_id -> tmux name we just spawned
         logger.info(
@@ -561,6 +562,43 @@ class CagentsApp(App):
             # over the terminal rather than failing the attach outright.
             fn()
 
+    def pick_directory_via_shell(self, start_dir: str) -> str:
+        """"Terminal passthrough" directory picker: hands the real
+        terminal to the user's own interactive shell — their aliases,
+        zoxide, everything — seeded in `start_dir`. Whatever directory
+        they're in when they exit becomes the result.
+
+        There's no way to read a subprocess's cwd after it exits, so a
+        POSIX EXIT trap writes the shell's final $PWD to a temp file right
+        before it goes away; `cd`/`z`-ing around and then typing `exit`
+        (or ctrl-d) is all the user needs to do."""
+        import shlex
+        import subprocess
+        import tempfile
+
+        shell = os.environ.get("SHELL", "/bin/sh")
+        fd, path = tempfile.mkstemp(prefix="cagents-cwd-")
+        os.close(fd)
+        result = start_dir
+        try:
+            script = (
+                f"trap 'pwd > {shlex.quote(path)}' EXIT; "
+                f"cd {shlex.quote(start_dir)} 2>/dev/null; exec {shlex.quote(shell)} -i"
+            )
+            self._suspend_and_run(lambda: subprocess.run(["/bin/sh", "-c", script]))
+            try:
+                picked = Path(path).read_text().strip()
+                if picked and Path(picked).is_dir():
+                    result = picked
+            except OSError:
+                pass
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return result
+
     def _claude_bin(self) -> str:
         found = shutil.which("claude")
         if found:
@@ -579,9 +617,7 @@ class CagentsApp(App):
                 initial = todo.worktree or todo.project_dir or os.getcwd()
                 self.push_screen(NewSessionModal(initial), self._new_session_chosen)
                 return
-        view = self.selected_view()
-        initial = view.project_dir if view else os.getcwd()
-        self.push_screen(NewSessionModal(initial), self._new_session_chosen)
+        self.push_screen(NewSessionModal(self._launch_cwd), self._new_session_chosen)
 
     def _new_session_chosen(self, result: tuple[str, str] | None) -> None:
         if not result:
