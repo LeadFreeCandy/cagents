@@ -200,6 +200,33 @@ def self_command(argv: list[str]) -> str:
     return "CAGENTS_SIDECAR=1 " + " ".join(shlex.quote(p) for p in parts)
 
 
+def _pane0_start_command(tmux: list[str]) -> str:
+    proc = subprocess.run(
+        [*tmux, "display-message", "-p", "-t", f"={CONTAINER_SESSION}:0.0", "#{pane_start_command}"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    # tmux wraps this format variable's value in literal quote characters.
+    return proc.stdout.strip().strip('"')
+
+
+def container_is_healthy(tmux: list[str]) -> bool:
+    """False if pane 0 isn't actually running cagents anymore.
+
+    If the app itself quits (e.g. `q` pressed) while a session is
+    attached in the sidecar's pane 1, only pane 0's process dies — pane
+    1's `claude` process is independent and keeps running. tmux then
+    renumbers the survivor into slot 0, and the container *session*
+    itself never closes (it still has a live pane). Reattaching to that
+    leaves the user staring at a bare, un-navigable session with no list
+    and no way back — every future launch reusing the same orphaned
+    session, forever, until something notices.
+    """
+    start = _pane0_start_command(tmux)
+    return bool(start) and not start.startswith("env -u TMUX tmux")
+
+
 def bootstrap_container(argv: list[str]) -> "None":
     """Wrap this invocation in the persistent container: cagents in pane 0,
     sessions opening to the right. Replaces the current process with
@@ -210,9 +237,18 @@ def bootstrap_container(argv: list[str]) -> "None":
     has = subprocess.run(
         [*tmux, "has-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
     )
-    if has.returncode != 0:
+    exists = has.returncode == 0
+    if exists and not container_is_healthy(tmux):
+        logger.warning(
+            "container session exists but pane 0 isn't cagents (start command: %r) — "
+            "killing and recreating instead of reattaching to an orphaned session",
+            _pane0_start_command(tmux),
+        )
+        subprocess.run([*tmux, "kill-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True)
+        exists = False
+    if not exists:
         cmd = self_command(argv)
-        logger.info("no %r container session yet; creating one: %s", CONTAINER_SOCKET, cmd)
+        logger.info("no healthy %r container session; creating one: %s", CONTAINER_SOCKET, cmd)
         size = shutil.get_terminal_size()
         subprocess.run(
             [*tmux, "new-session", "-d", "-s", CONTAINER_SESSION,
@@ -222,7 +258,7 @@ def bootstrap_container(argv: list[str]) -> "None":
         for command in container_setup_commands():
             subprocess.run([*tmux, *command], capture_output=True)
     else:
-        logger.info("reusing existing %r container session", CONTAINER_SOCKET)
+        logger.info("reusing existing, healthy %r container session", CONTAINER_SOCKET)
     logger.info("execvp tmux attach-session (this process ends here)")
     os.execvp("tmux", [*tmux, "attach-session", "-t", f"={CONTAINER_SESSION}"])
 

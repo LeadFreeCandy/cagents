@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from cagents.sessions import derive_state, map_tmux_sessions
+from cagents.sidecar import container_is_healthy
 from cagents.store import TrackedSession
 from cagents.tmuxctl import TmuxClient
 
@@ -39,6 +40,50 @@ def test_default_socket_is_not_shared_with_the_users_other_claude_usage():
     needs two real `claude` processes and is exercised manually, not as a
     routine (and CI-flaky, environment-dependent) test."""
     assert TmuxClient().socket != "claude"
+
+
+class TestContainerHealthCheck:
+    """Regression coverage for the actual reported bug: pressing 'q' inside
+    the sidecar container kills only pane 0 (the cagents app); pane 1 (a
+    real claude process, independent) survives, tmux renumbers it into
+    slot 0, and the container session never closes. Every future launch
+    then reused that orphaned session -- same stuck, list-less screen,
+    forever, with no way back. container_is_healthy() must catch this so
+    bootstrap_container() recreates instead of reattaching to it."""
+
+    @pytest.fixture
+    def outer_socket(self):
+        socket = f"cagents-pytest-outer-{uuid.uuid4().hex[:8]}"
+        yield socket
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+    def _tmux(self, socket: str) -> list[str]:
+        return ["tmux", "-L", socket]
+
+    def test_healthy_pane0_running_the_app_itself(self, outer_socket: str):
+        subprocess.run(
+            [*self._tmux(outer_socket), "new-session", "-d", "-s", "cagents", "sleep 60"],
+            check=True,
+        )
+        assert container_is_healthy(self._tmux(outer_socket)) is True
+
+    def test_orphaned_pane0_running_the_nested_attach_command_instead(self, outer_socket: str):
+        # The same shape sidecar.py's nested_attach_command produces for
+        # the session pane -- what pane 0 ends up running once it inherits
+        # the sole surviving pane's slot. `; sleep 30` keeps the pane (and
+        # so the whole single-pane session) alive long enough to query,
+        # regardless of whether the attach itself succeeds in this sandbox.
+        orphan_cmd = "env -u TMUX tmux -L claude attach-session -t '=some-session'; sleep 30"
+        subprocess.run(
+            [*self._tmux(outer_socket), "new-session", "-d", "-s", "cagents", orphan_cmd],
+            check=True,
+        )
+        assert container_is_healthy(self._tmux(outer_socket)) is False
+
+    def test_no_session_at_all_is_not_claimed_healthy(self, outer_socket: str):
+        # display-message against a nonexistent session/pane fails cleanly
+        # (empty start command) rather than raising.
+        assert container_is_healthy(self._tmux(outer_socket)) is False
 
 
 @pytest.fixture
