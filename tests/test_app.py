@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
+from textual.widgets import ContentSwitcher
 
 from cagents.app import CagentsApp
 from cagents.sessions import SessionRegistry, SessionState
@@ -153,6 +154,17 @@ async def test_startup_shows_grouped_sessions(world):
         assert "3 sessions" in summary
         assert "1 working" in summary
         assert "2 review" in summary
+
+
+async def test_startup_always_lands_on_grouped_view(world):
+    """However the app got left in a prior run, a fresh start must always
+    land on the grouped view (view 1) — never stuck on queue/kanban/todos."""
+    app, *_ = world
+    app.active_view_id = "kanban"  # simulate whatever it was before this run
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.active_view_id == "grouped"
+        assert app.query_one("#views", ContentSwitcher).current == "grouped"
 
 
 async def test_navigation_updates_preview(world):

@@ -162,10 +162,10 @@ class CagentsApp(App):
     def on_mount(self) -> None:
         self._apply_compact(self.size.width)
         self._apply_sidecar_active()
+        self.action_switch_view("grouped")  # always start here, regardless of prior state
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(60.0, self._wake_tick)
-        self.query_one("#grouped", GroupedView).focus_list()
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
                 apply_left_capture(self.store.get_setting("capture_left"))
