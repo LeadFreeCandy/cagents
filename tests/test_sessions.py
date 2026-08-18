@@ -8,6 +8,7 @@ from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
 
 from cagents.claude_data import parse_session_file
 from cagents.sessions import (
+    ATTENTION_ORDER,
     SessionRegistry,
     SessionState,
     derive_state,
@@ -66,6 +67,88 @@ class TestDeriveState:
         state, detail = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_INPUT
         assert detail == "permission: Bash"
+
+    def test_live_monitor_started_and_idle_is_monitoring_not_needs_input(
+        self, claude_dir: Path, now: float
+    ):
+        # Real shape, verified against an actual transcript: a Monitor
+        # tool_use gets an immediate, synchronous tool_result ("Monitor
+        # started...") — so it's resolved, not pending — and the turn
+        # simply ends there. Without last_resolved_tool_name, that reads
+        # as a generic "at the prompt" (NEEDS_INPUT), which is the exact
+        # false "needs you" this state exists to fix.
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("watch CI and tell me").assistant_tool_use(
+            "t1", "Monitor", {"command": "while true; do ...; done"}
+        ).tool_result("t1")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.MONITORING
+        assert detail == "monitor running"
+
+    def test_live_backgrounded_bash_and_idle_is_background(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("kick off the build").assistant_tool_use(
+            "t1", "Bash", {"command": "npm run build", "run_in_background": True}
+        ).tool_result("t1")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.BACKGROUND
+        assert detail == "background running"
+
+    def test_live_pending_background_agents_and_idle_is_background(
+        self, claude_dir: Path, now: float
+    ):
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("go wide").assistant_tool_use("t1", "Task", {"prompt": "do the thing"}).tool_result(
+            "t1"
+        ).raw(
+            {"type": "system", "subtype": "turn_duration", "durationMs": 100,
+             "pendingBackgroundAgentCount": 2, "isSidechain": False}
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.BACKGROUND
+        assert detail == "background running"
+
+    def test_regular_bash_result_and_idle_is_still_needs_input(self, claude_dir: Path, now: float):
+        # Same shape as the monitor/background cases (resolved tool_use,
+        # then nothing) but an ordinary foreground Bash call — must still
+        # be treated as genuinely idle-at-the-prompt.
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("what's in this dir").assistant_tool_use(
+            "t1", "Bash", {"command": "ls"}
+        ).tool_result("t1")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_INPUT
+        assert detail == "at the prompt"
+
+    def test_monitoring_beats_background_when_both_signals_present(
+        self, claude_dir: Path, now: float
+    ):
+        # A Monitor was the *last* resolved tool call, but background
+        # agents are also pending — Monitor is checked first (higher
+        # priority signal), per the requested ranking.
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("watch it").assistant_tool_use(
+            "t1", "Monitor", {"command": "..."}
+        ).tool_result("t1").raw(
+            {"type": "system", "subtype": "turn_duration", "durationMs": 100,
+             "pendingBackgroundAgentCount": 1, "isSidechain": False}
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.MONITORING
+
+    def test_monitoring_and_background_rank_below_working_above_stopped(self):
+        order = ATTENTION_ORDER
+        assert (
+            order[SessionState.WORKING]
+            < order[SessionState.MONITORING]
+            < order[SessionState.BACKGROUND]
+            < order[SessionState.STOPPED]
+        )
 
     def test_live_pane_prompt_wins_even_with_fresh_writes(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha")

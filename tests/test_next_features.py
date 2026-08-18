@@ -78,6 +78,24 @@ class TestDerivedExtras:
         assert parsed.pending_agents == 5
         assert parsed.last_turn_duration_ms == 1234
 
+    def test_last_resolved_tool_tracks_name_and_background_flag(self, claude_dir: Path):
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("go").assistant_tool_use("t1", "Bash", {"command": "ls"}).tool_result("t1")
+        b.assistant_tool_use(
+            "t2", "Bash", {"command": "npm run build", "run_in_background": True}, ts="2026-08-17T10:00:10.000Z"
+        ).tool_result("t2", ts="2026-08-17T10:00:11.000Z")
+        parsed = parse_session_file(b.write(claude_dir))
+        # the *most recent* resolution wins, overwriting the earlier one
+        assert parsed.last_resolved_tool_name == "Bash"
+        assert parsed.last_resolved_tool_background is True
+
+    def test_last_resolved_tool_background_false_for_a_foreground_call(self, claude_dir: Path):
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("go").assistant_tool_use("t1", "Bash", {"command": "ls"}).tool_result("t1")
+        parsed = parse_session_file(b.write(claude_dir))
+        assert parsed.last_resolved_tool_name == "Bash"
+        assert parsed.last_resolved_tool_background is False
+
 
 @pytest.fixture
 def world(claude_dir: Path, tmp_path: Path, now: float):

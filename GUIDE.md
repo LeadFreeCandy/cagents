@@ -105,6 +105,12 @@ pane or use `ctrl+c`-free alternatives instead). Alt-q is the recommended trade.
   Ranks between review and working in the queue. Reopens to `◆ review` automatically —
   new GitHub comments show as "github comments", or any new local activity — and marks
   itself `✓ done` ("merged") once the PR merges.
+- `◎ monitoring` — idle at the prompt, but not really waiting on you: the last thing that
+  happened was a `Monitor` tool call starting (its own real Claude Code feature, distinct
+  from background agents) — something async will wake the session back up on its own.
+  Low priority; ranks below working.
+- `◌ background` — same idea, one notch lower priority: idle at the prompt with a
+  backgrounded Bash command or a pending background agent still running.
 - `✓ done` — you pressed `r` (or accepted via the palette) *after* the last activity.
   If Claude does more work later, it drops back to `◆ review` automatically.
 - `■ stopped` — no live process and the transcript ends mid-turn.

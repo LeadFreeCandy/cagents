@@ -196,7 +196,7 @@ class QueueView(BaseSessionView):
 # Kanban columns: (title, states shown, css id)
 KANBAN_COLUMNS: list[tuple[str, tuple[SessionState, ...], str]] = [
     ("◉ Needs you", (SessionState.NEEDS_INPUT,), "kb-needs-you"),
-    ("● Working", (SessionState.WORKING,), "kb-working"),
+    ("● Working", (SessionState.WORKING, SessionState.MONITORING, SessionState.BACKGROUND), "kb-working"),
     ("◆ To review", (SessionState.NEEDS_REVIEW, SessionState.WAITING_ON_REVIEW), "kb-review"),
     ("✓ Done / stopped", (SessionState.DONE, SessionState.STOPPED), "kb-done"),
 ]

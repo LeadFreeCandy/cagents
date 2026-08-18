@@ -36,6 +36,12 @@ class SessionState(Enum):
     NEEDS_INPUT = "needs input"  # blocked on a human: permission / question
     NEEDS_REVIEW = "needs review"  # Claude finished; no human has looked yet
     WAITING_ON_REVIEW = "waiting on review"  # done here; paused on an external PR review
+    # Low priority: idle at the prompt, but not genuinely waiting on you —
+    # something async will wake it back up on its own. Monitor beats
+    # background: a Monitor tool call is explicitly watching for a named
+    # condition (higher signal than a bare backgrounded command/agent).
+    MONITORING = "monitoring"  # a Monitor tool call is watching for something to finish
+    BACKGROUND = "background"  # idle at the prompt, but a background command/agent is running
     DONE = "done"  # a human explicitly accepted the result (or the PR merged)
     STOPPED = "stopped"  # ended without completing normally
 
@@ -47,8 +53,10 @@ ATTENTION_ORDER = {
     SessionState.NEEDS_REVIEW: 1,
     SessionState.WAITING_ON_REVIEW: 2,
     SessionState.WORKING: 3,
-    SessionState.STOPPED: 4,
-    SessionState.DONE: 5,
+    SessionState.MONITORING: 4,
+    SessionState.BACKGROUND: 5,
+    SessionState.STOPPED: 6,
+    SessionState.DONE: 7,
 }
 
 # If the transcript was written to this recently, Claude is mid-turn even if
@@ -181,7 +189,14 @@ def derive_state(
             return (SessionState.NEEDS_INPUT, detail)
         if parsed.last_record_role == "user":
             # A user message with no reply and no writes: waiting to start,
-            # or the human is mid-conversation at the prompt.
+            # mid-conversation at the prompt — OR the "user" message is
+            # actually the synchronous ack of a Monitor/background start,
+            # in which case the turn deliberately ended and something
+            # async will wake it back up; that's not really "needs you".
+            if parsed.last_resolved_tool_name == "Monitor":
+                return (SessionState.MONITORING, "monitor running")
+            if parsed.last_resolved_tool_background or parsed.pending_agents > 0:
+                return (SessionState.BACKGROUND, "background running")
             return (SessionState.NEEDS_INPUT, "at the prompt")
         if parsed.last_record_role == "":
             # A live session with no conversation yet: it's waiting for you.

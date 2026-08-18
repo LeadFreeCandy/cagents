@@ -157,6 +157,26 @@ constraint, not taste. Newest epochs last.
   plainly: plugins are arbitrary Python with the user's permissions; that's what an
   extension system is.
 
+## 9. Monitoring / background: two more "not really needs you" states
+
+- Same root problem `w` fixed for external PR review, one layer down: a session idle
+  at the prompt right after a `Monitor` tool call (a real, distinct Claude Code
+  feature — different from spawning a background agent) or a backgrounded Bash
+  command/agent reads identically to a genuine "needs you" from live/pane signals
+  alone, because the ack is synchronous and the turn simply ends there.
+- Fixed at the parser, not with heuristics on old data: `ParsedSession` now tracks
+  `last_resolved_tool_name` / `last_resolved_tool_background` — the name and
+  background-ness of whichever tool call's `tool_result` was seen *last* — verified
+  against real transcripts before writing any of this (a `Monitor` tool_use gets an
+  immediate `"Monitor started (task <id>)..."` result; a backgrounded Bash call gets
+  `"Command running in background with ID: ..."` — both synchronous, both truly
+  fire-and-forget).
+- Two new low-priority states, `MONITORING` and `BACKGROUND`, checked only on the
+  `live` + `last_record_role == "user"` branch (exactly the case that used to fall
+  through to a bare "at the prompt"). Monitor outranks background — a `Monitor` call is
+  watching for a *named* condition, a stronger signal than a bare backgrounded
+  command/agent — checked in that order when both are present.
+
 ## Standing constraints (the ones that keep winning arguments)
 
 1. Core loop above everything: open fast, browse smooth, preview real, attach always

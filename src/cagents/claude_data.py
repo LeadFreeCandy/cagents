@@ -112,6 +112,14 @@ class ParsedSession:
     # a tool call is either still running or waiting on a permission decision.
     pending_tool_use: bool = False
     pending_tool_name: str = ""
+    # The most recently *resolved* tool call (its tool_result already
+    # arrived) — used to tell "Monitor started" / "running in background"
+    # acks apart from a genuine idle-at-the-prompt, since both look
+    # identical from live/pane-marker signals alone (the ack is immediate
+    # and synchronous; what follows is a real end-of-turn, same as a
+    # normal finished turn).
+    last_resolved_tool_name: str = ""
+    last_resolved_tool_background: bool = False
     last_record_role: str = ""  # "user" | "assistant" | "" if neither seen
     truncated: bool = False  # tail parse did not cover the whole file
     # First line of the newest assistant text — "what the agent last did/said".
@@ -210,8 +218,9 @@ def parse_session_file(
     lines, parsed.truncated = _read_lines(path, head_bytes, tail_bytes)
 
     preview: list[PreviewItem] = []
-    # tool_use id -> preview index, so tool_results can be matched up.
-    open_tool_uses: dict[str, str] = {}  # id -> tool name
+    # tool_use id -> (tool name, run_in_background), so tool_results can be
+    # matched back up to what they're resolving.
+    open_tool_uses: dict[str, tuple[str, bool]] = {}
     fallback_title = ""
     last_prompt = ""
     seen_links: set[str] = set()
@@ -302,7 +311,9 @@ def parse_session_file(
                 if btype == "tool_result":
                     tool_id = block.get("tool_use_id")
                     if isinstance(tool_id, str):
-                        open_tool_uses.pop(tool_id, None)
+                        resolved = open_tool_uses.pop(tool_id, None)
+                        if resolved is not None:
+                            parsed.last_resolved_tool_name, parsed.last_resolved_tool_background = resolved
                 elif btype == "text":
                     text = block.get("text", "")
                     if isinstance(text, str) and text.strip() and not _SYSTEMISH_USER.match(text):
@@ -335,10 +346,11 @@ def parse_session_file(
                 name = block.get("name", "")
                 if not isinstance(name, str):
                     name = ""
+                tool_input = block.get("input")
+                is_background = isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
                 tool_id = block.get("id")
                 if isinstance(tool_id, str):
-                    open_tool_uses[tool_id] = name
-                tool_input = block.get("input")
+                    open_tool_uses[tool_id] = (name, is_background)
                 path_key = _FILE_TOOLS.get(name)
                 if path_key and isinstance(tool_input, dict):
                     file_path = tool_input.get(path_key)
@@ -354,7 +366,7 @@ def parse_session_file(
     if open_tool_uses:
         parsed.pending_tool_use = True
         # The most recently opened tool call is the interesting one.
-        parsed.pending_tool_name = next(reversed(open_tool_uses.values()))
+        parsed.pending_tool_name = next(reversed(open_tool_uses.values()))[0]
 
     parsed.preview = preview[-preview_items:]
     return parsed
