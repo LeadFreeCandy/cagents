@@ -90,6 +90,7 @@ class CagentsApp(App):
         Binding("L", "edit_label", "Label", show=False),
         Binding("x", "untrack", "Untrack", show=False),
         Binding("R", "refresh_now", "Refresh", show=False),
+        Binding("equals_sign", "expand_rail", "Expand", show=False),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
@@ -271,6 +272,13 @@ class CagentsApp(App):
         right-hand pane when running as a sidecar rail."""
         if self.sidecar is not None:
             self.sidecar.open(nested_attach_command(self.tmux.socket, name))
+            if not getattr(self, "_sidecar_hint_shown", False):
+                self._sidecar_hint_shown = True
+                self.notify(
+                    "Opened in the right pane. Back to the list: ctrl+\\ "
+                    "(or alt+q, or click the rail).",
+                    timeout=8,
+                )
         else:
             self._suspend_and_run(lambda: self.tmux.attach(name))
 
@@ -761,6 +769,16 @@ class CagentsApp(App):
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
+
+    def action_expand_rail(self) -> None:
+        """`=`: grow the sidecar rail back out. Mostly for running inside
+        your own tmux, where the container's focus hooks don't exist."""
+        if self.sidecar is None:
+            return
+        try:
+            self.sidecar.expand()
+        except Exception as error:
+            self.notify(f"Could not resize: {error}", severity="warning")
 
     def action_help(self) -> None:
         self.push_screen(HelpModal())

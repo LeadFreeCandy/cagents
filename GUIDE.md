@@ -31,16 +31,25 @@ strictly read-only to it.
 
 ## Getting in and out of a session
 
-- **In**: `enter`. Full-screen mode hands you the whole terminal — you are in the real
-  Claude CLI, exactly as if you'd run `claude` yourself. Sidecar mode opens it in the
-  right pane instead.
-- **Out (full-screen mode)**: `ctrl-b d` — tmux detach. cagents reappears exactly where
-  you were. The session keeps running; detaching *never* stops Claude.
-- **Out (sidecar mode)**: `alt-q` — one keystroke, no prefix. Or just click the left rail.
+**The rail is the default.** Run `cagents-feature` in a plain terminal and it wraps
+itself in the sidecar container automatically — `enter` opens the session in a right
+pane and the list stays put as a left rail. (`cagents-shell` is now just an alias.)
+
+- **In**: `enter` — the real Claude CLI in the right pane.
+- **Back to the list**: **`ctrl+\`** — toggles between rail and session, works in every
+  terminal. `alt+q` / `alt+w` do the same one-way (they need Option-as-Meta / "Esc+"
+  enabled in your terminal profile — the usual reason "alt didn't work"). Clicking a
+  pane also works; the rail auto-expands/collapses with focus either way.
+- **Classic full-screen mode**: `cagents-feature --fullscreen` (and stable `cagents` is
+  always this). There, attach takes the whole terminal and you come back with
+  `ctrl-b d` (tmux detach). Detaching never stops Claude.
+- **Inside your own tmux**: cagents splits your current window instead of nesting a
+  container. Your tmux has no auto-resize hooks, so get back with a click or
+  `ctrl-b` + arrow, and press `=` in cagents to grow the rail back out.
 - Attaching to a `stopped` session resumes it (`claude --resume`) in a fresh tmux session
   first, so enter always lands you in a live CLI.
 
-## Sidecar mode (`cagents-shell`) — cagents as a permanent fixture
+## Sidecar mode — cagents as a permanent fixture
 
 ```
 ┌──────────────┬──────────────────────────────────────┐
@@ -53,9 +62,10 @@ strictly read-only to it.
 
 - `enter` on a session opens/replaces the right pane; the rail collapses to 34 columns
   and switches to dense rows (glyph + title + age — states still update live).
-- **`alt-q`** — back to the list. The rail expands to half the screen (preview pane
-  returns automatically). **`alt-w`** — back to the session, rail collapses. Mouse
-  clicks do the same thing; the rail always follows focus.
+- **`ctrl+\`** — toggle rail ↔ session (works everywhere). **`alt-q`** — to the list,
+  **`alt-w`** — to the session (need Option-as-Meta in the terminal profile). The rail
+  expands to half the screen when focused, collapses when you leave; mouse clicks do
+  the same thing.
 - The right pane is a *nested* tmux client onto your normal `claude` socket. Close the
   pane, quit the shell, reboot — the session is untouched and still visible to `cs` and
   plain `cagents`.

@@ -37,14 +37,16 @@ class FakeOuterTmux:
 
 
 class TestSidecar:
-    def test_enabled_requires_both_env_vars(self, monkeypatch):
+    def test_enabled_inside_any_tmux_unless_opted_out(self, monkeypatch):
         monkeypatch.delenv("TMUX", raising=False)
         monkeypatch.delenv("CAGENTS_SIDECAR", raising=False)
-        assert Sidecar.enabled() is False
+        assert Sidecar.enabled() is False  # no tmux, no panes to split
         monkeypatch.setenv("TMUX", "/tmp/sock,1,0")
-        assert Sidecar.enabled() is False
+        assert Sidecar.enabled() is True  # user's own tmux: split in place
         monkeypatch.setenv("CAGENTS_SIDECAR", "1")
-        assert Sidecar.enabled() is True
+        assert Sidecar.enabled() is True  # the container
+        monkeypatch.setenv("CAGENTS_SIDECAR", "0")
+        assert Sidecar.enabled() is False  # --fullscreen opt-out
 
     def test_first_open_splits_and_collapses(self):
         outer = FakeOuterTmux()
@@ -147,3 +149,61 @@ async def test_compact_toggles_back_when_widened(world):
         await pilot.pause()
         assert app.compact is False
         assert not app.query_one("#body").has_class("compact")
+
+
+class TestContainerBootstrap:
+    def test_should_bootstrap_only_bare_terminal(self):
+        from cagents.sidecar import should_bootstrap
+
+        assert should_bootstrap({}, stdout_is_tty=True, fullscreen_flag=False) is True
+        # already inside tmux -> sidecar splits in place instead
+        assert should_bootstrap({"TMUX": "x"}, True, False) is False
+        # already the container pane
+        assert should_bootstrap({"CAGENTS_SIDECAR": "1"}, True, False) is False
+        # explicit classic mode
+        assert should_bootstrap({}, True, True) is False
+        # not a terminal (tests, pipes)
+        assert should_bootstrap({}, False, False) is False
+
+    def test_self_command_quotes_and_marks_sidecar(self, monkeypatch):
+        import sys
+
+        from cagents.sidecar import self_command
+
+        monkeypatch.setattr(sys, "argv", ["/opt/venv/bin/cagents"])
+        cmd = self_command(["--store", "/tmp/my store.json"])
+        assert cmd.startswith("CAGENTS_SIDECAR=1 /opt/venv/bin/cagents")
+        assert "'/tmp/my store.json'" in cmd
+
+    def test_self_command_module_invocation(self, monkeypatch):
+        import sys
+
+        from cagents.sidecar import self_command
+
+        monkeypatch.setattr(sys, "argv", ["/x/cagents/__main__.py"])
+        cmd = self_command([])
+        assert "-m cagents" in cmd
+
+    def test_container_setup_never_binds_escape(self):
+        from cagents.sidecar import container_setup_commands
+
+        commands = container_setup_commands()
+        flat = [" ".join(c) for c in commands]
+        assert not any("Escape" in c for c in flat)  # Esc stays Claude's
+        assert any("M-q" in c for c in flat)
+        assert any("C-\\" in c for c in flat)  # works without Meta config
+        assert any("after-select-pane" in c for c in flat)
+
+
+async def test_expand_rail_key(world):
+    store, tmux, registry, claude_dir = world
+    outer = FakeOuterTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0"),
+    )
+    async with app.run_test(size=(34, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("equals_sign")
+        await pilot.pause()
+        assert ["resize-pane", "-t", "%0", "-x", "50%"] in outer.calls

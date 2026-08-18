@@ -1,62 +1,15 @@
 #!/bin/bash
-# cagents-shell — cagents as a persistent container.
+# cagents-shell — kept for muscle memory. The sidecar container is now the
+# DEFAULT when you run cagents-feature in a plain terminal, so this is just
+# an alias. (Classic full-terminal mode: cagents-feature --fullscreen.)
 #
-# Layout: cagents runs as a rail on the left; pressing Enter on a session
-# opens it in a pane on the right (the real CLI, attached over the claude
-# socket). The rail auto-collapses to ~34 columns while a session has
-# focus and expands again when you come back.
+# Container keys, once inside:
+#   ctrl+\   toggle between the list rail and the session pane (any terminal)
+#   alt+q    jump to the list        alt+w   jump to the session
+#            (alt keys need "Option as Meta" / "Esc+" in your terminal prefs)
+#   click    either pane — the rail auto-collapses/expands with focus
 #
-#   Alt-q          jump back to the cagents list (rail expands)
-#   Alt-w          jump to the session pane (rail collapses)
-#   (also: click either pane — the rail follows focus automatically)
-#
-# The session pane is a nested tmux client, so the session survives
-# anything: close the pane, quit cagents-shell, whatever — `cs` and plain
-# `cagents` still see it.
-#
-# Esc is deliberately NOT bound: inside Claude, Esc means "interrupt" and
-# stealing it at the tmux layer would break that. If you want it anyway,
-# uncomment the marked line below — everything still works, but you lose
-# Esc inside sessions.
-set -euo pipefail
-
-SOCK=cagents-ui
-SESSION=cagents
-CAGENTS_BIN="${CAGENTS_BIN:-$HOME/.local/bin/cagents-feature}"
-
-if [ -n "${TMUX:-}" ]; then
-  echo "cagents-shell: run from a plain terminal (you're already inside tmux)." >&2
-  exit 1
-fi
-
-t() { tmux -L "$SOCK" "$@"; }
-
-if t has-session -t "=$SESSION" 2>/dev/null; then
-  exec tmux -L "$SOCK" attach -t "=$SESSION"
-fi
-
-t new-session -d -s "$SESSION" -x "$(tput cols)" -y "$(tput lines)" \
-  "CAGENTS_SIDECAR=1 $CAGENTS_BIN"
-
-# Container behavior
-t set -g escape-time 10          # keep Esc snappy for Claude underneath
-t set -g mouse on                # click a pane to focus it
-t set -g status off              # the rail is the status line
-t set -g detach-on-destroy on
-
-# The rail follows focus: wide when you're choosing, slim while you work.
-# (after-select-pane fires for both the Alt keys and mouse clicks;
-# pane-focus-in only works with terminal focus reporting, so avoid it.)
-t set -g focus-events on
-t set-hook -g after-select-pane \
-  "if -F '#{==:#{pane_index},0}' 'resize-pane -t :.0 -x 50%' 'resize-pane -t :.0 -x 34'"
-
-# One-keystroke navigation, no prefix.
-t bind -n M-q select-pane -t :.0
-t bind -n M-w select-pane -t :.1
-
-# DANGER ZONE — plain Esc jumps back to the list, but Claude loses its
-# interrupt key. Uncomment only if you accept that trade:
-# t bind -n Escape select-pane -t :.0
-
-exec tmux -L "$SOCK" attach -t "=$SESSION"
+# Esc is deliberately not bound: inside a session it's Claude's interrupt.
+# To trade that away, run once:
+#   tmux -L cagents-ui bind -n Escape select-pane -t :.0
+exec "$HOME/.local/bin/cagents-feature" "$@"
