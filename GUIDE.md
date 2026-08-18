@@ -15,18 +15,17 @@ attach cannot disagree because they are the same mechanism.
 Moving through the list re-points the pane (debounced ~250ms so j/k stays instant).
 Hover the pane and scroll with the mouse wheel.
 
-## Layout — one key: `←`
+## Layout — the arrows size the Claude pane
+
+Three states, ordered by Claude's width; `←` shrinks one step, `→` grows one step:
 
 ```
-SMALL  (rail 34 cols, you're in the session)
-  ← →  WIDE   (50/50, you're in the list — "take me back")
-  ← →  HIDDEN (rail gone, session full-width)
-  ← →  SMALL  …
+WIDE (50/50, you're in the list)  ←→  SMALL (slim rail, you're in the session)  ←→  HIDDEN (full width)
 ```
 
 Clicking a pane also moves focus; the rail auto-sizes to follow. The trade-off, as
-accepted: ← doesn't move the text cursor while editing in the Claude prompt (toggle
-off in settings if it bites; you lose the layout key).
+accepted: the arrows don't move the text cursor while editing in the Claude prompt
+(toggle off in settings if it bites; you lose the layout keys).
 
 ## Anywhere keys — they work while you're inside the session
 
@@ -69,8 +68,8 @@ the session you're looking at.
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |
 | `o` | open the newest recorded PR/artifact link |
-| `e` / `L` / `x` | note / label / untrack (cagents bookkeeping only) |
-| `n` / `a` | new session (defaults to your launch directory, tab completes) / track existing |
+| `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
+| `n` / `a` | new session (launch-dir default, tab completes/cycles, `ctrl+t` picks the dir in a real shell — zoxide works) / track existing |
 | `1 2 3` `tab` | grouped / queue / kanban (←/→ move kanban columns) |
 | `:` | fleet assistant: plain English → a confirmed plan on cagents' bookkeeping |
 | `,` `?` `q` | settings / help / quit |
@@ -93,7 +92,7 @@ the session you're looking at.
 
 ## Settings (`,`)
 
-Sidebar rail (on) · toast notifications (off; errors always show) · ← layout key
+Sidebar rail (on) · toast notifications (off; errors always show) · arrow layout keys
 (on) · desktop notifications (off; with terminal-notifier installed, clicking one
 selects the task).
 

@@ -29,7 +29,6 @@ from .sessions import Snapshot
 ALLOWED_ACTIONS = {
     "mark_reviewed",
     "clear_reviewed",
-    "set_note",
     "set_label",
     "untrack",
 }
@@ -49,9 +48,9 @@ Reply with a single JSON object, no markdown fences, no prose outside it:
 {{
   "reply": "<one or two sentences for the user>",
   "actions": [
-    {{"action": "<one of: mark_reviewed, clear_reviewed, set_note, set_label, untrack>",
+    {{"action": "<one of: mark_reviewed, clear_reviewed, set_label, untrack>",
       "session_id": "<full session_id from the table>",
-      "value": "<text for set_note/set_label, omit otherwise>",
+      "value": "<text for set_label, omit otherwise>",
       "reason": "<short why>"}}
   ]
 }}
@@ -114,7 +113,6 @@ def fleet_table(snapshot: Snapshot) -> str:
                 "state_detail": view.state_detail,
                 "last_active": human_age(view.last_activity, now) + " ago",
                 "live": view.live,
-                "note": view.tracked.note,
                 "label": view.tracked.label,
             }
         )
@@ -182,9 +180,6 @@ def apply_plan(plan: Plan, store, now_iso: str) -> list[str]:
         elif act.action == "clear_reviewed":
             store.clear_reviewed(act.session_id)
             done.append(f"unreviewed {short}")
-        elif act.action == "set_note":
-            store.set_note(act.session_id, act.value)
-            done.append(f"note on {short}")
         elif act.action == "set_label":
             store.set_label(act.session_id, act.value)
             done.append(f"label on {short}")

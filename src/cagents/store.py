@@ -58,7 +58,6 @@ class TrackedSession:
     project_dir: str  # the real cwd the session runs in
     added_at: str  # ISO 8601
     label: str = ""
-    note: str = ""
     reviewed_at: str = ""  # ISO 8601, empty = not accepted ("done")
     archived: bool = False  # hidden from session views; history kept
     # Parked on the outside world (PR review). Cleared by new local
@@ -81,7 +80,6 @@ class TrackedSession:
             "project_dir": self.project_dir,
             "added_at": self.added_at,
             "label": self.label,
-            "note": self.note,
             "reviewed_at": self.reviewed_at,
             "archived": self.archived,
             "waiting_since": self.waiting_since,
@@ -98,7 +96,6 @@ class TrackedSession:
             project_dir=str(data.get("project_dir", "")),
             added_at=str(data.get("added_at", "")),
             label=str(data.get("label", "")),
-            note=str(data.get("note", "")),
             reviewed_at=str(data.get("reviewed_at", "")),
             archived=bool(data.get("archived", False)),
             waiting_since=str(data.get("waiting_since", "")),
@@ -192,12 +189,6 @@ class Store:
         tracked = self.sessions.get(session_id)
         if tracked is not None and tracked.reviewed_at:
             tracked.reviewed_at = ""
-            self.save()
-
-    def set_note(self, session_id: str, note: str) -> None:
-        tracked = self.sessions.get(session_id)
-        if tracked is not None:
-            tracked.note = note
             self.save()
 
     def set_label(self, session_id: str, label: str) -> None:

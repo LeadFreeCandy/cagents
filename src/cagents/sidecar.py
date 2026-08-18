@@ -147,10 +147,18 @@ _FOCUS_HOOK = (
     f"'resize-pane -t :.0 -x {COLLAPSED_WIDTH}'"
 )
 
-# ← from inside the session pane: HIDDEN -> SMALL (unzoom, slim rail,
-# stay in the session) or SMALL -> WIDE (focus the rail; the hook widens
-# it). From the rail, ← passes through to the app (kanban columns, or the
-# WIDE -> HIDDEN step).
+# The arrow keys are a size control for the Claude pane, over three states
+# ordered by its width: WIDE (50/50, rail focused) < SMALL (slim rail,
+# session focused) < HIDDEN (rail zoomed away). ← shrinks it one step,
+# → grows it one step; both saturate at the ends.
+#
+# From inside the session pane:
+#   ← : HIDDEN -> SMALL (unzoom, stay in the session)
+#       SMALL  -> WIDE  (focus the rail; the hook widens it)
+#   → : SMALL  -> HIDDEN (zoom)
+#       HIDDEN -> passes through to Claude (already max)
+# From the rail, both pass through to the app (kanban columns; → also
+# does WIDE -> SMALL by focusing the session).
 _LEFT_CYCLE = [
     "bind", "-n", "Left",
     "if", "-F", "#{==:#{pane_index},0}",
@@ -158,6 +166,15 @@ _LEFT_CYCLE = [
     "if -F '#{window_zoomed_flag}' "
     "'resize-pane -Z -t :.1 ; select-pane -t :.1' "
     "'select-pane -t :.0'",
+]
+
+_RIGHT_CYCLE = [
+    "bind", "-n", "Right",
+    "if", "-F", "#{==:#{pane_index},0}",
+    "send-keys Right",
+    "if -F '#{window_zoomed_flag}' "
+    "'send-keys Right' "
+    "'resize-pane -Z -t :.1'",
 ]
 
 
@@ -173,7 +190,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ← layout · C-s shell · C-d diff "],
+        ["set", "-g", "status-right", " ←/→ size · C-s shell · C-d diff "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -187,8 +204,8 @@ def container_setup_commands() -> list[list[str]]:
 
 def left_capture_commands(enable: bool) -> list[list[str]]:
     if enable:
-        return [_LEFT_CYCLE]
-    return [["unbind", "-n", "Left"]]
+        return [_LEFT_CYCLE, _RIGHT_CYCLE]
+    return [["unbind", "-n", "Left"], ["unbind", "-n", "Right"]]
 
 
 def apply_left_capture(enable: bool, runner=None) -> None:

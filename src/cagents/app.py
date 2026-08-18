@@ -99,11 +99,10 @@ class CagentsApp(App):
         Binding("2", "switch_view('queue')", "Queue", show=False),
         Binding("3", "switch_view('kanban')", "Kanban", show=False),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
-        Binding("left", "layout_left", "Hide rail", show=False),
+        Binding("right", "grow_session", "Grow session", show=False),
         Binding("asterisk", "related", "Related", show=False),
         Binding("o", "open_link", "Open link", show=False),
-        Binding("e", "edit_note", "Note", show=False),
-        Binding("L", "edit_label", "Label", show=False),
+        Binding("R", "rename", "Rename", show=False),
         Binding("x", "untrack", "Untrack", show=False),
         Binding("colon", "palette", "Fleet", show=False),
         Binding("R", "refresh_now", "Refresh", show=False),
@@ -309,11 +308,12 @@ class CagentsApp(App):
         i = VIEW_IDS.index(self.active_view_id)
         self.action_switch_view(VIEW_IDS[(i + 1) % len(VIEW_IDS)])
 
-    def action_layout_left(self) -> None:
-        """← with the rail focused (and no view consuming it): WIDE -> HIDDEN."""
+    def action_grow_session(self) -> None:
+        """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
+        focus moves into the session, the rail collapses via the tmux hook."""
         if self.sidecar is not None:
             try:
-                self.sidecar.hide_rail()
+                self.sidecar.focus_session()
             except Exception as error:
                 self.notify(f"Layout failed: {error}", severity="warning")
 
@@ -431,6 +431,37 @@ class CagentsApp(App):
                 fn()
         except SuspendNotSupported:
             fn()  # headless (tests): run without handing over the terminal
+
+    def pick_directory_via_shell(self, start_dir: str, shell_cmd: list[str] | None = None) -> str:
+        """Terminal-passthrough directory picker: hands the real terminal to
+        the user's own interactive shell (aliases, zoxide, everything),
+        seeded in start_dir. Wherever they are when they exit is the answer.
+
+        A subprocess's cwd can't be read after it exits, so we poll it via
+        lsof WHILE the shell runs and keep the last value — shell-agnostic,
+        no rc-file tricks."""
+        import subprocess
+        import time
+
+        shell_cmd = shell_cmd or [os.environ.get("SHELL", "/bin/zsh"), "-i"]
+        seed = start_dir if Path(start_dir).is_dir() else str(Path.home())
+        result = {"dir": seed}
+
+        def run() -> None:
+            proc = subprocess.Popen(shell_cmd, cwd=seed)
+            while proc.poll() is None:
+                out = subprocess.run(
+                    ["lsof", "-a", "-p", str(proc.pid), "-d", "cwd", "-Fn"],
+                    capture_output=True, text=True,
+                )
+                for line in out.stdout.splitlines():
+                    if line.startswith("n/"):
+                        result["dir"] = line[1:]
+                time.sleep(0.2)
+
+        self._suspend_and_run(run)
+        picked = result["dir"]
+        return picked if Path(picked).is_dir() else seed
 
     @staticmethod
     def _current_tty() -> str:
@@ -889,27 +920,13 @@ class CagentsApp(App):
 
     # -- note / label / untrack --------------------------------------------------
 
-    def action_edit_note(self) -> None:
+    def action_rename(self) -> None:
         view = self.selected_view()
         if view is None:
             return
         self.push_screen(
-            InputModal("Note", initial=view.tracked.note, placeholder="short note to self"),
-            lambda note: self._note_saved(view.session_id, note),
-        )
-
-    def _note_saved(self, session_id: str, note: str | None) -> None:
-        if note is None:
-            return
-        self.store.set_note(session_id, note.strip())
-        self.refresh_data()
-
-    def action_edit_label(self) -> None:
-        view = self.selected_view()
-        if view is None:
-            return
-        self.push_screen(
-            InputModal("Label", initial=view.tracked.label, placeholder="overrides the AI title"),
+            InputModal("Rename", initial=view.tracked.label,
+                       placeholder="display name (empty restores the AI title)"),
             lambda label: self._label_saved(view.session_id, label),
         )
 

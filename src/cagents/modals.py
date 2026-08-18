@@ -51,31 +51,37 @@ class InputModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-def complete_directory(value: str) -> str:
-    """Tab-completion for directory paths: longest common prefix of matching
-    subdirectories; a unique match gains a trailing slash."""
+def complete_directory(value: str) -> tuple[str, list[str]]:
+    """Tab-completion for directory paths.
+
+    Returns (completion, matches): completion is the longest common prefix
+    (a unique match gains a trailing slash); matches lists the full
+    candidate paths, for cycling on repeated tab. Dot-directories stay
+    hidden unless the typed fragment itself starts with a dot."""
     import os
 
     if not value:
-        return ""
+        return "", []
     expanded = str(Path(value).expanduser())
     base, partial = os.path.split(expanded)
     if not base:
-        return value
+        return value, []
     try:
         entries = sorted(
             e for e in os.listdir(base or "/")
             if e.startswith(partial) and os.path.isdir(os.path.join(base, e))
+            and (partial.startswith(".") or not e.startswith("."))
         )
     except OSError:
-        return value
+        return value, []
     if not entries:
-        return value
+        return value, []
+    matches = [os.path.join(base, e) for e in entries]
     common = os.path.commonprefix(entries)
     completed = os.path.join(base, common)
     if len(entries) == 1:
         completed += "/"
-    return completed
+    return completed, matches
 
 
 class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
@@ -87,6 +93,7 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+t", "pick_via_shell", "Shell pick", show=False),
         Binding("tab", "app.focus_next", "Next field", show=False),
         Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
     ]
@@ -109,7 +116,11 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Start a new Claude session")
-            yield Static("Enter to start — you'll be talking to Claude directly.", classes="hint")
+            yield Static(
+                "Enter to start · tab completes/cycles directories · "
+                "ctrl+t: cd/zoxide in a real shell, use wherever you end up",
+                classes="hint",
+            )
             yield Input(value=self.initial_dir, placeholder="project directory", id="dir")
             yield Input(placeholder="optional label (for you, not Claude)", id="label")
 
@@ -118,16 +129,43 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
 
     def on_key(self, event) -> None:
         if event.key != "tab":
+            self._tab_state = None  # typing resets the completion cycle
             return
         dir_input = self.query_one("#dir", Input)
         if not dir_input.has_focus:
             return
-        completed = complete_directory(dir_input.value)
+        state = getattr(self, "_tab_state", None)
+        if state and state[0] == dir_input.value:
+            # Repeated tab: cycle through the full matches.
+            _, matches, index = state
+            index = (index + 1) % len(matches)
+            chosen = matches[index]
+            event.stop()
+            event.prevent_default()
+            dir_input.value = chosen
+            dir_input.cursor_position = len(chosen)
+            self._tab_state = (chosen, matches, index)
+            return
+        completed, matches = complete_directory(dir_input.value)
         if completed and completed != dir_input.value:
             event.stop()
             event.prevent_default()
             dir_input.value = completed
             dir_input.cursor_position = len(completed)
+            if len(matches) > 1:
+                self._tab_state = (completed, matches, -1)
+        elif len(matches) > 1:
+            event.stop()
+            event.prevent_default()
+            self._tab_state = (dir_input.value, matches, -1)
+
+    def action_pick_via_shell(self) -> None:
+        dir_input = self.query_one("#dir", Input)
+        start = dir_input.value.strip() or self.initial_dir
+        directory = self.app.pick_directory_via_shell(start)  # type: ignore[attr-defined]
+        dir_input.value = directory
+        dir_input.cursor_position = len(directory)
+        dir_input.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         directory = self.query_one("#dir", Input).value.strip()
@@ -270,8 +308,8 @@ HELP_TEXT = """\
   1 / 2 / 3     grouped · queue · kanban        tab  next view
 
 [bold cyan]Navigate[/bold cyan]
-  j / k, ↑ / ↓  move          ← / →  kanban columns (when the list has focus)
-  ←             layout cycle: list ↔ sidebar hidden ↔ sidebar small
+  j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
+  ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
 
 [bold cyan]Anywhere — even inside the session[/bold cyan]
@@ -289,10 +327,11 @@ HELP_TEXT = """\
   *             related — visit this session's forks/handoffs/parent
   D             diff review screen — comment on lines, send comments to Claude
   o             open the newest recorded link (PR, artifact)
-  e             edit note    L  edit label    x  untrack
+  R             rename       x  untrack
 
 [bold cyan]Sessions[/bold cyan]
-  n             start a new session (defaults to your launch directory; tab completes)
+  n             start a new session — starts in your launch directory;
+                tab completes/cycles dirs · ctrl+t: pick the dir in a real shell (zoxide!)
   a             track an existing session
   :             fleet assistant — plain English, proposes a plan, you confirm
   R             refresh now
@@ -311,7 +350,7 @@ class HelpModal(ModalScreen[None]):
     DEFAULT_CSS = """
     HelpModal { align: center middle; }
     HelpModal > Vertical {
-        width: 64; max-width: 90%; height: auto;
+        width: 90; max-width: 95%; height: auto;
         border: round $primary; background: $surface; padding: 1 2;
     }
     """
@@ -433,10 +472,10 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     ),
     (
         "capture_left",
-        "Left arrow layout key",
-        "← cycles the layout: back to the list, sidebar hidden, sidebar small. "
-        "Trade-off: ← no longer moves the cursor while editing text in the "
-        "Claude prompt.",
+        "Arrow layout keys",
+        "← shrinks the Claude pane, → grows it (list ↔ small sidebar ↔ full "
+        "width). Trade-off: the arrows no longer move the cursor while editing "
+        "text in the Claude prompt.",
     ),
     (
         "desktop_notifications",

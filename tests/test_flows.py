@@ -264,3 +264,34 @@ class TestCtx:
 
         assert do_shell("") == 1
         assert do_shell("/definitely/not/a/dir") == 1
+
+
+class TestShellPick:
+    def test_completion_returns_matches_for_cycling(self, tmp_path):
+        from cagents.modals import complete_directory
+
+        (tmp_path / "proj-alpha").mkdir()
+        (tmp_path / "proj-beta").mkdir()
+        (tmp_path / ".hidden-proj").mkdir()
+        completed, matches = complete_directory(str(tmp_path / "proj"))
+        assert completed == str(tmp_path / "proj-")  # common prefix
+        assert len(matches) == 2  # dotdirs hidden for a non-dot fragment
+        completed, matches = complete_directory(str(tmp_path / ".hid"))
+        assert len(matches) == 1 and completed.endswith("/")
+
+    async def test_pick_directory_via_shell_reads_final_cwd(self, claude_dir, tmp_path, now):
+        from conftest import FakeTmux
+
+        target = tmp_path / "picked-here"
+        target.mkdir()
+        store = Store.load(tmp_path / "state.json")
+        registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
+        app = CagentsApp(store=store, registry=registry, tmux=FakeTmux(), claude_dir=claude_dir)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # a scripted "interactive shell": cd somewhere, linger, exit
+            picked = app.pick_directory_via_shell(
+                str(tmp_path),
+                shell_cmd=["/bin/sh", "-c", f"cd '{target}' && sleep 0.7"],
+            )
+            assert picked == str(target)

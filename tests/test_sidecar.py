@@ -135,14 +135,22 @@ class TestCommands:
         assert any("after-select-pane" in c for c in flat)
         assert any("status-right" in c for c in flat)  # the statusline
 
-    def test_left_cycle_binding(self):
+    def test_arrow_bindings_are_a_size_control(self):
         on = left_capture_commands(True)
-        joined = " ".join(on[0])
-        assert joined.startswith("bind -n Left")
-        assert "send-keys Left" in joined  # rail-focused: passes to the app
-        assert "window_zoomed_flag" in joined  # HIDDEN -> SMALL step
-        assert "select-pane -t :.0" in joined  # SMALL -> WIDE step
-        assert left_capture_commands(False) == [["unbind", "-n", "Left"]]
+        left = " ".join(on[0])
+        right = " ".join(on[1])
+        # ← shrinks: HIDDEN -> SMALL (unzoom) or SMALL -> WIDE (focus rail)
+        assert left.startswith("bind -n Left")
+        assert "send-keys Left" in left  # rail-focused: passes to the app
+        assert "window_zoomed_flag" in left
+        assert "select-pane -t :.0" in left
+        # → grows: SMALL -> HIDDEN (zoom); at HIDDEN it passes to Claude
+        assert right.startswith("bind -n Right")
+        assert "send-keys Right" in right
+        assert "resize-pane -Z -t :.1" in right
+        assert left_capture_commands(False) == [
+            ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
+        ]
 
     def test_ctx_bind_commands(self):
         commands = ctx_bind_commands("/venv/bin/cagents-ctx", "/data/context.json")
@@ -267,7 +275,7 @@ async def test_internal_preview_hidden_in_sidecar_mode(world):
         assert str(app.query_one("#preview-pane").styles.display) == "none"
 
 
-async def test_left_in_list_hides_rail(world):
+async def test_right_in_list_grows_session(world):
     store, tmux, registry, claude_dir = world
     outer = FakeOuterTmux()
     app = CagentsApp(
@@ -276,12 +284,12 @@ async def test_left_in_list_hides_rail(world):
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)
-        await pilot.press("left")  # rail focused, grouped view -> WIDE -> HIDDEN
+        await pilot.press("right")  # rail focused: WIDE -> SMALL (focus session)
         await pilot.pause()
-        assert ["resize-pane", "-Z", "-t", "%1"] in outer.calls
+        assert ["select-pane", "-t", "%1"] in outer.calls
 
 
-async def test_left_in_kanban_moves_columns_not_layout(world):
+async def test_arrows_in_kanban_move_columns_not_layout(world):
     store, tmux, registry, claude_dir = world
     outer = FakeOuterTmux()
     app = CagentsApp(
@@ -293,9 +301,9 @@ async def test_left_in_kanban_moves_columns_not_layout(world):
         await pilot.press("3")
         await pilot.pause()
         outer.calls.clear()
-        await pilot.press("left")
+        await pilot.press("right")
         await pilot.pause()
-        assert ["resize-pane", "-Z", "-t", "%1"] not in outer.calls  # kanban consumed it
+        assert ["select-pane", "-t", "%1"] not in outer.calls  # kanban consumed it
 
 
 async def test_compact_rail_rendering(world):

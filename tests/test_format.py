@@ -32,13 +32,13 @@ def test_human_age():
     assert human_age(NOW + timedelta(seconds=30), NOW) == "0s"
 
 
-def _view(claude_dir: Path, state=SessionState.WORKING, note="", label="") -> SessionView:
+def _view(claude_dir: Path, state=SessionState.WORKING, label="") -> SessionView:
     b = TranscriptBuilder(SID1, "/proj/alpha")
     b.ai_title("Fix the login bug")
     b.user("fix it please", ts="2026-08-17T11:58:00.000Z")
     b.assistant_text("Working on it", ts="2026-08-17T11:59:00.000Z")
     parsed = parse_session_file(b.write(claude_dir))
-    tracked = TrackedSession(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00", note=note, label=label)
+    tracked = TrackedSession(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00", label=label)
     return SessionView(
         session_id=SID1,
         tracked=tracked,
@@ -58,10 +58,9 @@ def test_session_row_contains_essentials(claude_dir: Path):
     assert "1m" in text
 
 
-def test_session_row_shows_project_and_note_marker(claude_dir: Path):
-    row = session_row(_view(claude_dir, note="check CI"), NOW, show_project=True)
+def test_session_row_shows_project(claude_dir: Path):
+    row = session_row(_view(claude_dir), NOW, show_project=True)
     assert "alpha" in row.plain
-    assert "✎" in row.plain
 
 
 def test_label_overrides_title(claude_dir: Path):
@@ -81,12 +80,11 @@ def test_preview_renderable_shows_conversation(claude_dir: Path):
     from rich.console import Console
 
     console = Console(width=100, record=True)
-    console.print(preview_renderable(_view(claude_dir, note="my note"), NOW))
+    console.print(preview_renderable(_view(claude_dir), NOW))
     out = console.export_text()
     assert "Fix the login bug" in out
     assert "fix it please" in out
     assert "Working on it" in out
-    assert "my note" in out
     assert "/proj/alpha" in out
     assert "tmux:alpha" in out
 

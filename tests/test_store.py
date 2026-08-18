@@ -53,19 +53,17 @@ def test_untrack(tmp_path: Path):
     store.untrack(SID1)  # no-op, no crash
 
 
-def test_review_note_label(tmp_path: Path):
+def test_review_label(tmp_path: Path):
     path = tmp_path / "state.json"
     store = Store.load(path)
     store.track(SID1, "/proj/alpha", "2026-08-17T10:00:00+00:00")
     store.mark_reviewed(SID1, "2026-08-17T12:00:00+00:00")
-    store.set_note(SID1, "waiting on CI")
     store.set_label(SID1, "auth work")
 
     reloaded = Store.load(path)
     t = reloaded.sessions[SID1]
     assert t.reviewed_at == "2026-08-17T12:00:00+00:00"
     assert t.reviewed_datetime() is not None
-    assert t.note == "waiting on CI"
     assert t.label == "auth work"
 
     store.clear_reviewed(SID1)
@@ -75,7 +73,6 @@ def test_review_note_label(tmp_path: Path):
 def test_mutations_on_unknown_session_are_noops(tmp_path: Path):
     store = Store.load(tmp_path / "state.json")
     store.mark_reviewed(SID1, "2026-08-17T12:00:00+00:00")
-    store.set_note(SID1, "x")
     store.set_label(SID1, "y")
     assert store.sessions == {}
 

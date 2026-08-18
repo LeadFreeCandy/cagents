@@ -201,18 +201,19 @@ async def test_done_refuses_while_working(world):
         assert store.sessions[SID2].reviewed_at == ""
 
 
-async def test_note_editing(world):
+async def test_rename(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         select_session(app, SID1)
         await pilot.pause()
-        await pilot.press("e")
+        await pilot.press("R")
         await pilot.pause()
-        await pilot.press(*"waiting on CI")
+        await pilot.press(*"auth work")
         await pilot.press("enter")
         await pilot.pause(0.1)
-        assert store.sessions[SID1].note == "waiting on CI"
+        assert store.sessions[SID1].label == "auth work"
+        assert app.snapshot.by_id(SID1) is not None
 
 
 async def test_untrack_with_confirm(world):
@@ -239,14 +240,14 @@ async def test_app_keys_do_not_fire_inside_modal(world):
         await pilot.pause()
         select_session(app, SID1)
         await pilot.pause()
-        await pilot.press("e")
+        await pilot.press("R")
         await pilot.pause()
-        await pilot.press("q")  # typed into the note input, must not quit
+        await pilot.press("q")  # typed into the rename input, must not quit
         await pilot.pause()
         assert app.is_running
         await pilot.press("escape")
         await pilot.pause()
-        assert store.sessions[SID1].note == ""
+        assert store.sessions[SID1].label == ""
 
 
 async def test_new_session_defaults_to_launch_cwd(world, tmp_path, monkeypatch):

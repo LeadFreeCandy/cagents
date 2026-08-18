@@ -85,8 +85,6 @@ def session_row(
         row.append(f" {view.project_name}", style="dim cyan")
     if view.attached:
         row.append("  ⇄", style="dim")  # someone is attached right now
-    if view.tracked.note:
-        row.append("  ✎", style="dim yellow")
     if view.parsed and view.parsed.links:
         row.append("  ⇗", style="dim blue")  # PR / artifact recorded
     if view.parsed and view.parsed.pending_agents:
@@ -190,12 +188,6 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
         lineage.append(" · ".join(bits), style="magenta")
         lineage.append("   (* to visit)", style="dim italic")
         parts.append(lineage)
-
-    if view.tracked.note:
-        note = Text()
-        note.append("✎ ", style="yellow")
-        note.append(view.tracked.note, style="yellow")
-        parts.append(note)
 
     parts.append(Text("─" * max(10, width - 2), style="dim"))
 
