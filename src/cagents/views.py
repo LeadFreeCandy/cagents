@@ -197,7 +197,7 @@ class QueueView(BaseSessionView):
 KANBAN_COLUMNS: list[tuple[str, tuple[SessionState, ...], str]] = [
     ("◉ Needs you", (SessionState.NEEDS_INPUT,), "kb-needs-you"),
     ("● Working", (SessionState.WORKING,), "kb-working"),
-    ("◆ To review", (SessionState.NEEDS_REVIEW,), "kb-review"),
+    ("◆ To review", (SessionState.NEEDS_REVIEW, SessionState.MONITORING), "kb-review"),
     ("✓ Done / stopped", (SessionState.DONE, SessionState.STOPPED), "kb-done"),
 ]
 
@@ -340,6 +340,7 @@ class TodoView(Widget):
     BINDINGS = [
         Binding("A", "app.add_todo", "Add todo"),
         Binding("d", "app.toggle_todo_done", "Done"),
+        Binding("p", "app.pause_todo", "Pause"),
         Binding("x", "app.delete_todo", "Delete todo"),
         Binding("W", "app.todo_worktree", "Worktree"),
     ]
@@ -402,6 +403,38 @@ class TodoView(Widget):
             row.stylize("dim")
         return row
 
+    def _paused_row(self, todo, now: datetime) -> Text:
+        from datetime import datetime as _dt
+
+        from .format import human_age
+
+        width = 22 if getattr(self.app, "compact", False) else 46
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(" ⏸ ", style="cyan")
+        row.append(f"{todo.text[:width]:<{width}}  ", style="dim")
+        if todo.wake_at:
+            try:
+                wake = _dt.fromisoformat(todo.wake_at)
+                remaining = max(0.0, (wake - now).total_seconds())
+                import math
+
+                if remaining < 3600:
+                    text = f"{math.ceil(remaining / 60)}m"
+                elif remaining < 86400:
+                    text = f"{math.ceil(remaining / 3600)}h"
+                else:
+                    text = f"{math.ceil(remaining / 86400)}d"
+                row.append(f"wakes in {text}", style="dim cyan")
+            except ValueError:
+                row.append("timer set", style="dim cyan")
+        elif todo.wake_criteria:
+            row.append(f"until: {todo.wake_criteria[:50]}", style="dim cyan")
+            if todo.wake_script:
+                row.append("  ⚙", style="dim green")
+        else:
+            row.append("until you unpause (p)", style="dim")
+        return row
+
     def _status_lines(self, todo) -> list[Option]:
         """did/needs sub-rows for a todo waiting on a human. Deliberately
         absent while the agent is working — nothing would be current."""
@@ -432,21 +465,32 @@ class TodoView(Widget):
         self.snapshot = snapshot
         now = datetime.now(timezone.utc)
         todos = list(self._store().todos.values())
-        todos.sort(key=lambda t: (t.done, t.created_at if not t.done else t.done_at), reverse=False)
-        open_todos = [t for t in todos if not t.done]
+        open_todos = [t for t in todos if not t.done and not t.paused]
+        paused_todos = [t for t in todos if t.paused]
         done_todos = [t for t in todos if t.done]
         open_todos.sort(key=lambda t: t.created_at, reverse=True)
+        paused_todos.sort(key=lambda t: t.paused_at, reverse=True)
         done_todos.sort(key=lambda t: t.done_at, reverse=True)
 
         options: list[Option] = []
         header = Text()
         header.append("▍", style="bold blue")
         header.append("Todos ", style="bold")
-        header.append(f"· {len(open_todos)} open · {len(done_todos)} done", style="dim")
+        header.append(
+            f"· {len(open_todos)} open · {len(paused_todos)} paused · {len(done_todos)} done",
+            style="dim",
+        )
         options.append(Option(header, disabled=True))
         for todo in open_todos:
             options.append(Option(self._todo_row(todo, now), id=f"todo:{todo.todo_id}"))
             options.extend(self._status_lines(todo))
+        if paused_todos:
+            divider = Text()
+            divider.append(" ── paused ", style="dim cyan")
+            divider.append("─" * 38, style="dim")
+            options.append(Option(divider, disabled=True))
+            for todo in paused_todos:
+                options.append(Option(self._paused_row(todo, now), id=f"todo:{todo.todo_id}"))
         if done_todos:
             divider = Text()
             divider.append(" ── done ", style="dim")
@@ -454,7 +498,7 @@ class TodoView(Widget):
             options.append(Option(divider, disabled=True))
             for todo in done_todos:
                 options.append(Option(self._todo_row(todo, now), id=f"todo:{todo.todo_id}"))
-        if not open_todos and not done_todos:
+        if not open_todos and not paused_todos and not done_todos:
             options.append(
                 Option("  No todos — press 'A' to add one.", disabled=True)
             )

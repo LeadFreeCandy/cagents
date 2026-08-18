@@ -102,9 +102,11 @@ pane or use `ctrl+c`-free alternatives instead). Alt-q is the recommended trade.
 
 ## Session states (derived fresh every ~2s, never stored)
 
-- `● working` — live turn: pane shows activity or the transcript was just written.
+- `● working` — live turn: pane shows activity or a conversation record just landed.
 - `◉ needs you` — blocked on a human: permission prompt, question, or you're at the prompt.
 - `◆ review` — Claude finished; **no human has looked yet**. This is cagents' own state.
+- `◎ monitoring` — you pressed `m`: acknowledged but being watched. Ranks between review
+  and working in the queue; any new activity flips it back to `◆ review`.
 - `✓ done` — you pressed `r` (or accepted via peek/palette) *after* the last activity.
   If Claude does more work later, it drops back to `◆ review` automatically.
 - `■ stopped` — no live process and the transcript ends mid-turn.
@@ -117,17 +119,21 @@ Row markers: `⇄` someone is attached · `✎` has a note · `⇗` recorded a P
 | key | action |
 |---|---|
 | `enter` | attach (the core loop — always the real CLI) |
+| `F` | **fork**: new session continuing this conversation — you type its first prompt, the fork is named after it, the original is untouched |
 | `space` | peek: full-screen transcript, `r` inside marks reviewed, `esc` closes |
-| `D` | diff review (below) |
+| `D` | built-in diff review (comment + send to Claude) |
+| `V` | **rich diff**: lazygit in a pane — commits panel for per-commit diffs, files panel for the total diff (PR-style); falls back to `D` if not installed |
+| `t` | split a **shell** below, cwd'd into the worktree/project |
 | `o` | open the newest recorded link (PR / artifact) in the browser |
 | `r` | toggle reviewed ↔ needs review |
+| `m` | **monitoring**: seen it, keep watching — sits below review in the queue; new activity re-alerts it back to needs-review |
 | `e` / `L` | note / label (label overrides the AI title in lists) |
 | `x` | untrack (cagents-only; Claude's data untouched) |
 | `n` / `a` | new session / track an existing one |
 
 ## Settings (`,`)
 
-Three toggles, applied immediately and persisted:
+Applied immediately and persisted:
 
 - **Sidebar rail** (on) — off returns to classic full-terminal attach everywhere.
 - **Toast notifications** (off) — bottom-right popups for routine events. Errors and
@@ -137,6 +143,31 @@ Three toggles, applied immediately and persisted:
   the attach (session keeps running) and cagents resumes. The full-screen binding is
   scoped to cagents' own tmux client, so Left in your other attached clients (`cs`,
   phone, other terminals) is untouched.
+- **Desktop notifications** (off) — macOS notification the moment a session transitions
+  into needing you. With `terminal-notifier` installed (`brew install terminal-notifier`),
+  clicking the notification selects that task in the list.
+- **Auto-pause idle todos** (7 days) — open todos with no session activity for this many
+  days quietly pause themselves instead of nagging forever. 0 disables.
+
+## Pausing todos (`p` in the todos view)
+
+"Done for now, not done." `p` pauses the selected todo into a `── paused ──` section.
+The pause prompt takes three kinds of input:
+
+- **a duration** (`30m`, `4h`, `2d`, `1w`) — a wake timer; the row shows "wakes in 2d";
+- **a wake condition in plain English** ("when the PR gets an approving review") —
+  Claude writes a small read-only check script, **shown to you for approval first**,
+  then run every ~5 minutes (30s timeout, exit 0 wakes the todo);
+- **nothing** — sleeps until you press `p` again.
+
+Waking (timer or condition) surfaces a toast — and a desktop notification if enabled.
+
+## The statusline
+
+A slim bar under everything — the container always shows
+`cagents │ ← back · ctrl+\ toggle · t shell · V diff · = expand`, and full-screen
+attaches get `cagents │ ← back · C-b d detach` on the session for the duration
+(restored afterwards).
 
 ## Todos (`4`)
 

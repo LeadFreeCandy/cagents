@@ -16,9 +16,18 @@ from pathlib import Path
 
 STORE_VERSION = 1
 
+
+def _parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
 # User-facing toggles (the `,` settings panel). Everything defaults here;
 # only overrides are persisted.
-SETTINGS_DEFAULTS: dict[str, bool] = {
+SETTINGS_DEFAULTS: dict[str, object] = {
     # Attach opens sessions in a side pane, keeping the list as a left rail.
     "sidebar": True,
     # Toast notifications (bottom-right). Errors always show regardless.
@@ -26,6 +35,12 @@ SETTINGS_DEFAULTS: dict[str, bool] = {
     # In the sidecar container: pressing Left inside a session closes its
     # pane (session keeps running) and returns to the list.
     "capture_left": True,
+    # macOS notification when a session starts needing you; clicking it
+    # selects the task in the list.
+    "desktop_notifications": False,
+    # Open todos with no activity for this many days pause themselves.
+    # 0 disables.
+    "auto_pause_days": 7,
 }
 
 
@@ -44,14 +59,15 @@ class TrackedSession:
     note: str = ""
     reviewed_at: str = ""  # ISO 8601, empty = never reviewed
     archived: bool = False  # hidden from session views; history kept
+    # "I've seen it, keep watching": quieter than needs-review until new
+    # activity arrives (then it demands review again).
+    monitoring_since: str = ""
 
     def reviewed_datetime(self) -> datetime | None:
-        if not self.reviewed_at:
-            return None
-        try:
-            return datetime.fromisoformat(self.reviewed_at)
-        except ValueError:
-            return None
+        return _parse_iso(self.reviewed_at)
+
+    def monitoring_datetime(self) -> datetime | None:
+        return _parse_iso(self.monitoring_since)
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +77,7 @@ class TrackedSession:
             "note": self.note,
             "reviewed_at": self.reviewed_at,
             "archived": self.archived,
+            "monitoring_since": self.monitoring_since,
         }
 
     @classmethod
@@ -73,6 +90,7 @@ class TrackedSession:
             note=str(data.get("note", "")),
             reviewed_at=str(data.get("reviewed_at", "")),
             archived=bool(data.get("archived", False)),
+            monitoring_since=str(data.get("monitoring_since", "")),
         )
 
 
@@ -88,10 +106,19 @@ class Todo:
     project_dir: str = ""  # default place its sessions start
     worktree: str = ""  # worktree created for this todo, if any
     session_ids: list[str] = field(default_factory=list)
+    # Paused: shelved for now, with an optional way back.
+    paused_at: str = ""  # ISO 8601, empty = not paused
+    wake_at: str = ""  # ISO 8601 timer, if any
+    wake_criteria: str = ""  # human description of the wake condition
+    wake_script: str = ""  # path to the generated check script, if any
 
     @property
     def done(self) -> bool:
         return bool(self.done_at)
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.paused_at) and not self.done
 
     def to_dict(self) -> dict:
         return {
@@ -101,6 +128,10 @@ class Todo:
             "project_dir": self.project_dir,
             "worktree": self.worktree,
             "session_ids": list(self.session_ids),
+            "paused_at": self.paused_at,
+            "wake_at": self.wake_at,
+            "wake_criteria": self.wake_criteria,
+            "wake_script": self.wake_script,
         }
 
     @classmethod
@@ -114,6 +145,10 @@ class Todo:
             project_dir=str(data.get("project_dir", "")),
             worktree=str(data.get("worktree", "")),
             session_ids=[str(s) for s in raw_ids] if isinstance(raw_ids, list) else [],
+            paused_at=str(data.get("paused_at", "")),
+            wake_at=str(data.get("wake_at", "")),
+            wake_criteria=str(data.get("wake_criteria", "")),
+            wake_script=str(data.get("wake_script", "")),
         )
 
 
@@ -122,7 +157,7 @@ class Store:
     path: Path
     sessions: dict[str, TrackedSession] = field(default_factory=dict)
     todos: dict[str, Todo] = field(default_factory=dict)
-    settings: dict[str, bool] = field(default_factory=dict)
+    settings: dict[str, object] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Store":
@@ -145,7 +180,13 @@ class Store:
         settings = raw.get("settings")
         if isinstance(settings, dict):
             for key, value in settings.items():
-                if key in SETTINGS_DEFAULTS and isinstance(value, bool):
+                default = SETTINGS_DEFAULTS.get(key)
+                if default is None:
+                    continue
+                if isinstance(default, bool):
+                    if isinstance(value, bool):
+                        store.settings[key] = value
+                elif isinstance(default, (int, float)) and isinstance(value, (int, float)):
                     store.settings[key] = value
         return store
 
@@ -212,14 +253,47 @@ class Store:
 
     # -- settings -------------------------------------------------------------
 
-    def get_setting(self, key: str) -> bool:
+    def get_setting(self, key: str):
         return self.settings.get(key, SETTINGS_DEFAULTS.get(key, False))
 
-    def set_setting(self, key: str, value: bool) -> None:
+    def set_setting(self, key: str, value) -> None:
         if key not in SETTINGS_DEFAULTS:
+            return
+        default = SETTINGS_DEFAULTS[key]
+        if isinstance(default, bool) and not isinstance(value, bool):
+            return
+        if not isinstance(default, bool) and not isinstance(value, (int, float)):
             return
         self.settings[key] = value
         self.save()
+
+    def set_monitoring(self, session_id: str, when: str) -> None:
+        """when empty clears monitoring."""
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.monitoring_since = when
+            self.save()
+
+    # -- pause / wake -----------------------------------------------------
+
+    def pause_todo(self, todo_id: str, paused_at: str, wake_at: str = "",
+                   wake_criteria: str = "", wake_script: str = "") -> None:
+        todo = self.todos.get(todo_id)
+        if todo is not None:
+            todo.paused_at = paused_at
+            todo.wake_at = wake_at
+            todo.wake_criteria = wake_criteria
+            todo.wake_script = wake_script
+            self.save()
+
+    def unpause_todo(self, todo_id: str) -> None:
+        todo = self.todos.get(todo_id)
+        if todo is not None and todo.paused_at:
+            todo.paused_at = ""
+            todo.wake_at = ""
+            todo.wake_criteria = ""
+            todo.wake_script = ""
+            self.save()
 
     # -- todos ----------------------------------------------------------------
 

@@ -237,11 +237,14 @@ HELP_TEXT = """\
 
 [bold cyan]Act on a session[/bold cyan]
   enter         attach (the real Claude CLI; detach: ctrl-b d)
+  F             fork — new session from this one, prompt typed by you
   space         peek — read the transcript without attaching
-  D             diff — review the worktree's changes, comment,
-                send comments to Claude (g pulls GitHub comments)
+  D             diff — review changes, comment, send comments to Claude
+  V             rich diff — lazygit (per-commit + total, PR-style)
+  t             shell — split terminal in the worktree/project
   o             open the newest recorded link (PR, artifact)
   r             mark reviewed / unmark
+  m             monitoring — seen it, keep watching; re-alerts on activity
   e             edit note
   L             edit label
   x             untrack (never deletes Claude's data)
@@ -255,6 +258,7 @@ HELP_TEXT = """\
   A             add todo        n   new session for the todo
   W             grow a git worktree + session for the todo
   d             done (offers to archive its workspaces) / reopen
+  p             pause / unpause — timer (2d), wake condition, or indefinite
   x             delete todo     enter  attach to its newest session
 
 [bold cyan]Fleet assistant[/bold cyan]
@@ -454,6 +458,18 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "running in the background). Trade-off: Left no longer moves the cursor while "
         "editing text in the Claude prompt.",
     ),
+    (
+        "desktop_notifications",
+        "Desktop notifications",
+        "macOS notification when a session starts needing you. With terminal-notifier "
+        "installed, clicking it selects the task in the list.",
+    ),
+    (
+        "auto_pause_days",
+        "Auto-pause idle todos (days)",
+        "Open todos with no session activity for this many days pause themselves. "
+        "0 disables. Enter to type a new number.",
+    ),
 ]
 
 
@@ -500,11 +516,16 @@ class SettingsModal(ModalScreen[None]):
         option_list = self.query_one("#settings-list", OptionList)
         option_list.clear_options()
         for i, (key, label, _desc) in enumerate(SETTINGS_META):
-            enabled = self.store.get_setting(key)
+            value = self.store.get_setting(key)
             row = Text()
-            row.append(" ▣ " if enabled else " □ ", style="bold green" if enabled else "dim")
-            row.append(f"{label:<34}", style="bold" if enabled else "")
-            row.append("on" if enabled else "off", style="green" if enabled else "dim")
+            if isinstance(value, bool):
+                row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
+                row.append(f"{label:<34}", style="bold" if value else "")
+                row.append("on" if value else "off", style="green" if value else "dim")
+            else:
+                row.append(" # ", style="bold cyan")
+                row.append(f"{label:<34}", style="bold")
+                row.append(str(value), style="cyan")
             option_list.add_option(Option(row, id=key))
             if keep == key:
                 option_list.highlighted = i
@@ -521,10 +542,128 @@ class SettingsModal(ModalScreen[None]):
         key = event.option.id
         if key is None:
             return
-        value = not self.store.get_setting(key)
+        current = self.store.get_setting(key)
+        if isinstance(current, bool):
+            value = not current
+            self.store.set_setting(key, value)
+            self._refill(keep=key)
+            self.on_change(key, value)
+            return
+        # numeric: type a new value
+        self.app.push_screen(
+            InputModal(f"New value for '{key}'", initial=str(current)),
+            lambda text, k=key: self._numeric_entered(k, text),
+        )
+
+    def _numeric_entered(self, key: str, text: str | None) -> None:
+        if text is None:
+            return
+        try:
+            value = max(0, int(float(text.strip())))
+        except ValueError:
+            self.app.notify(f"Not a number: {text}", severity="warning")
+            return
         self.store.set_setting(key, value)
         self._refill(keep=key)
         self.on_change(key, value)
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class PauseModal(ModalScreen["tuple[str, str] | None"]):
+    """Pause a todo. Dismisses with (kind, value):
+    ("timer", "<duration text>") | ("criteria", "<text>") | ("none", "")."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    PauseModal { align: center middle; }
+    PauseModal > Vertical {
+        width: 80; max-width: 95%; height: auto;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    PauseModal Label { text-style: bold; }
+    PauseModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, todo_text: str) -> None:
+        super().__init__()
+        self.todo_text = todo_text
+
+    def compose(self) -> ComposeResult:
+        from cagents.wake import parse_duration  # noqa: F401 (documented behavior)
+
+        with Vertical():
+            yield Label(f"Pause: {self.todo_text[:60]}")
+            yield Static(
+                "A duration (30m, 4h, 2d, 1w) sets a wake timer. Anything else is a "
+                "wake condition — Claude writes a check script (you approve it first). "
+                "Empty pauses until you unpause.",
+                classes="hint",
+            )
+            yield Input(placeholder="2d · or: when the PR gets an approving review · or empty")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        from cagents.wake import parse_duration
+
+        text = event.value.strip()
+        if not text:
+            self.dismiss(("none", ""))
+        elif parse_duration(text) is not None:
+            self.dismiss(("timer", text))
+        else:
+            self.dismiss(("criteria", text))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ScriptConfirmModal(ModalScreen[bool]):
+    """Show a Claude-written wake script before it's saved. Nothing runs
+    until a human has read it and said yes."""
+
+    BINDINGS = [
+        Binding("escape", "no", "No"),
+        Binding("n", "no", "No"),
+        Binding("y", "yes", "Approve"),
+    ]
+
+    DEFAULT_CSS = """
+    ScriptConfirmModal { align: center middle; }
+    ScriptConfirmModal > Vertical {
+        width: 90; max-width: 95%; height: auto; max-height: 80%;
+        border: round $warning; background: $surface; padding: 1 2;
+    }
+    ScriptConfirmModal .head { text-style: bold; margin-bottom: 1; }
+    ScriptConfirmModal .keys { color: $text-muted; margin-top: 1; }
+    ScriptConfirmModal #script-body { max-height: 20; overflow-y: auto; }
+    """
+
+    def __init__(self, criteria: str, script: str) -> None:
+        super().__init__()
+        self.criteria = criteria
+        self.script = script
+
+    def compose(self) -> ComposeResult:
+        from rich.syntax import Syntax
+
+        with Vertical():
+            yield Static(f"Wake check for: {self.criteria}", classes="head")
+            yield Static(
+                Syntax(self.script, "bash", background_color="default"), id="script-body"
+            )
+            yield Static(
+                "Runs every ~5 min, read-only, 30s timeout; exit 0 wakes the todo.\n"
+                "y — approve and pause    n / esc — pause without the script",
+                classes="keys",
+            )
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)

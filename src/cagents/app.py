@@ -37,8 +37,11 @@ from .modals import (
     TodoModal,
     TrackModal,
 )
+from .modals import PauseModal, ScriptConfirmModal
+from .notifier import notify_desktop, read_select_request
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .peek import PeekScreen, deep_view
+from .wake import WakeEngine, build_wake_prompt, extract_script, iso_in, parse_duration
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import Sidecar, apply_left_capture, nested_attach_command
 from .store import Store
@@ -81,6 +84,10 @@ class CagentsApp(App):
         Binding("D", "show_diff", "Diff"),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("enter", "attach", "Attach", priority=False, show=True),
+        Binding("F", "fork", "Fork", show=False),
+        Binding("m", "toggle_monitoring", "Monitor", show=False),
+        Binding("t", "split_shell", "Shell", show=False),
+        Binding("V", "rich_diff", "Rich diff", show=False),
         Binding("space", "peek", "Peek"),
         Binding("o", "open_link", "Open link", show=False),
         Binding("colon", "palette", "Fleet ':'", show=False),
@@ -119,6 +126,9 @@ class CagentsApp(App):
         self.snapshot = Snapshot()
         self.active_view_id = "grouped"
         self.selected_session_id: str | None = None
+        self.wake_engine = WakeEngine(self.store)
+        self._prev_states: dict[str, SessionState] = {}
+        self._seen_first_snapshot = False
 
     # -- layout --------------------------------------------------------------
 
@@ -138,6 +148,7 @@ class CagentsApp(App):
         self._apply_compact(self.size.width)
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
+        self.set_interval(60.0, self._wake_tick)
         self.query_one("#grouped", GroupedView).focus_list()
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
@@ -199,6 +210,48 @@ class CagentsApp(App):
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
         self._update_preview()
+        self._notify_transitions(snapshot)
+        self._handle_select_request()
+
+    def _notify_transitions(self, snapshot: Snapshot) -> None:
+        """Desktop-notify sessions that just started needing a human.
+        Edge-triggered; the first snapshot never notifies (startup is not
+        news)."""
+        alert_states = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
+        first = not self._seen_first_snapshot
+        self._seen_first_snapshot = True
+        enabled = bool(self.store.get_setting("desktop_notifications"))
+        for view in snapshot.views:
+            previous = self._prev_states.get(view.session_id)
+            self._prev_states[view.session_id] = view.state
+            if first or not enabled:
+                continue
+            if view.state in alert_states and previous not in alert_states and previous is not None:
+                self.run_worker(
+                    lambda v=view: notify_desktop(
+                        f"cagents: {v.state.value}",
+                        f"{v.title} — {v.needs_line or v.state_detail}",
+                        v.session_id,
+                        self.store.path.parent,
+                    ),
+                    thread=True,
+                )
+
+    def _handle_select_request(self) -> None:
+        """A clicked desktop notification asked us to select a session."""
+        session_id = read_select_request(self.store.path.parent)
+        if not session_id or self.snapshot.by_id(session_id) is None:
+            return
+        if self.active_view_id not in ("grouped", "queue"):
+            self.action_switch_view("queue")
+        from .views import SessionList
+
+        session_list = self.query_one(f"#{self.active_view_id}-list", SessionList)
+        for i in range(session_list.option_count):
+            option = session_list.get_option_at_index(i)
+            if option.id == session_id:
+                session_list.highlighted = i
+                break
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -305,20 +358,38 @@ class CagentsApp(App):
         Runs inside App.suspend(), so stdin is the real terminal."""
         tty = self._current_tty() if self.store.get_setting("capture_left") else ""
         if not tty:
-            self.tmux.attach(name)
+            self._statusline_attach(name)
             return
         try:
             self.tmux.bind_left_detach(tty)
         except Exception:
-            self.tmux.attach(name)  # capture is best-effort, attach is not
+            self._statusline_attach(name)  # capture is best-effort, attach is not
             return
         try:
-            self.tmux.attach(name)
+            self._statusline_attach(name)
         finally:
             try:
                 self.tmux.unbind_left_detach()
             except Exception:
                 pass  # stale binding is tty-filtered and harmless
+
+    def _statusline_attach(self, name: str) -> None:
+        """Attach with the cagents key hints on the session's statusline,
+        restored to whatever it was afterwards."""
+        shown = False
+        try:
+            self.tmux.session_statusline_on(name)
+            shown = True
+        except Exception:
+            pass
+        try:
+            self.tmux.attach(name)
+        finally:
+            if shown:
+                try:
+                    self.tmux.session_statusline_off(name)
+                except Exception:
+                    pass
 
     @staticmethod
     def _current_tty() -> str:
@@ -811,6 +882,240 @@ class CagentsApp(App):
             f"(attach with Enter to watch).",
         )
         self.call_from_thread(self.refresh_data)
+
+    # -- fork ---------------------------------------------------------------------
+
+    def action_fork(self) -> None:
+        view = self.selected_view()
+        if view is None or view.missing or view.parsed is None:
+            self.notify("Select a session with a transcript to fork.", severity="warning")
+            return
+        self.push_screen(
+            InputModal(
+                f"Fork '{view.title}' — first prompt for the new session",
+                placeholder="what should the fork work on?",
+            ),
+            lambda prompt: self._fork_confirmed(view.session_id, prompt),
+        )
+
+    def _fork_confirmed(self, source_id: str, prompt: str | None) -> None:
+        if not prompt or not prompt.strip():
+            return
+        prompt = prompt.strip()
+        view = self.snapshot.by_id(source_id)
+        if view is None:
+            self.notify("Source session vanished.", severity="error")
+            return
+        claude_bin = self._claude_bin()
+        if not claude_bin:
+            self.notify("claude CLI not found.", severity="error")
+            return
+        new_id = str(uuid.uuid4())
+        label = prompt[:60]
+        try:
+            name = self.tmux.new_claude_session(
+                view.project_dir,
+                ["--resume", source_id, "--fork-session", "--session-id", new_id],
+                session_id=new_id,
+                claude_bin=claude_bin,
+            )
+        except Exception as error:
+            self.notify(f"Fork failed: {error}", severity="error", timeout=10)
+            return
+        # The fork is named after its prompt; the original is untouched.
+        self.store.track(new_id, view.project_dir, utcnow().isoformat(), label=label)
+        self.selected_session_id = new_id
+        self._attach_tmux_session(name)
+        self._send_fork_prompt(name, prompt)
+        self.refresh_data()
+
+    @work(thread=True, group="send")
+    def _send_fork_prompt(self, tmux_name: str, prompt: str) -> None:
+        import time
+
+        time.sleep(4.0)  # let the resumed CLI boot before pasting
+        try:
+            self.tmux.send_text(tmux_name, prompt)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Fork started but prompt not delivered: {error}",
+                severity="error", timeout=10,
+            )
+            return
+        self.call_from_thread(self.notify, "Forked — prompt sent to the new session.")
+
+    # -- monitoring ------------------------------------------------------------------
+
+    def action_toggle_monitoring(self) -> None:
+        view = self.selected_view()
+        if view is None:
+            return
+        if view.state == SessionState.MONITORING:
+            self.store.set_monitoring(view.session_id, "")
+            self.notify("Monitoring cleared — back to 'needs review'.")
+        elif view.state in (SessionState.NEEDS_REVIEW, SessionState.DONE, SessionState.STOPPED):
+            self.store.set_monitoring(view.session_id, utcnow().isoformat())
+            self.notify("Monitoring — it re-alerts on new activity.")
+        else:
+            self.notify("Monitoring applies once Claude has finished.", severity="warning")
+            return
+        self.refresh_data()
+
+    # -- pause / wake -------------------------------------------------------------------
+
+    def action_pause_todo(self) -> None:
+        todo = self.selected_todo()
+        if todo is None:
+            return
+        if todo.paused:
+            self.store.unpause_todo(todo.todo_id)
+            self.notify("Unpaused.")
+            self.refresh_data()
+            return
+        if todo.done:
+            self.notify("It's done — nothing to pause.", severity="warning")
+            return
+        self.push_screen(PauseModal(todo.text), lambda r: self._pause_chosen(todo.todo_id, r))
+
+    def _pause_chosen(self, todo_id: str, result: tuple[str, str] | None) -> None:
+        if result is None:
+            return
+        kind, value = result
+        now_iso = utcnow().isoformat()
+        if kind == "none":
+            self.store.pause_todo(todo_id, paused_at=now_iso)
+            self.notify("Paused until you unpause it.")
+        elif kind == "timer":
+            seconds = parse_duration(value) or 0.0
+            self.store.pause_todo(todo_id, paused_at=now_iso, wake_at=iso_in(seconds))
+            self.notify(f"Paused — wakes in {value.strip()}.")
+        else:  # criteria -> ask Claude for a check script
+            self.notify("Paused — asking Claude to write the wake check…")
+            self.store.pause_todo(todo_id, paused_at=now_iso, wake_criteria=value)
+            self._generate_wake_script(todo_id, value)
+        self.refresh_data()
+
+    @work(thread=True, exclusive=True, group="wakegen")
+    def _generate_wake_script(self, todo_id: str, criteria: str) -> None:
+        todo = self.store.todos.get(todo_id)
+        project = todo.project_dir if todo else ""
+        runner = self.claude_runner or CliClaudeRunner(claude_bin=self._claude_bin())
+        try:
+            reply = runner.run(build_wake_prompt(criteria, project))
+            script = extract_script(reply)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify,
+                f"Wake script failed ({error}) — todo stays paused, wake it manually.",
+                severity="warning", timeout=10,
+            )
+            return
+        self.call_from_thread(
+            self.push_screen,
+            ScriptConfirmModal(criteria, script),
+            lambda yes: self._wake_script_confirmed(todo_id, criteria, script, bool(yes)),
+        )
+
+    def _wake_script_confirmed(self, todo_id: str, criteria: str, script: str, yes: bool) -> None:
+        if not yes:
+            self.notify("Paused without a check — wake it manually (p).")
+            return
+        wake_dir = self.store.path.parent / "wake"
+        wake_dir.mkdir(parents=True, exist_ok=True)
+        script_path = wake_dir / f"{todo_id}.sh"
+        script_path.write_text(script, "utf-8")
+        script_path.chmod(0o755)
+        todo = self.store.todos.get(todo_id)
+        if todo is not None:
+            self.store.pause_todo(
+                todo_id, paused_at=todo.paused_at, wake_criteria=criteria,
+                wake_script=str(script_path),
+            )
+        self.notify("Wake check saved — runs every ~5 minutes.")
+        self.refresh_data()
+
+    def _wake_tick(self) -> None:
+        self._wake_tick_worker()
+
+    @work(thread=True, exclusive=True, group="wake")
+    def _wake_tick_worker(self) -> None:
+        snapshot = self.snapshot
+
+        def last_activity(todo) -> float | None:
+            newest = None
+            for sid in todo.session_ids:
+                view = snapshot.by_id(sid)
+                if view is not None and view.last_activity is not None:
+                    ts = view.last_activity.timestamp()
+                    newest = ts if newest is None else max(newest, ts)
+            return newest
+
+        report = self.wake_engine.tick(last_activity=last_activity)
+        if not report.woken and not report.auto_paused:
+            return
+        self.call_from_thread(self._wake_report, report)
+
+    def _wake_report(self, report) -> None:
+        for todo_id, why in report.woken:
+            todo = self.store.todos.get(todo_id)
+            text = todo.text if todo else todo_id
+            self.notify(f"Awake: {text} — {why}", timeout=10)
+            if self.store.get_setting("desktop_notifications"):
+                sid = todo.session_ids[-1] if todo and todo.session_ids else ""
+                self.run_worker(
+                    lambda t=text, w=why, s=sid: notify_desktop(
+                        "cagents: todo awake", f"{t} — {w}", s, self.store.path.parent
+                    ),
+                    thread=True,
+                )
+        if report.auto_paused:
+            self.notify(f"Auto-paused {len(report.auto_paused)} idle todo(s).")
+        self.refresh_data()
+
+    # -- shell / rich diff ------------------------------------------------------------
+
+    def _target_dir(self) -> str:
+        if self.active_view_id == "todos":
+            todo = self.selected_todo()
+            if todo is not None and (todo.worktree or todo.project_dir):
+                return todo.worktree or todo.project_dir
+        view = self.selected_view()
+        return view.project_dir if view else ""
+
+    def action_split_shell(self) -> None:
+        directory = self._target_dir()
+        if not directory or not Path(directory).is_dir():
+            self.notify("No directory to open a shell in.", severity="warning")
+            return
+        if self.sidecar is not None:
+            try:
+                self.sidecar.split_shell(directory)
+            except Exception as error:
+                self.notify(f"Split failed: {error}", severity="error")
+        else:
+            shell = os.environ.get("SHELL", "/bin/zsh")
+            self._suspend_and_run(lambda: __import__("subprocess").run([shell], cwd=directory))
+
+    def action_rich_diff(self) -> None:
+        """PR-style diff review in lazygit (commits panel = per-commit,
+        files panel = the total working diff). Falls back to the built-in
+        commentable diff screen when lazygit isn't installed."""
+        directory = self._target_dir()
+        if not directory or not Path(directory).is_dir():
+            self.notify("No directory to diff.", severity="warning")
+            return
+        lazygit = shutil.which("lazygit")
+        if not lazygit:
+            self.notify("lazygit not installed — opening the built-in diff (D).")
+            self.action_show_diff()
+            return
+        if self.sidecar is not None and self.store.get_setting("sidebar"):
+            quoted = directory.replace("'", "'\\''")
+            self.sidecar.open_command(f"{lazygit} -p '{quoted}'")
+        else:
+            self._suspend_and_run(
+                lambda: __import__("subprocess").run([lazygit, "-p", directory])
+            )
 
     # -- misc -------------------------------------------------------------------
 

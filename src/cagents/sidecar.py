@@ -50,6 +50,20 @@ class Sidecar:
             self._run(["resize-pane", "-t", self.own_pane, "-x", str(COLLAPSED_WIDTH)])
         self._run(["select-pane", "-t", self.pane_id])
 
+    def split_shell(self, directory: str) -> None:
+        """A throwaway shell pane below the session (or the rail), cwd'd
+        into the worktree/project. Exits with the shell."""
+        target = self.pane_id if (self.pane_id and self._pane_alive()) else self.own_pane
+        args = ["split-window", "-v", "-l", "12", "-c", directory]
+        if target:
+            args += ["-t", target]
+        self._run(args)
+
+    def open_command(self, shell_command: str) -> None:
+        """Run an arbitrary full-screen tool (e.g. lazygit) in the right
+        pane — same slot the session uses; ← closes it the same way."""
+        self.open(shell_command)
+
     def expand(self, width: str = "50%") -> None:
         """Grow the rail back out (used when no container hook will)."""
         if self.own_pane:
@@ -97,7 +111,17 @@ def container_setup_commands() -> list[list[str]]:
     return [
         ["set", "-g", "escape-time", "10"],  # keep Esc snappy for Claude
         ["set", "-g", "mouse", "on"],  # click a pane to focus it
-        ["set", "-g", "status", "off"],  # the rail is the status line
+        # A slim statusline under everything showing the cagents keys.
+        ["set", "-g", "status", "on"],
+        ["set", "-g", "status-position", "bottom"],
+        ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
+        ["set", "-g", "status-left", " cagents "],
+        ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
+        ["set", "-g", "status-right",
+         " ← back · ctrl+\\ toggle · t shell · V diff · = expand "],
+        ["set", "-g", "status-right-length", "70"],
+        ["set", "-g", "window-status-format", ""],
+        ["set", "-g", "window-status-current-format", ""],
         ["set", "-g", "focus-events", "on"],
         ["set", "-g", "detach-on-destroy", "on"],
         # after-select-pane fires for keys AND mouse clicks (pane-focus-in

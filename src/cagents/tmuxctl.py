@@ -169,6 +169,29 @@ class TmuxClient:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError(f"tmux send failed: {error}")
 
+    # Session-scoped statusline shown during fullscreen attaches, so the
+    # cagents keys stay visible under the Claude terminal.
+    _STATUS_OPTIONS = {
+        "status": "on",
+        "status-position": "bottom",
+        "status-style": "bg=colour235,fg=colour246",
+        "status-left": " cagents ",
+        "status-left-style": "bg=colour31,fg=colour231,bold",
+        "status-right": " ← back · C-b d detach ",
+        "status-right-length": "40",
+        "window-status-format": "",
+        "window-status-current-format": "",
+    }
+
+    def session_statusline_on(self, session_name: str) -> None:
+        for option, value in self._STATUS_OPTIONS.items():
+            self._run("set", "-t", f"={session_name}", option, value)
+
+    def session_statusline_off(self, session_name: str) -> None:
+        # -u unsets the *session* override; the server/global value returns.
+        for option in self._STATUS_OPTIONS:
+            self._run("set", "-u", "-t", f"={session_name}", option)
+
     def bind_left_detach(self, client_tty: str) -> None:
         """Fullscreen-mode left-arrow capture: while a cagents attach is
         active, Left detaches *our* client (returning to the list). The

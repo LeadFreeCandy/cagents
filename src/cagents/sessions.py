@@ -35,6 +35,7 @@ class SessionState(Enum):
     WORKING = "working"
     NEEDS_INPUT = "needs input"  # blocked on a human: permission / question
     NEEDS_REVIEW = "needs review"  # Claude finished; no human has looked yet
+    MONITORING = "monitoring"  # seen it, keeping an eye; new activity re-alerts
     DONE = "done"  # a human explicitly accepted the result
     STOPPED = "stopped"  # ended without completing normally
 
@@ -44,9 +45,10 @@ class SessionState(Enum):
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
     SessionState.NEEDS_REVIEW: 1,
-    SessionState.WORKING: 2,
-    SessionState.STOPPED: 3,
-    SessionState.DONE: 4,
+    SessionState.MONITORING: 2,
+    SessionState.WORKING: 3,
+    SessionState.STOPPED: 4,
+    SessionState.DONE: 5,
 }
 
 # If the transcript was written to this recently, Claude is mid-turn even if
@@ -182,6 +184,11 @@ def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[Ses
     last = parsed.last_timestamp
     if reviewed is not None and (last is None or reviewed >= last):
         return (SessionState.DONE, "reviewed")
+    monitoring = tracked.monitoring_datetime()
+    if monitoring is not None and (last is None or monitoring >= last):
+        # Watched, not resolved. Activity after the mark re-alerts (the
+        # comparison above fails and it falls back to needs-review).
+        return (SessionState.MONITORING, "watching")
     return (SessionState.NEEDS_REVIEW, "finished, unreviewed")
 
 

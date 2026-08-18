@@ -17,6 +17,7 @@ STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
     SessionState.WORKING: ("●", "bold green", "working"),
     SessionState.NEEDS_INPUT: ("◉", "bold red", "needs you"),
     SessionState.NEEDS_REVIEW: ("◆", "bold yellow", "review"),
+    SessionState.MONITORING: ("◎", "bold cyan", "monitoring"),
     SessionState.DONE: ("✓", "bright_blue", "done"),
     SessionState.STOPPED: ("■", "dim", "stopped"),
 }
@@ -211,6 +212,7 @@ def header_summary(counts: dict[SessionState, int]) -> Text:
     for state in (
         SessionState.NEEDS_INPUT,
         SessionState.NEEDS_REVIEW,
+        SessionState.MONITORING,
         SessionState.WORKING,
         SessionState.DONE,
         SessionState.STOPPED,
