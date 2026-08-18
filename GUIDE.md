@@ -1,6 +1,6 @@
 # Using cagents (v2) — the guide
 
-Run `cagents-feature` from any terminal. It wraps itself in a tmux container: the
+Run `cagents` from any terminal. It wraps itself in a tmux container: the
 session list as a left rail, and one viewer pane on the right that always shows the
 real thing.
 
