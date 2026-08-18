@@ -108,6 +108,27 @@ def test_preview_renderable_missing_transcript():
     assert "not found" in console.export_text()
 
 
+def test_preview_renderable_missing_transcript_while_live_says_starting():
+    # Just created/resumed: don't tell the user their brand-new session's
+    # data is "not found" — it hasn't been written yet.
+    tracked = TrackedSession(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
+    view = SessionView(
+        session_id=SID1,
+        tracked=tracked,
+        parsed=None,
+        state=SessionState.WORKING,
+        live=True,
+        missing=True,
+    )
+    from rich.console import Console
+
+    console = Console(width=80, record=True)
+    console.print(preview_renderable(view, NOW))
+    out = console.export_text()
+    assert "Starting" in out
+    assert "not found" not in out
+
+
 def test_header_summary_counts():
     counts = {
         SessionState.WORKING: 2,

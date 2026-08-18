@@ -133,6 +133,7 @@ class CagentsApp(App):
         self.active_view_id = "grouped"
         self.selected_session_id: str | None = None
         self._preview_tmux_name: str | None = None  # what the sidecar's right pane is showing
+        self._recently_started: dict[str, str] = {}  # session_id -> tmux name we just spawned
         logger.info(
             "CagentsApp constructed: sidecar=%s sidebar_setting=%s",
             self.sidecar is not None, self.store.get_setting("sidebar"),
@@ -393,7 +394,22 @@ class CagentsApp(App):
             self.notify("tmux not found on PATH — cannot attach.", severity="error")
             return
         try:
-            if view.live:
+            recent = self._recently_started.get(view.session_id)
+            if recent and self.tmux.has_session(recent):
+                # We ourselves just created/resumed this one; the registry
+                # snapshot (polled every REFRESH_SECONDS) hasn't caught up
+                # to it being live yet. Reuse it rather than spawning
+                # another `claude --resume` for the same session id —
+                # without this guard, mashing enter before the next poll
+                # spawns duplicate tmux sessions racing each other on the
+                # same underlying Claude session (the observed "flickers
+                # and doesn't open").
+                logger.info(
+                    "attach %s: reusing recently-started tmux session %r "
+                    "(registry hasn't caught up yet)", view.session_id, recent,
+                )
+                self._attach_tmux_session(recent)
+            elif view.live:
                 self._attach_tmux_session(view.tmux_name)
             else:
                 logger.info("attach: %s is dead, resuming", view.session_id)
@@ -494,6 +510,7 @@ class CagentsApp(App):
             session_id=view.session_id,
             claude_bin=claude_bin,
         )
+        self._recently_started[view.session_id] = name
         self._attach_tmux_session(name)
 
     def _suspend_and_run(self, fn) -> None:
@@ -554,6 +571,7 @@ class CagentsApp(App):
             self.store.link_todo_session(pending, session_id)
             self._pending_todo_link = None
         self.selected_session_id = session_id
+        self._recently_started[session_id] = name
         self._attach_tmux_session(name)
         self.refresh_data()
 

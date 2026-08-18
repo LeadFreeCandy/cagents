@@ -9,10 +9,13 @@ is derived live from Claude's own store.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger("cagents.store")
 
 STORE_VERSION = 1
 
@@ -173,7 +176,8 @@ class Store:
         store = cls(path=path)
         try:
             raw = json.loads(path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as error:
+            logger.info("store load: %s (%s) -> fresh store", path, error)
             return store
         sessions = raw.get("sessions")
         if isinstance(sessions, dict):
@@ -196,6 +200,7 @@ class Store:
                         store.settings[key] = value
                 elif isinstance(default, (int, float)) and isinstance(value, (int, float)):
                     store.settings[key] = value
+        logger.info("store loaded: %s settings=%r", path, store.settings)
         return store
 
     def save(self) -> None:
@@ -282,6 +287,7 @@ class Store:
             return
         if not isinstance(default, bool) and not isinstance(value, (int, float)):
             return
+        logger.info("setting changed: %s = %r (was %r)", key, value, self.settings.get(key))
         self.settings[key] = value
         self.save()
 

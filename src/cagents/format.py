@@ -198,7 +198,12 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
     parts.append(Text("─" * max(10, width - 2), style="dim"))
 
     if view.missing:
-        parts.append(Text("Transcript not found in Claude's store.", style="dim red"))
+        if view.live:
+            # Just created/resumed: the process is running but hasn't
+            # written its first transcript bytes yet.
+            parts.append(Text("Starting…", style="dim"))
+        else:
+            parts.append(Text("Transcript not found in Claude's store.", style="dim red"))
         return Group(*parts)
     if not view.parsed or not view.parsed.preview:
         parts.append(Text("No conversation yet.", style="dim"))

@@ -39,10 +39,19 @@ def _tmux(name: str = "alpha", path: str = "/proj/alpha", created: float = 0.0, 
 
 
 class TestDeriveState:
-    def test_missing_transcript_is_stopped(self):
-        state, detail = derive_state(None, _tracked(), live=True)
+    def test_missing_transcript_while_dead_is_stopped(self):
+        state, detail = derive_state(None, _tracked(), live=False)
         assert state == SessionState.STOPPED
         assert "missing" in detail
+
+    def test_missing_transcript_while_live_is_starting_not_dead(self):
+        # A session that was just created/resumed: the tmux process is real
+        # but Claude hasn't written its first transcript bytes yet. This
+        # must never read as dead — previously it did (STOPPED, "transcript
+        # missing"), which is what made brand-new sessions look broken.
+        state, detail = derive_state(None, _tracked(), live=True)
+        assert state == SessionState.WORKING
+        assert "start" in detail
 
     def test_live_fresh_writes_is_working(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))

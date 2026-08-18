@@ -72,6 +72,9 @@ class FakeTmux:
         self.attached_to.append(name)
         return 0
 
+    def has_session(self, name: str) -> bool:
+        return any(s.name == name for s in self.sessions)
+
     def new_claude_session(self, directory, claude_args, session_id="", claude_bin=""):
         name = Path(directory).name or "session"
         self.created.append((directory, claude_args, session_id))
@@ -238,6 +241,38 @@ async def test_attach_dead_session_resumes_in_tmux(world):
         await pilot.pause()
         assert tmux.created and tmux.created[-1][1] == ["--resume", SID3]
         assert tmux.attached_to  # attached to the fresh tmux session
+
+
+async def test_mashing_attach_on_a_dead_session_does_not_spawn_duplicates(world):
+    """Regression: the registry only polls every REFRESH_SECONDS, so a
+    session we just resumed can still read as `live=False` in the stale
+    snapshot for a moment. Pressing attach again in that window used to
+    call `_resume_dead_session` a second time, spawning a second
+    `claude --resume <same id>` tmux session racing the first one — the
+    real-world symptom was a newly (re)opened session flickering and not
+    opening. It must reuse the tmux session it just created instead."""
+    app, store, tmux, _ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID3)
+        await pilot.pause()
+        store.sessions[SID3].project_dir = "/tmp"
+        view = app.snapshot.by_id(SID3)
+        if view.parsed:
+            view.parsed.cwd = "/tmp"
+
+        app.action_attach()
+        await pilot.pause()
+        assert len(tmux.created) == 1  # first attach: resumes for real
+
+        # Snapshot still shows SID3 as dead (registry hasn't polled again).
+        # Mashing attach again must NOT create a second tmux session.
+        app.action_attach()
+        await pilot.pause()
+        app.action_attach()
+        await pilot.pause()
+        assert len(tmux.created) == 1
+        assert tmux.attached_to.count("tmp") == 3  # re-attached each time
 
 
 async def test_mark_reviewed_flow(world):

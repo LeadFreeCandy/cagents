@@ -152,6 +152,12 @@ def derive_state(
     now = time.time() if now is None else now
 
     if parsed is None:
+        if live:
+            # Just created/resumed: the tmux process is real but Claude
+            # hasn't written its first transcript bytes yet. Without this,
+            # a session you just started reads as dead ("transcript
+            # missing") for that window instead of starting up.
+            return (SessionState.WORKING, "starting…")
         return (SessionState.STOPPED, "transcript missing")
 
     if live:
