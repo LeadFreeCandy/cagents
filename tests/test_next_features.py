@@ -1,5 +1,5 @@
-"""Tests for the cagents-next prototypes: derived badges, peek mode, and
-the fleet palette."""
+"""Tests for the cagents-next prototypes: derived badges and the fleet
+palette."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from cagents.palette import (
     fleet_table,
     parse_plan,
 )
-from cagents.peek import PeekScreen
 from cagents.sessions import SessionRegistry, SessionState
 from cagents.store import Store
 
@@ -80,9 +79,6 @@ class TestDerivedExtras:
         assert parsed.last_turn_duration_ms == 1234
 
 
-# ------------------------------------------------------------------ peek --
-
-
 @pytest.fixture
 def world(claude_dir: Path, tmp_path: Path, now: float):
     TranscriptBuilder(SID1, "/proj/alpha").ai_title("Alpha: fix auth").user(
@@ -102,39 +98,6 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
     app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
     return app, store, tmux
-
-
-async def test_peek_opens_and_shows_transcript(world):
-    app, store, _ = world
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        select_session(app, SID1)
-        await pilot.pause()
-        await pilot.press("space")
-        await pilot.pause()
-        assert isinstance(app.screen, PeekScreen)
-        text = render_text(app.screen.query_one("#peek-body").content)
-        assert "please fix auth" in text
-        assert "done with auth" in text
-        await pilot.press("escape")
-        await pilot.pause()
-        assert not isinstance(app.screen, PeekScreen)
-        assert store.sessions[SID1].reviewed_at == ""  # closing != reviewing
-
-
-async def test_peek_review_shortcut(world):
-    app, store, _ = world
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        select_session(app, SID1)
-        await pilot.pause()
-        await pilot.press("space")
-        await pilot.pause()
-        await pilot.press("r")
-        await pilot.pause(0.1)
-        assert not isinstance(app.screen, PeekScreen)
-        assert store.sessions[SID1].reviewed_at != ""
-        assert app.snapshot.by_id(SID1).state == SessionState.DONE
 
 
 async def test_preview_shows_badges(world):

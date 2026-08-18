@@ -1,15 +1,10 @@
 # Using cagents — the guide
 
-Two commands exist on your PATH:
+One command on your PATH: `cagents` (git `main`, everything merged in — todos, worktrees,
+diff review, handoff, plugins, wake/pause, the live sidecar preview, all of it). Store:
+`~/.local/share/cagents/state.json`.
 
-| command | what it runs | store |
-|---|---|---|
-| `cagents` | stable v0.1.0 (git `main`, checkout `~/Documents/projects/cagents-stable`) | `~/.local/share/cagents/state.json` |
-| `cagents-feature` | everything in flight (`feature/todos-and-diffs`) | `feature-state.json` (seeded from stable's on first run) |
-| `cagents-shell` | `cagents-feature` inside the persistent sidecar container (see below) | same as feature |
-
-They keep separate stores on purpose: the feature schema has fields (todos, archived)
-that the stable build would silently drop on save.
+`cagents-shell` runs `cagents` inside the persistent sidecar container (see below).
 
 ## The mental model
 
@@ -21,19 +16,20 @@ strictly read-only to it.
 
 ## Daily loop
 
-1. `cagents-shell` (or `cagents-feature` for full-screen mode).
+1. `cagents-shell` (or `cagents --fullscreen` for full-screen mode).
 2. The **grouped view** (`1`) is home: sessions by project, preview of the real
    conversation on the right, refreshed every 2s.
 3. Glance at the header: `◉ needs you` and `◆ review` counts are the work.
 4. `2` (queue) sorts everything by who needs you first. Walk it top to bottom.
-5. For each: `space` to peek (read the transcript without attaching), `D` to review the
-   diff, `enter` to actually get in, `r` when you've accepted the result.
+5. For each: glance at the right pane (a live, read-only view of the real session — scroll
+   it with tmux copy-mode for full history), `D` to review the diff, `enter` to actually
+   get in, `r` when you've accepted the result.
 
 ## Getting in and out of a session
 
-**The rail is the default.** Run `cagents-feature` in a plain terminal and it wraps
-itself in the sidecar container automatically — `enter` opens the session in a right
-pane and the list stays put as a left rail. (`cagents-shell` is now just an alias.)
+**The rail is the default.** Run `cagents` in a plain terminal and it wraps itself in
+the sidecar container automatically — `enter` opens the session in a right pane and the
+list stays put as a left rail. (`cagents-shell` is now just an alias.)
 
 - **In**: `enter` — the real Claude CLI in the right pane.
 - **Back to the list**: **`←` (left arrow)** — closes the session pane and drops you on
@@ -44,9 +40,9 @@ pane and the list stays put as a left rail. (`cagents-shell` is now just an alia
   works in every terminal. `alt+q` / `alt+w` jump one-way (need Option-as-Meta /
   "Esc+" in the terminal profile). Clicking a pane also works; the rail
   auto-expands/collapses with focus.
-- **Classic full-screen mode**: `cagents-feature --fullscreen` (and stable `cagents` is
-  always this). There, attach takes the whole terminal and you come back with
-  `ctrl-b d` (tmux detach). Detaching never stops Claude.
+- **Classic full-screen mode**: `cagents --fullscreen` opts out of the sidecar. There,
+  attach takes the whole terminal and you come back with `ctrl-b d` (tmux detach).
+  Detaching never stops Claude.
 - **Inside your own tmux**: cagents splits your current window instead of nesting a
   container. Your tmux has no auto-resize hooks, so get back with a click or
   `ctrl-b` + arrow, and press `=` in cagents to grow the rail back out.
@@ -107,7 +103,7 @@ pane or use `ctrl+c`-free alternatives instead). Alt-q is the recommended trade.
 - `◆ review` — Claude finished; **no human has looked yet**. This is cagents' own state.
 - `◎ monitoring` — you pressed `m`: acknowledged but being watched. Ranks between review
   and working in the queue; any new activity flips it back to `◆ review`.
-- `✓ done` — you pressed `r` (or accepted via peek/palette) *after* the last activity.
+- `✓ done` — you pressed `r` (or accepted via the palette) *after* the last activity.
   If Claude does more work later, it drops back to `◆ review` automatically.
 - `■ stopped` — no live process and the transcript ends mid-turn.
 
@@ -122,7 +118,6 @@ Row markers: `⇄` someone is attached · `✎` has a note · `⇗` recorded a P
 | `F` | **fork**: new session continuing this conversation — you type its first prompt, the fork is named after it, the original is untouched |
 | `H` | **handoff**: the old session writes a condensed task spec (on a throwaway fork — its transcript is untouched), a fresh session starts with spec+your prompt as its first message, and the old one is marked done (`r` on it restores) |
 | `*` | **related**: browse this session's parent / siblings / children (forks & handoffs) and jump to one. Rows show `↳` on children and `»N` on parents |
-| `space` | peek: full-screen transcript, `r` inside marks reviewed, `esc` closes |
 | `D` | built-in diff review (comment + send to Claude) |
 | `V` | **rich diff**: lazygit in a pane — commits panel for per-commit diffs, files panel for the total diff (PR-style); falls back to `D` if not installed |
 | `t` | split a **shell** below, cwd'd into the worktree/project |

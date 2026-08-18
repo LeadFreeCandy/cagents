@@ -38,6 +38,18 @@ class Sidecar:
     def open(self, shell_command: str) -> None:
         """Run `shell_command` in the right pane (creating or replacing it),
         collapse the rail, and move focus to the session."""
+        self._spawn(shell_command)
+        if self.own_pane:
+            self._run(["resize-pane", "-t", self.own_pane, "-x", str(COLLAPSED_WIDTH)])
+        self._run(["select-pane", "-t", self.pane_id])
+
+    def preview(self, shell_command: str) -> None:
+        """Keep the right pane on a live read-only view of `shell_command`
+        (a real Claude Code render, not a re-implementation) as selection
+        moves — without stealing focus from the list."""
+        self._spawn(shell_command)
+
+    def _spawn(self, shell_command: str) -> None:
         if self.pane_id and self._pane_alive():
             self._run(["respawn-pane", "-k", "-t", self.pane_id, shell_command])
         else:
@@ -46,9 +58,6 @@ class Sidecar:
                  "-t", self.own_pane, shell_command]
             )
             self.pane_id = out.strip()
-        if self.own_pane:
-            self._run(["resize-pane", "-t", self.own_pane, "-x", str(COLLAPSED_WIDTH)])
-        self._run(["select-pane", "-t", self.pane_id])
 
     def split_shell(self, directory: str) -> None:
         """A throwaway shell pane below the session (or the rail), cwd'd
@@ -85,11 +94,14 @@ def _outer_tmux(args: list[str]) -> str:
     return proc.stdout
 
 
-def nested_attach_command(socket: str, session_name: str) -> str:
+def nested_attach_command(socket: str, session_name: str, read_only: bool = False) -> str:
     """The command the right pane runs: attach to the claude-socket session,
-    with $TMUX cleared so tmux allows the (deliberate) nesting."""
+    with $TMUX cleared so tmux allows the (deliberate) nesting. `read_only`
+    gives a live, look-but-don't-touch view (used for the passive preview;
+    a real attach never passes it)."""
     safe = session_name.replace("'", "'\\''")
-    return f"env -u TMUX tmux -L {socket} attach-session -t '={safe}'"
+    flag = "-r " if read_only else ""
+    return f"env -u TMUX tmux -L {socket} attach-session {flag}-t '={safe}'"
 
 
 # ------------------------------------------------------- the container --

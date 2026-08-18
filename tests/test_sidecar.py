@@ -86,6 +86,27 @@ class TestSidecar:
         assert cmd == "env -u TMUX tmux -L claude attach-session -t '=my-repo'"
         assert "'\\''" in nested_attach_command("claude", "we'ird")
 
+    def test_nested_attach_command_read_only(self):
+        cmd = nested_attach_command("claude", "my-repo", read_only=True)
+        assert cmd == "env -u TMUX tmux -L claude attach-session -r -t '=my-repo'"
+
+    def test_preview_spawns_without_moving_focus(self):
+        outer = FakeOuterTmux()
+        sidecar = Sidecar(runner=outer, own_pane="%0")
+        sidecar.preview("attach-cmd")
+        kinds = [c[0] for c in outer.calls]
+        assert kinds == ["split-window"]  # no resize-pane, no select-pane
+        assert sidecar.pane_id == "%1"
+
+    def test_second_preview_respawns_same_pane_without_moving_focus(self):
+        outer = FakeOuterTmux()
+        sidecar = Sidecar(runner=outer, own_pane="%0")
+        sidecar.preview("cmd-one")
+        outer.calls.clear()
+        sidecar.preview("cmd-two")
+        kinds = [c[0] for c in outer.calls]
+        assert kinds == ["list-panes", "respawn-pane"]
+
 
 @pytest.fixture
 def world(claude_dir: Path, tmp_path: Path, now: float):
@@ -112,11 +133,14 @@ async def test_attach_uses_sidecar_pane_not_suspend(world):
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
+        # The live selection already put a read-only preview in the pane.
+        split = next(c for c in outer.calls if c[0] == "split-window")
+        assert split[-1] == "env -u TMUX tmux -L claude attach-session -r -t '=alpha'"
         app.action_attach()
         await pilot.pause()
         assert tmux.attached_to == []  # no terminal handoff
-        split = next(c for c in outer.calls if c[0] == "split-window")
-        assert split[-1] == "env -u TMUX tmux -L claude attach-session -t '=alpha'"
+        respawn = next(c for c in outer.calls if c[0] == "respawn-pane")
+        assert respawn[-1] == "env -u TMUX tmux -L claude attach-session -t '=alpha'"
 
 
 async def test_compact_rail_rendering(world):

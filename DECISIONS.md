@@ -45,13 +45,14 @@ constraint, not taste. Newest epochs last.
   fail loudly. Live test: real `claude -p` correctly declined to re-review an
   already-reviewed session. ~18s latency is why none of this ever runs implicitly.
 
-## 3. Two commands, two stores
+## 3. Two commands, two stores (superseded)
 
-- `cagents` = `main` (v0.1.0, frozen) via the `cagents-stable` git worktree;
-  `cagents-feature` = the feature branch. **Separate state files on purpose**: the
-  feature schema adds fields (todos, archived, settings, lineage) that the stable
-  build would *silently drop on save*. Sharing one file would let stable eat feature
-  data. Feature store seeds from stable's on first run.
+- Originally planned: `cagents` = `main` (v0.1.0, frozen) via a separate `cagents-stable`
+  git worktree; `cagents-feature` = the feature branch, with its own state file since the
+  feature schema adds fields (todos, archived, settings, lineage) that the stable build
+  would *silently drop on save*. **Never actually built** — the second worktree and
+  `cagents-feature` entry point don't exist. In practice `feature/todos-and-diffs` was
+  merged straight into `main`, so there's just one `cagents` binary and one store now.
 
 ## 4. Todos, worktrees, diff review
 

@@ -42,7 +42,6 @@ from .modals import PauseModal, RelatedModal, ScriptConfirmModal
 from .notifier import notify_desktop, read_select_request
 from .plugins import PluginAPI, PluginManager, PLUGIN_GUIDE
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
-from .peek import PeekScreen, deep_view
 from .wake import WakeEngine, build_wake_prompt, extract_script, iso_in, parse_duration
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import Sidecar, apply_left_capture, nested_attach_command
@@ -93,7 +92,6 @@ class CagentsApp(App):
         Binding("m", "toggle_monitoring", "Monitor", show=False),
         Binding("t", "split_shell", "Shell", show=False),
         Binding("V", "rich_diff", "Rich diff", show=False),
-        Binding("space", "peek", "Peek"),
         Binding("o", "open_link", "Open link", show=False),
         Binding("colon", "palette", "Fleet ':'", show=False),
         Binding("n", "new_session", "New"),
@@ -131,6 +129,7 @@ class CagentsApp(App):
         self.snapshot = Snapshot()
         self.active_view_id = "grouped"
         self.selected_session_id: str | None = None
+        self._preview_tmux_name: str | None = None  # what the sidecar's right pane is showing
         self.wake_engine = WakeEngine(self.store)
         self._prev_states: dict[str, SessionState] = {}
         self._seen_first_snapshot = False
@@ -299,7 +298,7 @@ class CagentsApp(App):
             self._update_preview()
 
     def on_todo_selected(self, event: TodoSelected) -> None:
-        # In the todo view, session-level actions (attach/peek/diff/review)
+        # In the todo view, session-level actions (attach/diff/review)
         # target the todo's newest session.
         if self.active_view_id == "todos":
             self.selected_session_id = event.session_id
@@ -316,11 +315,32 @@ class CagentsApp(App):
         view = self.selected_view()
         if view is None:
             content.update("")
+            self._sync_sidecar_preview(None)
             return
         pane = self.query_one("#preview-pane", VerticalScroll)
         width = max(40, pane.size.width - 2)
         content.update(preview_renderable(view, datetime.now(timezone.utc), width=width))
         pane.scroll_end(animate=False)
+        self._sync_sidecar_preview(view)
+
+    def _sync_sidecar_preview(self, view: SessionView | None) -> None:
+        """Mirror the highlighted session into the sidecar's right pane as a
+        live, read-only tmux attach — the real Claude Code render, always
+        current as selection moves, rather than a re-implemented summary.
+        Only touches the pane when the target actually changes, so it never
+        interrupts an interactive attach sitting in the same pane."""
+        if self.sidecar is None or not self.store.get_setting("sidebar"):
+            return
+        name = view.tmux_name if (view is not None and view.live) else None
+        if name == self._preview_tmux_name:
+            return
+        self._preview_tmux_name = name
+        if name is None:
+            return
+        try:
+            self.sidecar.preview(nested_attach_command(self.tmux.socket, name, read_only=True))
+        except Exception as error:
+            self.notify(f"Live preview failed: {error}", severity="warning")
 
     # -- view switching --------------------------------------------------------
 
@@ -373,6 +393,7 @@ class CagentsApp(App):
         right-hand pane when running as a sidecar rail."""
         if self.sidecar is not None and self.store.get_setting("sidebar"):
             self.sidecar.open(nested_attach_command(self.tmux.socket, name))
+            self._preview_tmux_name = name  # now interactive; the next preview tick leaves it alone
             if not getattr(self, "_sidecar_hint_shown", False):
                 self._sidecar_hint_shown = True
                 self.notify(
@@ -620,21 +641,7 @@ class CagentsApp(App):
             self.selected_session_id = None
         self.refresh_data()
 
-    # -- peek / links ------------------------------------------------------------
-
-    def action_peek(self) -> None:
-        view = self.selected_view()
-        if view is None:
-            self.notify("No session selected.", severity="warning")
-            return
-        deep = deep_view(view)
-        self.push_screen(PeekScreen(deep), lambda r: self._peek_closed(view.session_id, r))
-
-    def _peek_closed(self, session_id: str, result: str | None) -> None:
-        if result == "reviewed":
-            self.store.mark_reviewed(session_id, utcnow().isoformat())
-            self.notify("Marked reviewed.")
-            self.refresh_data()
+    # -- links ---------------------------------------------------------------
 
     def action_open_link(self) -> None:
         view = self.selected_view()

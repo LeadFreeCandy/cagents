@@ -241,7 +241,6 @@ HELP_TEXT = """\
   H             handoff — old session writes a spec, new one starts on it,
                 old is marked done (r restores)
   *             related — visit this session's forks/handoffs/parent
-  space         peek — read the transcript without attaching
   D             diff — review changes, comment, send comments to Claude
   V             rich diff — lazygit (per-commit + total, PR-style)
   t             shell — split terminal in the worktree/project

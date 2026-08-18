@@ -40,13 +40,17 @@ Liveness comes from tmux: sessions started through `cagents` carry a `CAGENTS_SE
 tmux environment variable and map back exactly; sessions started outside it are matched by
 working directory + transcript recency.
 
-## This branch (feature/todos-and-diffs)
+## On top of v0.1.0
 
-On top of v0.1.0 (which lives on `main`, runnable as `cagents`; this branch is
-`cagents-feature` with its own store):
+Everything below has since been merged into `main` and ships as the one `cagents`
+binary — it started life on `feature/todos-and-diffs`:
 
-- **Peek** (`space`), **badges** (`⇗` links / `Δ` files touched / `⑂` agents, `o` opens),
-  **fleet palette** (`:`) — promoted from the cagents-next prototypes.
+- **Badges** (`⇗` links / `Δ` files touched / `⑂` agents, `o` opens), **fleet palette**
+  (`:`) — promoted from the cagents-next prototypes.
+- **Live right pane.** The sidecar's right pane always mirrors the highlighted session as
+  a real, read-only `tmux` attach — the actual Claude Code render, not a re-parsed
+  summary — and promotes to a normal interactive attach on `enter`. Replaces the old
+  `space`-to-peek modal; full history is a tmux copy-mode scroll away.
 - **Todos (view `4`)** — units of intent. `A` add; `n` starts a session for the selected
   todo (linked, prefilled); `W` grows it a dedicated **git worktree** (branch
   `todo/<slug>`, sibling `<repo>-worktrees/<slug>` dir) with a session inside; `enter`
