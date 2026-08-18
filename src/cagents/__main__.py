@@ -42,18 +42,20 @@ def main(argv: list[str] | None = None) -> int:
     import os
 
     from cagents.sidecar import bootstrap_container, should_bootstrap
+    from cagents.store import Store
 
+    store = Store.load(args.store)
     raw_args = list(argv) if argv is not None else sys.argv[1:]
-    if should_bootstrap(os.environ, sys.stdout.isatty(), args.fullscreen):
+    if store.get_setting("sidebar") and should_bootstrap(
+        os.environ, sys.stdout.isatty(), args.fullscreen
+    ):
         bootstrap_container(raw_args)  # execs tmux attach; never returns
 
     if args.fullscreen:
         os.environ["CAGENTS_SIDECAR"] = "0"  # opt out even inside tmux
 
     from cagents.app import CagentsApp
-    from cagents.store import Store
 
-    store = Store.load(args.store)
     app = CagentsApp(store=store, claude_dir=args.claude_dir)
     app.run()
     return 0

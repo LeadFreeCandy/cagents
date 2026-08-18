@@ -36,10 +36,14 @@ itself in the sidecar container automatically — `enter` opens the session in a
 pane and the list stays put as a left rail. (`cagents-shell` is now just an alias.)
 
 - **In**: `enter` — the real Claude CLI in the right pane.
-- **Back to the list**: **`ctrl+\`** — toggles between rail and session, works in every
-  terminal. `alt+q` / `alt+w` do the same one-way (they need Option-as-Meta / "Esc+"
-  enabled in your terminal profile — the usual reason "alt didn't work"). Clicking a
-  pane also works; the rail auto-expands/collapses with focus either way.
+- **Back to the list**: **`←` (left arrow)** — closes the session pane and drops you on
+  the full-width list; the session keeps running in the background. This replaces
+  Claude's empty-prompt ← (the agents panel); the trade-off is that ← no longer moves
+  the cursor while editing text in the Claude prompt — toggle it off in settings (`,`)
+  if that bites. **`ctrl+\`** toggles rail ↔ session without closing anything, and
+  works in every terminal. `alt+q` / `alt+w` jump one-way (need Option-as-Meta /
+  "Esc+" in the terminal profile). Clicking a pane also works; the rail
+  auto-expands/collapses with focus.
 - **Classic full-screen mode**: `cagents-feature --fullscreen` (and stable `cagents` is
   always this). There, attach takes the whole terminal and you come back with
   `ctrl-b d` (tmux detach). Detaching never stops Claude.
@@ -121,6 +125,15 @@ Row markers: `⇄` someone is attached · `✎` has a note · `⇗` recorded a P
 | `x` | untrack (cagents-only; Claude's data untouched) |
 | `n` / `a` | new session / track an existing one |
 
+## Settings (`,`)
+
+Three toggles, applied immediately and persisted:
+
+- **Sidebar rail** (on) — off returns to classic full-terminal attach everywhere.
+- **Toast notifications** (off) — bottom-right popups for routine events. Errors and
+  warnings always show regardless.
+- **Left arrow returns to list** (on) — the ← capture described above.
+
 ## Todos (`4`)
 
 The unit is intent, not process. `A` adds a todo (text + optional project directory).
@@ -133,7 +146,13 @@ Then, with a todo selected:
 - `d` — done. If it spawned workspaces you're offered the archive: linked sessions
   disappear from the session views (history kept in the store), and a *clean* worktree is
   removed — a dirty one refuses loudly and stays. `d` again reopens and un-archives.
+  Done todos drop below a `── done ──` divider, greyed out — a visual archive.
 - `x` — delete the todo only.
+
+When a todo's newest session is waiting on you, two single-line rows appear under it:
+**`did`** — the agent's most recent statement (from the transcript, no summarizing) —
+and **`needs`** — the actual question from a permission prompt, or "your review".
+While the agent is working the rows are absent entirely; nothing there would be current.
 
 ## Diff review (`D`)
 

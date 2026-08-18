@@ -114,6 +114,8 @@ class ParsedSession:
     pending_tool_name: str = ""
     last_record_role: str = ""  # "user" | "assistant" | "" if neither seen
     truncated: bool = False  # tail parse did not cover the whole file
+    # First line of the newest assistant text — "what the agent last did/said".
+    last_assistant_text: str = ""
     # Derived extras, all read straight from records Claude already writes:
     links: list[Link] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)  # ordered, deduped
@@ -324,6 +326,7 @@ def parse_session_file(
                 text = block.get("text", "")
                 if isinstance(text, str) and text.strip():
                     preview.append(PreviewItem("assistant", text.strip(), ts))
+                    parsed.last_assistant_text = _first_line(text, 110)
             elif btype == "thinking":
                 text = block.get("thinking", "")
                 if isinstance(text, str) and text.strip():

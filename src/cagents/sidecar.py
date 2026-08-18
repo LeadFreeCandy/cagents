@@ -114,6 +114,37 @@ def container_setup_commands() -> list[list[str]]:
     ]
 
 
+# Left-arrow capture: inside a session, Left closes the pane (the session
+# keeps running in the background) and lands you back on the list. In the
+# rail pane, Left passes through to cagents untouched. The trade-off: while
+# the setting is on, Left no longer moves the cursor when editing text in
+# the Claude prompt — Claude's own empty-prompt Left (the agents panel) is
+# what it replaces.
+_LEFT_CAPTURE = [
+    "bind", "-n", "Left",
+    "if", "-F", "#{==:#{pane_index},0}",
+    "send-keys Left", "kill-pane -t :.1",
+]
+
+
+def left_capture_commands(enable: bool) -> list[list[str]]:
+    if enable:
+        return [_LEFT_CAPTURE]
+    return [["unbind", "-n", "Left"]]
+
+
+def apply_left_capture(enable: bool, runner=None) -> None:
+    """Set/unset the Left binding on the enclosing container server. Only
+    meaningful inside the container (callers check CAGENTS_SIDECAR)."""
+    run = runner or _outer_tmux
+    for command in left_capture_commands(enable):
+        try:
+            run(command)
+        except RuntimeError:
+            if enable:
+                raise  # failing to bind is worth surfacing; unbind noise isn't
+
+
 def self_command(argv: list[str]) -> str:
     """The shell command that re-runs this cagents with the same arguments
     inside the container pane."""

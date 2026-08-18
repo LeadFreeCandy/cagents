@@ -22,7 +22,13 @@ from .claude_data import (
     session_file_path,
 )
 from .store import Store, TrackedSession
-from .tmuxctl import TmuxClient, TmuxSession, pane_shows_prompt, pane_shows_working
+from .tmuxctl import (
+    TmuxClient,
+    TmuxSession,
+    extract_prompt_question,
+    pane_shows_prompt,
+    pane_shows_working,
+)
 
 
 class SessionState(Enum):
@@ -62,6 +68,9 @@ class SessionView:
     attached: bool = False
     state_detail: str = ""  # e.g. the tool waiting for permission
     missing: bool = False  # transcript file disappeared
+    # Only set when the session is waiting on a human (review / input):
+    did_line: str = ""  # single line: the agent's most recent statement
+    needs_line: str = ""  # single line: what it needs from you
 
     @property
     def title(self) -> str:
@@ -165,6 +174,24 @@ def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[Ses
     if reviewed is not None and (last is None or reviewed >= last):
         return (SessionState.DONE, "reviewed")
     return (SessionState.NEEDS_REVIEW, "finished, unreviewed")
+
+
+def derive_did_needs(
+    state: SessionState,
+    detail: str,
+    parsed: ParsedSession | None,
+    pane_text: str = "",
+) -> tuple[str, str]:
+    """The two waiting-on-you lines. Deliberately empty while WORKING —
+    a mid-turn 'did' would be stale the moment it rendered."""
+    if state not in (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW):
+        return ("", "")
+    did = parsed.last_assistant_text if parsed else ""
+    if state == SessionState.NEEDS_INPUT:
+        needs = extract_prompt_question(pane_text) or detail or "your input"
+    else:
+        needs = "your review — r to accept"
+    return (did, needs)
 
 
 def _working_detail(parsed: ParsedSession) -> str:
@@ -308,6 +335,7 @@ class SessionRegistry:
             if tmux is not None:
                 pane_text = self.tmux.capture_pane(tmux.name)
             state, detail = derive_state(parsed, tracked, live, pane_text, now)
+            did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
             views.append(
                 SessionView(
                     session_id=tracked.session_id,
@@ -319,6 +347,8 @@ class SessionRegistry:
                     attached=tmux.attached if tmux else False,
                     state_detail=detail,
                     missing=parsed is None,
+                    did_line=did_line,
+                    needs_line=needs_line,
                 )
             )
 

@@ -260,6 +260,7 @@ HELP_TEXT = """\
 [bold cyan]Fleet assistant[/bold cyan]
   :             ask in plain English (proposes a plan; you confirm)
 
+  ,             settings (sidebar rail · notifications · left-arrow capture)
   ?             this help · q quit\
 """
 
@@ -431,4 +432,99 @@ class TodoModal(ModalScreen["tuple[str, str] | None"]):
         self.dismiss((text, directory))
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+SETTINGS_META: list[tuple[str, str, str]] = [
+    (
+        "sidebar",
+        "Sidebar rail",
+        "Enter opens sessions in a side pane and the list stays as a left rail. "
+        "Off: attaching takes the whole terminal (come back with ctrl-b d).",
+    ),
+    (
+        "notifications",
+        "Toast notifications",
+        "Bottom-right popups for routine events. Errors and warnings always show.",
+    ),
+    (
+        "capture_left",
+        "Left arrow returns to list",
+        "In the container: Left inside a session closes its pane (the session keeps "
+        "running in the background). Trade-off: Left no longer moves the cursor while "
+        "editing text in the Claude prompt.",
+    ),
+]
+
+
+class SettingsModal(ModalScreen[None]):
+    """`,` — toggles, applied immediately and persisted to the store."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+        Binding("comma", "close", "Close"),
+    ]
+
+    DEFAULT_CSS = """
+    SettingsModal { align: center middle; }
+    SettingsModal > Vertical {
+        width: 84; max-width: 95%; height: auto;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    SettingsModal Label { text-style: bold; }
+    SettingsModal .hint { color: $text-muted; margin-bottom: 1; }
+    SettingsModal #setting-desc { color: $text-muted; margin-top: 1; min-height: 3; }
+    """
+
+    def __init__(self, store, on_change) -> None:
+        """on_change(key: str, value: bool) fires after each toggle."""
+        super().__init__()
+        self.store = store
+        self.on_change = on_change
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Settings")
+            yield Static("enter — toggle · esc — close", classes="hint")
+            yield OptionList(id="settings-list")
+            yield Static(id="setting-desc")
+
+    def on_mount(self) -> None:
+        self._refill()
+        self.query_one("#settings-list", OptionList).focus()
+
+    def _refill(self, keep: str | None = None) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#settings-list", OptionList)
+        option_list.clear_options()
+        for i, (key, label, _desc) in enumerate(SETTINGS_META):
+            enabled = self.store.get_setting(key)
+            row = Text()
+            row.append(" ▣ " if enabled else " □ ", style="bold green" if enabled else "dim")
+            row.append(f"{label:<34}", style="bold" if enabled else "")
+            row.append("on" if enabled else "off", style="green" if enabled else "dim")
+            option_list.add_option(Option(row, id=key))
+            if keep == key:
+                option_list.highlighted = i
+        if option_list.highlighted is None and option_list.option_count:
+            option_list.highlighted = 0
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        for key, _label, desc in SETTINGS_META:
+            if key == event.option.id:
+                self.query_one("#setting-desc", Static).update(desc)
+                return
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        key = event.option.id
+        if key is None:
+            return
+        value = not self.store.get_setting(key)
+        self.store.set_setting(key, value)
+        self._refill(keep=key)
+        self.on_change(key, value)
+
+    def action_close(self) -> None:
         self.dismiss(None)

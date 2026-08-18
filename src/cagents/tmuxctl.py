@@ -244,5 +244,18 @@ def pane_shows_prompt(pane_text: str) -> bool:
     return any(marker in pane_text for marker in _PROMPT_MARKERS)
 
 
+def extract_prompt_question(pane_text: str) -> str:
+    """The actual question a blocked session is asking, lifted from its pane
+    (e.g. "Do you want to proceed?"). Empty string when nothing matches."""
+    for line in pane_text.splitlines():
+        if any(marker in line for marker in _PROMPT_MARKERS):
+            cleaned = line.strip().strip("│┃▏▕|").strip()
+            if cleaned.startswith("❯"):
+                continue  # that's the answer row, not the question
+            if cleaned:
+                return cleaned[:110]
+    return ""
+
+
 def pane_shows_working(pane_text: str) -> bool:
     return any(marker in pane_text for marker in _WORKING_MARKERS)

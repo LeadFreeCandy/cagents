@@ -16,6 +16,18 @@ from pathlib import Path
 
 STORE_VERSION = 1
 
+# User-facing toggles (the `,` settings panel). Everything defaults here;
+# only overrides are persisted.
+SETTINGS_DEFAULTS: dict[str, bool] = {
+    # Attach opens sessions in a side pane, keeping the list as a left rail.
+    "sidebar": True,
+    # Toast notifications (bottom-right). Errors always show regardless.
+    "notifications": False,
+    # In the sidecar container: pressing Left inside a session closes its
+    # pane (session keeps running) and returns to the list.
+    "capture_left": True,
+}
+
 
 def default_store_path() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME")
@@ -110,6 +122,7 @@ class Store:
     path: Path
     sessions: dict[str, TrackedSession] = field(default_factory=dict)
     todos: dict[str, Todo] = field(default_factory=dict)
+    settings: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Store":
@@ -129,6 +142,11 @@ class Store:
             for tid, data in todos.items():
                 if isinstance(data, dict):
                     store.todos[tid] = Todo.from_dict(tid, data)
+        settings = raw.get("settings")
+        if isinstance(settings, dict):
+            for key, value in settings.items():
+                if key in SETTINGS_DEFAULTS and isinstance(value, bool):
+                    store.settings[key] = value
         return store
 
     def save(self) -> None:
@@ -136,6 +154,7 @@ class Store:
             "version": STORE_VERSION,
             "sessions": {sid: t.to_dict() for sid, t in self.sessions.items()},
             "todos": {tid: t.to_dict() for tid, t in self.todos.items()},
+            "settings": self.settings,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -190,6 +209,17 @@ class Store:
         if tracked is not None and tracked.archived != archived:
             tracked.archived = archived
             self.save()
+
+    # -- settings -------------------------------------------------------------
+
+    def get_setting(self, key: str) -> bool:
+        return self.settings.get(key, SETTINGS_DEFAULTS.get(key, False))
+
+    def set_setting(self, key: str, value: bool) -> None:
+        if key not in SETTINGS_DEFAULTS:
+            return
+        self.settings[key] = value
+        self.save()
 
     # -- todos ----------------------------------------------------------------
 

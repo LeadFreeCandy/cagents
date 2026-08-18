@@ -397,7 +397,36 @@ class TodoView(Widget):
             row.append(f"  {archived} archived", style="dim")
         if todo.worktree:
             row.append("  ⎇", style="dim magenta")
+        if todo.done:
+            # The done section is a visual archive: uniformly faded.
+            row.stylize("dim")
         return row
+
+    def _status_lines(self, todo) -> list[Option]:
+        """did/needs sub-rows for a todo waiting on a human. Deliberately
+        absent while the agent is working — nothing would be current."""
+        newest_id = self.newest_session_id(todo)
+        newest = self.snapshot.by_id(newest_id) if newest_id else None
+        if newest is None:
+            return []
+        # Hard-truncate: these must be single lines, and OptionList does not
+        # honor Rich no_wrap, so cut to the view's real width (minus the
+        # 13-char prefix, list padding, and scrollbar).
+        avail = max(20, (self.size.width or 100) - 24)
+        rows: list[Option] = []
+        if newest.did_line:
+            text = newest.did_line
+            did = Text()
+            did.append("      did    ", style="dim bold")
+            did.append(text[: avail - 1] + "…" if len(text) > avail else text, style="dim italic")
+            rows.append(Option(did, disabled=True))
+        if newest.needs_line:
+            text = newest.needs_line
+            needs = Text()
+            needs.append("      needs  ", style="bold yellow")
+            needs.append(text[: avail - 1] + "…" if len(text) > avail else text, style="yellow")
+            rows.append(Option(needs, disabled=True))
+        return rows
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
@@ -415,8 +444,16 @@ class TodoView(Widget):
         header.append("Todos ", style="bold")
         header.append(f"· {len(open_todos)} open · {len(done_todos)} done", style="dim")
         options.append(Option(header, disabled=True))
-        for todo in open_todos + done_todos:
+        for todo in open_todos:
             options.append(Option(self._todo_row(todo, now), id=f"todo:{todo.todo_id}"))
+            options.extend(self._status_lines(todo))
+        if done_todos:
+            divider = Text()
+            divider.append(" ── done ", style="dim")
+            divider.append("─" * 40, style="dim")
+            options.append(Option(divider, disabled=True))
+            for todo in done_todos:
+                options.append(Option(self._todo_row(todo, now), id=f"todo:{todo.todo_id}"))
         if not open_todos and not done_todos:
             options.append(
                 Option("  No todos — press 'A' to add one.", disabled=True)

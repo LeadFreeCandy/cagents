@@ -33,13 +33,14 @@ from .modals import (
     NewSessionModal,
     PaletteModal,
     PlanConfirmModal,
+    SettingsModal,
     TodoModal,
     TrackModal,
 )
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .peek import PeekScreen, deep_view
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
-from .sidecar import Sidecar, nested_attach_command
+from .sidecar import Sidecar, apply_left_capture, nested_attach_command
 from .store import Store
 from .tmuxctl import TmuxClient
 from .views import GroupedView, KanbanView, QueueView, SelectionChanged, TodoSelected, TodoView
@@ -91,6 +92,7 @@ class CagentsApp(App):
         Binding("x", "untrack", "Untrack", show=False),
         Binding("R", "refresh_now", "Refresh", show=False),
         Binding("equals_sign", "expand_rail", "Expand", show=False),
+        Binding("comma", "settings", "Settings", show=False),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
@@ -137,6 +139,21 @@ class CagentsApp(App):
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.query_one("#grouped", GroupedView).focus_list()
+        if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
+            try:
+                apply_left_capture(self.store.get_setting("capture_left"))
+            except Exception as error:
+                self.notify(f"Left-arrow binding failed: {error}", severity="warning")
+
+    def notify(self, message, *, title="", severity="information", timeout=None, **kwargs):
+        """Routine toasts are opt-in (settings: notifications, default off).
+        Warnings and errors always show — silent failure is the one
+        unforgivable sin here (spec §11)."""
+        if severity == "information" and not self.store.get_setting("notifications"):
+            return None
+        if timeout is None:
+            return super().notify(message, title=title, severity=severity, **kwargs)
+        return super().notify(message, title=title, severity=severity, timeout=timeout, **kwargs)
 
     def on_resize(self, event) -> None:
         self._apply_compact(event.size.width)
@@ -270,13 +287,13 @@ class CagentsApp(App):
     def _attach_tmux_session(self, name: str) -> None:
         """Hand off to the real CLI: full-terminal suspend normally, or the
         right-hand pane when running as a sidecar rail."""
-        if self.sidecar is not None:
+        if self.sidecar is not None and self.store.get_setting("sidebar"):
             self.sidecar.open(nested_attach_command(self.tmux.socket, name))
             if not getattr(self, "_sidecar_hint_shown", False):
                 self._sidecar_hint_shown = True
                 self.notify(
-                    "Opened in the right pane. Back to the list: ctrl+\\ "
-                    "(or alt+q, or click the rail).",
+                    "Opened in the right pane. Back to the list: ← (left arrow), "
+                    "ctrl+\\, or click the rail.",
                     timeout=8,
                 )
         else:
@@ -779,6 +796,18 @@ class CagentsApp(App):
             self.sidecar.expand()
         except Exception as error:
             self.notify(f"Could not resize: {error}", severity="warning")
+
+    def action_settings(self) -> None:
+        self.push_screen(SettingsModal(self.store, self._setting_changed))
+
+    def _setting_changed(self, key: str, value: bool) -> None:
+        if key == "capture_left" and os.environ.get("CAGENTS_SIDECAR") == "1":
+            try:
+                apply_left_capture(value)
+            except Exception as error:
+                self.notify(f"Could not apply Left binding: {error}", severity="error")
+        # "sidebar" is consulted live on every attach; "notifications" gates
+        # notify() directly — nothing else to do here.
 
     def action_help(self) -> None:
         self.push_screen(HelpModal())
