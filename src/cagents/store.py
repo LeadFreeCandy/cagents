@@ -68,9 +68,11 @@ class TrackedSession:
     note: str = ""
     reviewed_at: str = ""  # ISO 8601, empty = never reviewed
     archived: bool = False  # hidden from session views; history kept
-    # "I've seen it, keep watching": quieter than needs-review until new
-    # activity arrives (then it demands review again).
-    monitoring_since: str = ""
+    # "Done here, paused on an external PR review": quieter than
+    # needs-review until new GitHub comments arrive or the PR merges.
+    waiting_pr_since: str = ""
+    waiting_pr_baseline_comments: int = 0  # comment count captured when marked waiting
+    pr_status_note: str = ""  # "" | "github comments" (reopened) | "merged" (auto-done)
     # Lineage (spec §9's "lightweight relationships"): where this session
     # came from, when cagents created it from another one.
     parent_id: str = ""
@@ -79,8 +81,8 @@ class TrackedSession:
     def reviewed_datetime(self) -> datetime | None:
         return _parse_iso(self.reviewed_at)
 
-    def monitoring_datetime(self) -> datetime | None:
-        return _parse_iso(self.monitoring_since)
+    def waiting_pr_datetime(self) -> datetime | None:
+        return _parse_iso(self.waiting_pr_since)
 
     def to_dict(self) -> dict:
         return {
@@ -90,7 +92,9 @@ class TrackedSession:
             "note": self.note,
             "reviewed_at": self.reviewed_at,
             "archived": self.archived,
-            "monitoring_since": self.monitoring_since,
+            "waiting_pr_since": self.waiting_pr_since,
+            "waiting_pr_baseline_comments": self.waiting_pr_baseline_comments,
+            "pr_status_note": self.pr_status_note,
             "parent_id": self.parent_id,
             "relation": self.relation,
         }
@@ -105,7 +109,9 @@ class TrackedSession:
             note=str(data.get("note", "")),
             reviewed_at=str(data.get("reviewed_at", "")),
             archived=bool(data.get("archived", False)),
-            monitoring_since=str(data.get("monitoring_since", "")),
+            waiting_pr_since=str(data.get("waiting_pr_since", "")),
+            waiting_pr_baseline_comments=int(data.get("waiting_pr_baseline_comments", 0) or 0),
+            pr_status_note=str(data.get("pr_status_note", "")),
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
         )
@@ -302,11 +308,18 @@ class Store:
         self.settings[key] = value
         self.save()
 
-    def set_monitoring(self, session_id: str, when: str) -> None:
-        """when empty clears monitoring."""
+    def set_waiting_on_pr(self, session_id: str, when: str, baseline_comments: int = 0) -> None:
+        """when empty clears the waiting-on-review pause."""
         tracked = self.sessions.get(session_id)
         if tracked is not None:
-            tracked.monitoring_since = when
+            tracked.waiting_pr_since = when
+            tracked.waiting_pr_baseline_comments = baseline_comments if when else 0
+            self.save()
+
+    def set_pr_status_note(self, session_id: str, note: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.pr_status_note != note:
+            tracked.pr_status_note = note
             self.save()
 
     # -- pause / wake -----------------------------------------------------

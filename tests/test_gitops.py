@@ -13,6 +13,7 @@ from cagents.gitops import (
     current_branch,
     default_branch,
     github_pr_comments,
+    github_pr_status,
     is_git_repo,
     parse_unified_diff,
     remove_worktree,
@@ -157,3 +158,43 @@ class TestGithubComments:
         with pytest.raises(GitError) as err:
             github_pr_comments(str(repo), gh_bin="definitely-not-a-real-binary")
         assert "not installed" in str(err.value)
+
+
+class TestGithubPrStatus:
+    """The poll target for "waiting on PR review" — a fake `gh` script
+    stands in for the real CLI, matching the exact `--json` fields
+    github_pr_status asks for (verified against the real `gh` 2.96.0 field
+    list: number, state, comments, reviews are all real fields)."""
+
+    def _fake_gh(self, tmp_path: Path, payload: str) -> str:
+        script = tmp_path / "gh"
+        script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{payload}\nEOF\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_missing_gh_fails_loudly(self, repo: Path):
+        with pytest.raises(GitError) as err:
+            github_pr_status(str(repo), gh_bin="definitely-not-a-real-binary")
+        assert "not installed" in str(err.value)
+
+    def test_parses_open_pr_with_comments_and_reviews(self, repo: Path, tmp_path: Path):
+        payload = (
+            '{"number": 42, "state": "OPEN", '
+            '"comments": [{}, {}], "reviews": [{}]}'
+        )
+        status = github_pr_status(str(repo), gh_bin=self._fake_gh(tmp_path, payload))
+        assert status.number == 42
+        assert status.state == "OPEN"
+        assert status.comment_count == 3  # 2 comments + 1 review
+
+    def test_parses_merged_pr(self, repo: Path, tmp_path: Path):
+        payload = '{"number": 7, "state": "MERGED", "comments": [], "reviews": []}'
+        status = github_pr_status(str(repo), gh_bin=self._fake_gh(tmp_path, payload))
+        assert status.state == "MERGED"
+        assert status.comment_count == 0
+
+    def test_missing_fields_default_sanely(self, repo: Path, tmp_path: Path):
+        status = github_pr_status(str(repo), gh_bin=self._fake_gh(tmp_path, "{}"))
+        assert status.number == 0
+        assert status.state == "OPEN"
+        assert status.comment_count == 0

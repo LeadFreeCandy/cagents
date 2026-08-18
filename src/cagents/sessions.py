@@ -35,8 +35,8 @@ class SessionState(Enum):
     WORKING = "working"
     NEEDS_INPUT = "needs input"  # blocked on a human: permission / question
     NEEDS_REVIEW = "needs review"  # Claude finished; no human has looked yet
-    MONITORING = "monitoring"  # seen it, keeping an eye; new activity re-alerts
-    DONE = "done"  # a human explicitly accepted the result
+    WAITING_ON_REVIEW = "waiting on review"  # done here; paused on an external PR review
+    DONE = "done"  # a human explicitly accepted the result (or the PR merged)
     STOPPED = "stopped"  # ended without completing normally
 
 
@@ -45,7 +45,7 @@ class SessionState(Enum):
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
     SessionState.NEEDS_REVIEW: 1,
-    SessionState.MONITORING: 2,
+    SessionState.WAITING_ON_REVIEW: 2,
     SessionState.WORKING: 3,
     SessionState.STOPPED: 4,
     SessionState.DONE: 5,
@@ -201,11 +201,17 @@ def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[Ses
     last = parsed.last_timestamp
     if reviewed is not None and (last is None or reviewed >= last):
         return (SessionState.DONE, "reviewed")
-    monitoring = tracked.monitoring_datetime()
-    if monitoring is not None and (last is None or monitoring >= last):
-        # Watched, not resolved. Activity after the mark re-alerts (the
-        # comparison above fails and it falls back to needs-review).
-        return (SessionState.MONITORING, "watching")
+    if tracked.pr_status_note == "merged":
+        return (SessionState.DONE, "merged")
+    waiting = tracked.waiting_pr_datetime()
+    if waiting is not None and (last is None or waiting >= last):
+        # Paused on an external PR review, not resolved. Activity after
+        # the mark re-alerts (the comparison above fails and it falls back
+        # to needs-review) — same as new GitHub comments reopening it via
+        # pr_status_note below.
+        return (SessionState.WAITING_ON_REVIEW, "waiting on review")
+    if tracked.pr_status_note == "github comments":
+        return (SessionState.NEEDS_REVIEW, "github comments")
     return (SessionState.NEEDS_REVIEW, "finished, unreviewed")
 
 

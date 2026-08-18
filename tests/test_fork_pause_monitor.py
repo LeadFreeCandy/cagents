@@ -1,4 +1,4 @@
-"""Tests for fork, pause/wake, monitoring, desktop notifications,
+"""Tests for fork, pause/wake, waiting-on-PR-review, desktop notifications,
 statusline, split shell, and the rich diff launcher."""
 
 from __future__ import annotations
@@ -25,10 +25,10 @@ from cagents.wake import (
 )
 
 
-# ------------------------------------------------------------ monitoring --
+# ------------------------------------------------------ waiting on review --
 
 
-class TestMonitoring:
+class TestWaitingOnReview:
     def _parsed(self, claude_dir, ts="2026-08-17T10:00:00.000Z"):
         from cagents.claude_data import parse_session_file
 
@@ -38,35 +38,49 @@ class TestMonitoring:
     def _tracked(self, **kw):
         return TrackedSession(SID1, "/proj/a", "2026-08-17T09:00:00+00:00", **kw)
 
-    def test_monitoring_after_mark(self, claude_dir, now):
+    def test_waiting_after_mark(self, claude_dir, now):
         parsed = self._parsed(claude_dir)
-        tracked = self._tracked(monitoring_since="2026-08-17T11:00:00+00:00")
+        tracked = self._tracked(waiting_pr_since="2026-08-17T11:00:00+00:00")
         state, detail = derive_state(parsed, tracked, live=False, now=now)
-        assert state == SessionState.MONITORING
-        assert detail == "watching"
+        assert state == SessionState.WAITING_ON_REVIEW
+        assert detail == "waiting on review"
 
     def test_new_activity_realerts(self, claude_dir, now):
         parsed = self._parsed(claude_dir, ts="2026-08-17T12:00:00.000Z")  # after mark
-        tracked = self._tracked(monitoring_since="2026-08-17T11:00:00+00:00")
+        tracked = self._tracked(waiting_pr_since="2026-08-17T11:00:00+00:00")
         state, _ = derive_state(parsed, tracked, live=False, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
-    def test_reviewed_beats_monitoring(self, claude_dir, now):
+    def test_reviewed_beats_waiting(self, claude_dir, now):
         parsed = self._parsed(claude_dir)
         tracked = self._tracked(
-            monitoring_since="2026-08-17T11:00:00+00:00",
+            waiting_pr_since="2026-08-17T11:00:00+00:00",
             reviewed_at="2026-08-17T11:30:00+00:00",
         )
         state, _ = derive_state(parsed, tracked, live=False, now=now)
         assert state == SessionState.DONE
 
-    def test_attention_order_places_monitoring(self):
+    def test_merged_note_shows_done_merged(self, claude_dir, now):
+        parsed = self._parsed(claude_dir)
+        tracked = self._tracked(pr_status_note="merged")
+        state, detail = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.DONE
+        assert detail == "merged"
+
+    def test_reopened_note_shows_github_comments(self, claude_dir, now):
+        parsed = self._parsed(claude_dir)
+        tracked = self._tracked(pr_status_note="github comments")
+        state, detail = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+        assert detail == "github comments"
+
+    def test_attention_order_places_waiting_on_review(self):
         from cagents.sessions import ATTENTION_ORDER
 
         order = ATTENTION_ORDER
         assert (
             order[SessionState.NEEDS_REVIEW]
-            < order[SessionState.MONITORING]
+            < order[SessionState.WAITING_ON_REVIEW]
             < order[SessionState.WORKING]
         )
 
@@ -195,19 +209,102 @@ async def test_fork_flow(world, monkeypatch):
         assert sent and sent[0][1] == "try the async approach instead"
 
 
-async def test_monitoring_key(world):
+async def test_waiting_review_key_without_pr_link_warns(world):
     app, store, _ = world
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
-        await pilot.press("m")
+        await pilot.press("w")
         await pilot.pause(0.2)
-        assert store.sessions[SID1].monitoring_since != ""
-        assert app.snapshot.by_id(SID1).state == SessionState.MONITORING
-        await pilot.press("m")  # toggle off
-        await pilot.pause(0.2)
-        assert store.sessions[SID1].monitoring_since == ""
+        # no PR link in this transcript -> refused, no change
+        assert store.sessions[SID1].waiting_pr_since == ""
+
+
+async def test_waiting_review_key_marks_and_toggles_off(claude_dir, tmp_path, now, monkeypatch):
+    from cagents import gitops
+
+    TranscriptBuilder(SID1, "/proj/alpha").ai_title("Fix auth").user("go").raw(
+        {"type": "pr-link", "sessionId": SID1, "prNumber": 9,
+         "prUrl": "https://github.com/x/y/pull/9"}
+    ).assistant_text("All fixed.").write(claude_dir, mtime=now - 900)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+
+    monkeypatch.setattr(
+        gitops, "github_pr_status",
+        lambda directory, gh_bin="gh": gitops.PrStatus(number=9, state="OPEN", comment_count=2),
+    )
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
         assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+        await pilot.press("w")
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].waiting_pr_since != ""
+        assert store.sessions[SID1].waiting_pr_baseline_comments == 2
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_ON_REVIEW
+
+        await pilot.press("w")  # toggle back off
+        await pilot.pause(0.2)
+        assert store.sessions[SID1].waiting_pr_since == ""
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+
+
+async def test_pr_status_tick_marks_merged(world, monkeypatch):
+    from cagents import gitops
+
+    app, store, _ = world
+    store.set_waiting_on_pr(SID1, "2026-08-17T11:00:00+00:00", 1)
+    monkeypatch.setattr(
+        gitops, "github_pr_status",
+        lambda directory, gh_bin="gh": gitops.PrStatus(number=9, state="MERGED", comment_count=1),
+    )
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_ON_REVIEW
+        app._check_pr_statuses()
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].pr_status_note == "merged"
+        assert store.sessions[SID1].waiting_pr_since == ""
+        assert app.snapshot.by_id(SID1).state == SessionState.DONE
+
+
+async def test_pr_status_tick_reopens_on_new_comments(world, monkeypatch):
+    from cagents import gitops
+
+    app, store, _ = world
+    store.set_waiting_on_pr(SID1, "2026-08-17T11:00:00+00:00", 1)
+    monkeypatch.setattr(
+        gitops, "github_pr_status",
+        lambda directory, gh_bin="gh": gitops.PrStatus(number=9, state="OPEN", comment_count=2),
+    )
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_ON_REVIEW
+        app._check_pr_statuses()
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].pr_status_note == "github comments"
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+
+
+async def test_pr_status_tick_leaves_unchanged_pr_alone(world, monkeypatch):
+    from cagents import gitops
+
+    app, store, _ = world
+    store.set_waiting_on_pr(SID1, "2026-08-17T11:00:00+00:00", 2)
+    monkeypatch.setattr(
+        gitops, "github_pr_status",
+        lambda directory, gh_bin="gh": gitops.PrStatus(number=9, state="OPEN", comment_count=2),
+    )
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app._check_pr_statuses()
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].waiting_pr_since != ""
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_ON_REVIEW
 
 
 async def test_pause_with_timer(world):

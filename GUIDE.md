@@ -101,8 +101,10 @@ pane or use `ctrl+c`-free alternatives instead). Alt-q is the recommended trade.
 - `● working` — live turn: pane shows activity or a conversation record just landed.
 - `◉ needs you` — blocked on a human: permission prompt, question, or you're at the prompt.
 - `◆ review` — Claude finished; **no human has looked yet**. This is cagents' own state.
-- `◎ monitoring` — you pressed `m`: acknowledged but being watched. Ranks between review
-  and working in the queue; any new activity flips it back to `◆ review`.
+- `⏸ waiting on review` — you pressed `w`: done here, paused on an external PR review.
+  Ranks between review and working in the queue. Reopens to `◆ review` automatically —
+  new GitHub comments show as "github comments", or any new local activity — and marks
+  itself `✓ done` ("merged") once the PR merges.
 - `✓ done` — you pressed `r` (or accepted via the palette) *after* the last activity.
   If Claude does more work later, it drops back to `◆ review` automatically.
 - `■ stopped` — no live process and the transcript ends mid-turn.
@@ -123,7 +125,7 @@ Row markers: `⇄` someone is attached · `✎` has a note · `⇗` recorded a P
 | `t` | split a **shell** below, cwd'd into the worktree/project |
 | `o` | open the newest recorded link (PR / artifact) in the browser |
 | `r` | toggle reviewed ↔ needs review |
-| `m` | **monitoring**: seen it, keep watching — sits below review in the queue; new activity re-alerts it back to needs-review |
+| `w` | **waiting on review**: done here, paused on the linked PR's review — reopens on new GitHub comments (or new local activity), marks done automatically once merged |
 | `e` / `L` | note / label (label overrides the AI title in lists) |
 | `x` | untrack (cagents-only; Claude's data untouched) |
 | `n` / `a` | new session / track an existing one |

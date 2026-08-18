@@ -94,7 +94,7 @@ class CagentsApp(App):
         Binding("H", "handoff", "Handoff", show=False),
         Binding("asterisk", "related", "Related", show=False),
         Binding("plus", "add_plugin", "Plugin", show=False),
-        Binding("m", "toggle_monitoring", "Monitor", show=False),
+        Binding("w", "toggle_waiting_review", "Waiting", show=False),
         Binding("t", "split_shell", "Shell", show=False),
         Binding("V", "rich_diff", "Rich diff", show=False),
         Binding("o", "open_link", "Open link", show=False),
@@ -166,6 +166,7 @@ class CagentsApp(App):
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(60.0, self._wake_tick)
+        self.set_interval(120.0, self._pr_status_tick)
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
                 apply_left_capture(self.store.get_setting("capture_left"))
@@ -1234,21 +1235,80 @@ class CagentsApp(App):
         )
         self.refresh_data()
 
-    # -- monitoring ------------------------------------------------------------------
+    # -- waiting on PR review ----------------------------------------------------------
 
-    def action_toggle_monitoring(self) -> None:
+    def action_toggle_waiting_review(self) -> None:
+        """"Done here, but waiting on team review" — pauses a finished
+        session instead of it nagging "needs review" for something that's
+        actually blocked on someone else's PR review. Reopens automatically
+        (background poll, see _check_pr_statuses) if new GitHub comments
+        show up, or marks itself done once the PR merges."""
         view = self.selected_view()
         if view is None:
             return
-        if view.state == SessionState.MONITORING:
-            self.store.set_monitoring(view.session_id, "")
-            self.notify("Monitoring cleared — back to 'needs review'.")
-        elif view.state in (SessionState.NEEDS_REVIEW, SessionState.DONE, SessionState.STOPPED):
-            self.store.set_monitoring(view.session_id, utcnow().isoformat())
-            self.notify("Monitoring — it re-alerts on new activity.")
-        else:
-            self.notify("Monitoring applies once Claude has finished.", severity="warning")
+        if view.state == SessionState.WAITING_ON_REVIEW:
+            self.store.set_waiting_on_pr(view.session_id, "")
+            self.store.set_pr_status_note(view.session_id, "")
+            self.notify("No longer waiting — back to 'needs review'.")
+            self.refresh_data()
             return
+        if view.state != SessionState.NEEDS_REVIEW:
+            self.notify("Waiting-on-review applies once Claude has finished.", severity="warning")
+            return
+        pr_link = next((l for l in (view.parsed.links if view.parsed else []) if l.kind == "pr"), None)
+        if pr_link is None:
+            self.notify("No PR linked to this session yet.", severity="warning")
+            return
+        self._start_waiting_on_pr(view.session_id, view.project_dir)
+
+    @work(thread=True, group="pr_status")
+    def _start_waiting_on_pr(self, session_id: str, directory: str) -> None:
+        try:
+            status = gitops.github_pr_status(directory)
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Could not check PR status: {error}", severity="error", timeout=10
+            )
+            return
+
+        def apply() -> None:
+            self.store.set_pr_status_note(session_id, "")
+            self.store.set_waiting_on_pr(session_id, utcnow().isoformat(), status.comment_count)
+            self.notify(
+                "Waiting on PR review — reopens on new comments, marks done automatically "
+                "when merged."
+            )
+            self.refresh_data()
+
+        self.call_from_thread(apply)
+
+    def _pr_status_tick(self) -> None:
+        self._check_pr_statuses()
+
+    @work(thread=True, exclusive=True, group="pr_status_poll")
+    def _check_pr_statuses(self) -> None:
+        waiting = [v for v in self.snapshot.views if v.state == SessionState.WAITING_ON_REVIEW]
+        for view in waiting:
+            try:
+                status = gitops.github_pr_status(view.project_dir)
+            except Exception as error:
+                logger.debug("pr status check failed for %s: %s", view.session_id, error)
+                continue
+            if status.state == "MERGED":
+                self.call_from_thread(self._mark_pr_merged, view.session_id)
+            elif status.comment_count > view.tracked.waiting_pr_baseline_comments:
+                self.call_from_thread(self._mark_pr_reopened, view.session_id)
+
+    def _mark_pr_merged(self, session_id: str) -> None:
+        self.store.set_waiting_on_pr(session_id, "")
+        self.store.set_pr_status_note(session_id, "merged")
+        self.notify("PR merged — marked done.")
+        self.refresh_data()
+
+    def _mark_pr_reopened(self, session_id: str) -> None:
+        self.store.set_waiting_on_pr(session_id, "")
+        self.store.set_pr_status_note(session_id, "github comments")
+        self.notify("New GitHub comments — reopened for review.", severity="warning")
         self.refresh_data()
 
     # -- pause / wake -------------------------------------------------------------------

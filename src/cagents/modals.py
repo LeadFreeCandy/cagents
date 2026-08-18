@@ -246,7 +246,8 @@ HELP_TEXT = """\
   t             shell — split terminal in the worktree/project
   o             open the newest recorded link (PR, artifact)
   r             mark done / unmark
-  m             monitoring — seen it, keep watching; re-alerts on activity
+  w             waiting on review — done here, paused on a PR review; reopens on new
+                GitHub comments, marks done automatically once it merges
   e             edit note
   L             edit label
   x             untrack (never deletes Claude's data)

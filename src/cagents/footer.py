@@ -47,7 +47,7 @@ FOOTER_PRIORITY: list[FooterItem] = [
     FooterItem("*", "Related"),
     FooterItem("t", "Shell"),
     FooterItem("V", "Rich diff"),
-    FooterItem("m", "Monitor"),
+    FooterItem("w", "Waiting"),
     FooterItem(",", "Settings"),
     FooterItem(":", "Fleet"),
     FooterItem("o", "Open link"),

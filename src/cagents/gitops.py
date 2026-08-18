@@ -234,6 +234,36 @@ def worktree_diff(directory: str, context: int = 3, max_bytes: int = 2_000_000) 
 
 
 @dataclass
+class PrStatus:
+    number: int
+    state: str  # "OPEN" | "MERGED" | "CLOSED"
+    comment_count: int  # issue comments + reviews combined
+
+
+def github_pr_status(directory: str, gh_bin: str = "gh") -> PrStatus:
+    """Cheap poll target for the "waiting on PR review" feature: merge
+    state plus a comment count, without fetching any comment bodies. `gh`
+    has no push/subscribe mechanism for PR events (checked: no webhook or
+    watch command fits a local, unattended, many-sessions poller), so this
+    is called periodically instead of pushed to."""
+    if shutil.which(gh_bin) is None:
+        raise GitError("gh (GitHub CLI) is not installed")
+    raw = _run(
+        [gh_bin, "pr", "view", "--json", "number,state,comments,reviews"],
+        directory,
+        timeout=15.0,
+    )
+    data = json.loads(raw)
+    comments = data.get("comments") or []
+    reviews = data.get("reviews") or []
+    return PrStatus(
+        number=int(data.get("number") or 0),
+        state=str(data.get("state") or "OPEN").upper(),
+        comment_count=len(comments) + len(reviews),
+    )
+
+
+@dataclass
 class ReviewComment:
     file: str  # "" for PR-level comments
     line: int  # 0 when not tied to a line

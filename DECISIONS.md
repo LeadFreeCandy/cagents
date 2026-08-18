@@ -112,7 +112,7 @@ constraint, not taste. Newest epochs last.
   record timestamp), never file mtime. mtime is still used where it's genuinely right
   (tmux mapping, where the resume-touch actually helps).
 
-## 7. Fork, pause/wake, monitoring, notifications
+## 7. Fork, pause/wake, waiting-on-review, notifications
 
 - **Fork (`F`)**: `--resume <old> --fork-session --session-id <new>` — the flag combo
   was verified against the real CLI before building (forked file materializes on first
@@ -123,9 +123,16 @@ constraint, not taste. Newest epochs last.
   before it's saved** (same trust model as the palette), then run every ~5 min with a
   30s timeout; empty → indefinite. **Auto-pause defaults to 7 days idle** (setting,
   0 disables) so open todos stop nagging forever.
-- **Monitoring (`m`)** is a timestamp like reviewed-at, not a flag: `◎` sits between
-  review and working in attention order, and *any new activity re-alerts* it back to
-  needs-review. Symmetry with reviewed-at keeps it derivable and un-syncable.
+- **Waiting on review (`w`, replaced monitoring)** is a timestamp like reviewed-at, not
+  a flag: `⏸` sits between review and working in attention order, and *any new local
+  activity re-alerts* it back to needs-review — same symmetry-with-reviewed-at
+  reasoning monitoring used. What's new: it also polls the linked PR (`gh pr view
+  --json number,state,comments,reviews`, on the existing 60s-scale tick, not the 2s
+  refresh) and reopens with detail "github comments" when the comment+review count
+  grows past the baseline captured at mark-time, or marks itself `done`/"merged" once
+  the PR's state is MERGED. `gh` has no push/subscribe mechanism that fits a local,
+  unattended, many-sessions poller (checked: no webhook or watch command for PR
+  events), so this is polled, not pushed to.
 - **Desktop notifications are edge-triggered** (transition into needing you; never on
   startup) and off by default; toast notifications are also off by default by request
   (errors/warnings always show — spec §11's "fail loudly" is non-negotiable).

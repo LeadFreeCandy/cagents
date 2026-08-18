@@ -209,7 +209,7 @@ The api object:
     api.refresh()
 
 A session view has: .session_id .title .state (.value is "working" / "needs input" /
-"needs review" / "monitoring" / "done" / "stopped") .live .project_dir .did_line
+"needs review" / "waiting on review" / "done" / "stopped") .live .project_dir .did_line
 .needs_line .last_activity .tracked (the store record).
 
 Rules: plugins hot-reload on save — just write the file, no restart. Never block:
