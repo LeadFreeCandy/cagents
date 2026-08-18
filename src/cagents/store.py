@@ -43,6 +43,12 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # macOS notification when a session starts needing you; clicking it
     # selects the task in the list.
     "desktop_notifications": False,
+    # Queue/list priority of the states, most-urgent first. Reorder in the
+    # settings panel's Priority tab.
+    "state_order": [
+        "needs input", "needs review", "monitoring", "background",
+        "working", "waiting", "stopped", "done",
+    ],
 }
 
 

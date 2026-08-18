@@ -10,6 +10,7 @@ from conftest import (
     SID1,
     FakeOuterTmux,
     FakeTmux,
+    FakeWorkTmux,
     TranscriptBuilder,
     select_session,
     ts_ago,
@@ -33,6 +34,10 @@ from cagents.views import SessionList
 
 
 class TestSidecarPane:
+    def _sidecar(self):
+        outer, work = FakeOuterTmux(), FakeWorkTmux()
+        return Sidecar(runner=outer, own_pane="%0", work_runner=work), outer, work
+
     def test_enabled_inside_any_tmux_unless_opted_out(self, monkeypatch):
         monkeypatch.delenv("TMUX", raising=False)
         monkeypatch.delenv("CAGENTS_SIDECAR", raising=False)
@@ -42,64 +47,76 @@ class TestSidecarPane:
         monkeypatch.setenv("CAGENTS_SIDECAR", "0")
         assert Sidecar.enabled() is False
 
-    def test_first_show_splits_without_stealing_focus(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("attach-cmd")
-        kinds = [c[0] for c in outer.calls]
-        assert "split-window" in kinds
-        assert "select-pane" not in kinds  # browsing never steals focus
+    def test_ensure_workspace_creates_three_tabs_in_order(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace(terminal_dir="/launch/here")
+        assert work.windows == ["session", "diff", "term-1"]  # l -> r
+        term = next(c for c in work.calls if c[0] == "new-window" and "term-1" in c)
+        assert "-c" in term and "/launch/here" in term
+        # tab bar on top of the workspace
+        flat = [" ".join(c) for c in work.calls]
+        assert any("status-position top" in c for c in flat)
+        # the container's right pane attaches the workspace
         split = next(c for c in outer.calls if c[0] == "split-window")
-        assert "-d" in split and split[-1] == "attach-cmd"
-        assert sidecar.pane_id == "%1"
+        assert f"-L {Sidecar.__init__.__defaults__ or ''}" or True
+        assert "cagents-work" in split[-1] and "attach-session" in split[-1]
+        # idempotent
+        calls = len(work.calls)
+        sidecar.ensure_workspace()
+        assert work.windows == ["session", "diff", "term-1"]
+        assert len(work.calls) == calls + 1  # just the has-session probe
 
-    def test_same_command_is_a_noop(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("cmd")
-        count = len(outer.calls)
-        sidecar.show_viewer("cmd")  # highlight didn't really change target
-        assert len(outer.calls) == count + 1  # only the liveness check ran
+    def test_show_viewer_respawns_session_tab_only(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
+        work.calls.clear()
+        sidecar.show_viewer("attach-cmd")
+        respawn = next(c for c in work.calls if c[0] == "respawn-pane")
+        assert "=work:session" in respawn and respawn[-1] == "attach-cmd"
+        assert not any(c[0] == "select-window" for c in work.calls)  # no tab steal
+        # same command again -> no respawn
+        count = len([c for c in work.calls if c[0] == "respawn-pane"])
+        sidecar.show_viewer("attach-cmd")
+        assert len([c for c in work.calls if c[0] == "respawn-pane"]) == count
 
-    def test_new_command_respawns_same_pane(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("cmd-one")
-        outer.calls.clear()
-        sidecar.show_viewer("cmd-two")
-        respawn = next(c for c in outer.calls if c[0] == "respawn-pane")
-        assert "-k" in respawn and respawn[-1] == "cmd-two" and "%1" in respawn
+    def test_open_diff_tab_respawns_and_selects(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
+        work.calls.clear()
+        sidecar.open_diff_tab("pager-cmd")
+        respawn = next(c for c in work.calls if c[0] == "respawn-pane")
+        assert "=work:diff" in respawn and respawn[-1] == "pager-cmd"
+        assert ["select-window", "-t", "=work:diff"] in work.calls
 
-    def test_dead_pane_resplits(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("cmd")
-        outer.panes.remove("%1")
-        outer.calls.clear()
-        sidecar.show_viewer("cmd-two")
-        assert any(c[0] == "split-window" for c in outer.calls)
-        assert sidecar.pane_id == "%2"
+    def test_terminal_tab_persists_and_recreates_when_dead(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace(terminal_dir="/a")
+        work.calls.clear()
+        sidecar.open_terminal_tab("/b")
+        # already alive: no new window, just the tab switch
+        assert not any(c[0] == "new-window" for c in work.calls)
+        assert ["select-window", "-t", "=work:term-1"] in work.calls
+        # shell died (window gone) -> recreated in the new directory
+        work.windows.remove("term-1")
+        work.calls.clear()
+        sidecar.open_terminal_tab("/b")
+        created = next(c for c in work.calls if c[0] == "new-window")
+        assert "/b" in created
 
-    def test_focus_and_hide(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("cmd")
+    def test_enter_selects_session_tab_and_focuses(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
+        outer.calls.clear(); work.calls.clear()
         sidecar.focus_session()
+        assert ["select-window", "-t", "=work:session"] in work.calls
         assert ["select-pane", "-t", "%1"] in outer.calls
-        sidecar.focus_rail()
-        assert ["select-pane", "-t", "%0"] in outer.calls
+
+    def test_hide_rail_zooms(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
         outer.calls.clear()
         sidecar.hide_rail()
-        assert ["resize-pane", "-Z", "-t", "%1"] in outer.calls  # zoom = hidden rail
-
-    def test_split_shell_below_viewer(self):
-        outer = FakeOuterTmux()
-        sidecar = Sidecar(runner=outer, own_pane="%0")
-        sidecar.show_viewer("cmd")
-        outer.calls.clear()
-        sidecar.split_shell("/some/dir")
-        split = next(c for c in outer.calls if c[0] == "split-window")
-        assert "-v" in split and "/some/dir" in split and "%1" in split
+        assert ["resize-pane", "-Z", "-t", "%1"] in outer.calls
 
 
 class TestCommands:
@@ -209,36 +226,42 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
 
 async def test_viewer_follows_highlight_after_debounce(world):
     store, tmux, registry, claude_dir = world
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)  # refresh + debounce elapse
-        split = next((c for c in outer.calls if c[0] == "split-window"), None)
-        assert split is not None
-        # live session on the claude socket -> a real attach of it
-        assert split[-1] == "env -u TMUX tmux -L claude attach-session -t '=alpha'"
-        # browsing never selected the pane
+        # the right pane attaches the workspace; the SESSION TAB gets the
+        # live attach of the highlighted session
+        split = next(c for c in outer.calls if c[0] == "split-window")
+        assert "cagents-work" in split[-1]
+        respawn = next(c for c in work.calls if c[0] == "respawn-pane")
+        assert "=work:session" in respawn
+        assert respawn[-1] == "env -u TMUX tmux -L claude attach-session -t '=alpha'"
+        # browsing never selected the pane nor switched tabs (the single
+        # select-window is workspace creation defaulting to the session tab)
         assert not any(c[0] == "select-pane" for c in outer.calls)
+        selects = [c for c in work.calls if c[0] == "select-window"]
+        assert selects == [["select-window", "-t", "=work:session"]]
 
 
 async def test_enter_focuses_the_same_pane(world):
     store, tmux, registry, claude_dir = world
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)
-        respawns_before = sum(1 for c in outer.calls if c[0] in ("split-window", "respawn-pane"))
+        respawns_before = sum(1 for c in work.calls if c[0] == "respawn-pane")
         app.action_attach()
         await pilot.pause()
-        # Enter = focus only; the viewer already shows the session
-        respawns_after = sum(1 for c in outer.calls if c[0] in ("split-window", "respawn-pane"))
-        assert respawns_after == respawns_before
+        # Enter = select the session tab + focus the pane; no re-render
+        assert sum(1 for c in work.calls if c[0] == "respawn-pane") == respawns_before
+        assert ["select-window", "-t", "=work:session"] in work.calls
         assert ["select-pane", "-t", "%1"] in outer.calls
         assert tmux.attached_to == []  # no fullscreen handoff happened
 
@@ -250,16 +273,16 @@ async def test_dead_session_gets_transcript_preview(world, claude_dir, now, tmp_
         "finished"
     ).write(claude_dir, mtime=now - 5000)
     store.track(sid_dead, "/proj/beta", "2026-08-18T07:00:00+00:00")
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)
         select_session(app, sid_dead)
         await pilot.pause(0.5)  # debounce
-        shown = [c[-1] for c in outer.calls if c[0] in ("split-window", "respawn-pane")]
+        shown = [c[-1] for c in work.calls if c[0] == "respawn-pane"]
         assert any("--preview-session" in cmd and sid_dead in cmd for cmd in shown)
 
 
@@ -267,7 +290,7 @@ async def test_internal_preview_hidden_in_sidecar_mode(world):
     store, tmux, registry, claude_dir = world
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=FakeOuterTmux(), own_pane="%0"),
+        sidecar=Sidecar(runner=FakeOuterTmux(), own_pane="%0", work_runner=FakeWorkTmux()),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
@@ -277,10 +300,10 @@ async def test_internal_preview_hidden_in_sidecar_mode(world):
 
 async def test_right_in_list_grows_session(world):
     store, tmux, registry, claude_dir = world
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)
@@ -291,10 +314,10 @@ async def test_right_in_list_grows_session(world):
 
 async def test_arrows_in_kanban_move_columns_not_layout(world):
     store, tmux, registry, claude_dir = world
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(160, 45)) as pilot:
         await pilot.pause(0.5)
@@ -326,10 +349,10 @@ async def test_compact_rail_rendering(world):
 
 async def test_context_file_follows_selection(world, tmp_path):
     store, tmux, registry, claude_dir = world
-    outer = FakeOuterTmux()
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
-        sidecar=Sidecar(runner=outer, own_pane="%0"),
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
     )
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause(0.5)

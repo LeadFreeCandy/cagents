@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 CONTEXT_FILE = "context.json"
+WORK_SOCKET = "cagents-work"  # the tabbed workspace (see sidecar.py)
 
 
 def read_context(path: Path) -> dict:
@@ -42,6 +43,24 @@ def _tmux(*args: str) -> int:
     return subprocess.run(["tmux", *args], capture_output=True, timeout=15).returncode
 
 
+def _work(*args: str) -> int:
+    return subprocess.run(
+        ["tmux", "-L", WORK_SOCKET, *args], capture_output=True, timeout=15
+    ).returncode
+
+
+def _workspace_alive() -> bool:
+    return _work("has-session", "-t", "=work") == 0
+
+
+def _work_windows() -> list[str]:
+    proc = subprocess.run(
+        ["tmux", "-L", WORK_SOCKET, "list-windows", "-t", "=work", "-F", "#W"],
+        capture_output=True, text=True, timeout=15,
+    )
+    return proc.stdout.split() if proc.returncode == 0 else []
+
+
 def _display(message: str) -> None:
     _tmux("display-message", message)
 
@@ -50,7 +69,14 @@ def do_shell(directory: str) -> int:
     if not directory or not Path(directory).is_dir():
         _display("cagents: no directory for the selected session")
         return 1
-    return _tmux("split-window", "-v", "-l", "12", "-c", directory)
+    if _workspace_alive():
+        # Tab mode: the persistent terminal tab (recreate only if it died).
+        if "term-1" not in _work_windows():
+            _work("new-window", "-d", "-t", "=work:", "-n", "term-1", "-c", directory)
+        _work("select-window", "-t", "=work:term-1")
+        _tmux("select-pane", "-t", ":.1")  # focus the workspace pane
+        return 0
+    return _tmux("split-window", "-v", "-l", "12", "-c", directory)  # fullscreen fallback
 
 
 def diff_popup_command(directory: str) -> str:
@@ -83,6 +109,16 @@ def do_diff(directory: str) -> int:
     if inside.returncode != 0:
         _display("cagents: not a git repository")
         return 1
+    if _workspace_alive():
+        # Tab mode: fresh diff in the diff tab, switch to it.
+        command = "sh -c " + shlex.quote(diff_popup_command(directory))
+        if "diff" not in _work_windows():
+            _work("new-window", "-d", "-t", "=work:", "-n", "diff", command)
+        else:
+            _work("respawn-pane", "-k", "-t", "=work:diff", command)
+        _work("select-window", "-t", "=work:diff")
+        _tmux("select-pane", "-t", ":.1")
+        return 0
     return _tmux(
         "display-popup", "-E", "-w", "92%", "-h", "88%",
         "sh", "-c", diff_popup_command(directory),

@@ -298,3 +298,30 @@ def select_session(app, session_id: str) -> None:
             session_list.highlighted = i
             return
     raise AssertionError(f"session {session_id} not in {app.active_view_id} list")
+
+
+class FakeWorkTmux:
+    """Test double for the workspace (tabs) tmux server."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+        self.exists = False
+        self.windows: list[str] = []
+
+    def __call__(self, args: list[str]) -> str:
+        self.calls.append(args)
+        cmd = args[0]
+        if cmd == "has-session":
+            if not self.exists:
+                raise RuntimeError("no session")
+            return ""
+        if cmd == "new-session":
+            self.exists = True
+            self.windows = [args[args.index("-n") + 1]]
+            return ""
+        if cmd == "new-window":
+            self.windows.append(args[args.index("-n") + 1])
+            return ""
+        if cmd == "list-windows":
+            return "\n".join(self.windows) + "\n"
+        return ""

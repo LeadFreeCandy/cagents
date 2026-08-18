@@ -25,15 +25,19 @@ import os
 import subprocess
 
 COLLAPSED_WIDTH = 34
+WORK_SOCKET = "cagents-work"  # the tabbed workspace behind the right pane
+TABS = ("session", "diff", "term-1")  # left-to-right
 
 
 class Sidecar:
-    def __init__(self, runner=None, own_pane: str = ""):
-        # runner: (args: list[str]) -> str, injectable for tests.
+    def __init__(self, runner=None, own_pane: str = "", work_runner=None):
+        # runner: outer-tmux (the container); work_runner: the workspace
+        # server that holds the tabs. Both injectable for tests.
         self._run = runner or _outer_tmux
+        self._work = work_runner or _work_tmux
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
         self.pane_id: str = ""  # the viewer pane on the right
-        self.current_command: str = ""  # what the viewer currently runs
+        self.current_command: str = ""  # what the session tab currently runs
 
     @staticmethod
     def enabled() -> bool:
@@ -44,28 +48,105 @@ class Sidecar:
             return False
         return bool(os.environ.get("TMUX"))
 
-    # -- the viewer pane -------------------------------------------------------
+    # -- the tabbed workspace ---------------------------------------------------
+    #
+    # The right pane permanently attaches the "work" session on a private
+    # socket; that session's WINDOWS are the tabs (native tmux tab bar at
+    # the top of the pane, clickable): session | diff | term-1. Content
+    # switches by respawning a window's pane; shells persist across tab
+    # switches because the windows never die with the view.
+
+    def ensure_workspace(self, terminal_dir: str = "") -> None:
+        """Create the work session + default tabs (idempotent), and make
+        sure the right pane is attached to it."""
+        try:
+            self._work(["has-session", "-t", "=work"])
+        except RuntimeError:
+            self._work(["new-session", "-d", "-s", "work", "-n", "session",
+                        _placeholder("select a session in the list")])
+            self._work(["new-window", "-d", "-t", "=work:", "-n", "diff",
+                        _placeholder("C-d builds the diff for the selected session")])
+            term_args = ["new-window", "-d", "-t", "=work:", "-n", "term-1"]
+            if terminal_dir:
+                term_args += ["-c", terminal_dir]
+            self._work(term_args)
+            # This server exists solely for the workspace, so every option
+            # is global (-g). (Window options like window-status-format only
+            # hit the active window when given a session target.)
+            for option in (
+                ["set", "-g", "mouse", "on"],
+                ["set", "-g", "escape-time", "10"],
+                ["set", "-g", "status", "on"],
+                ["set", "-g", "status-position", "top"],
+                ["set", "-g", "status-style", "bg=colour236,fg=colour248"],
+                ["set", "-g", "status-left", ""],
+                ["set", "-g", "status-right", ""],
+                ["set", "-g", "window-status-format", "  #W  "],
+                ["set", "-g", "window-status-current-format",
+                 "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
+                ["set", "-g", "window-status-separator", ""],
+            ):
+                self._work(option)
+            self._work(["select-window", "-t", "=work:session"])
+        self._ensure_viewer_pane()
+
+    def _ensure_viewer_pane(self) -> None:
+        """The container's right pane runs one thing, forever: a client
+        attached to the workspace."""
+        if self.pane_id and self._pane_alive():
+            return
+        attach = f"env -u TMUX tmux -L {WORK_SOCKET} attach-session -t '=work'"
+        out = self._run(
+            ["split-window", "-h", "-d", "-P", "-F", "#{pane_id}",
+             "-t", self.own_pane, attach]
+        )
+        self.pane_id = out.strip()
+        if self.own_pane:
+            self._run(["resize-pane", "-t", self.own_pane, "-x", "50%"])
+
+    def _ensure_window(self, name: str, command: str = "", cwd: str = "") -> None:
+        try:
+            windows = self._work(["list-windows", "-t", "=work", "-F", "#W"]).split()
+        except RuntimeError:
+            windows = []
+        if name in windows:
+            return
+        args = ["new-window", "-d", "-t", "=work:", "-n", name]
+        if cwd:
+            args += ["-c", cwd]
+        if command:
+            args.append(command)
+        self._work(args)
 
     def show_viewer(self, shell_command: str) -> None:
-        """Point the right pane at `shell_command` (live attach or static
-        preview). Never steals focus and never resizes — browsing must not
-        disturb the layout."""
-        if shell_command == self.current_command and self._pane_alive():
+        """Point the SESSION TAB at `shell_command` (live attach or static
+        preview). Never steals focus or switches tabs — browsing must not
+        disturb what you're looking at."""
+        self._ensure_viewer_pane()
+        if shell_command == self.current_command:
             return
-        if self.pane_id and self._pane_alive():
-            self._run(["respawn-pane", "-k", "-t", self.pane_id, shell_command])
-        else:
-            out = self._run(
-                ["split-window", "-h", "-d", "-P", "-F", "#{pane_id}",
-                 "-t", self.own_pane, shell_command]
-            )
-            self.pane_id = out.strip()
-            if self.own_pane:
-                # Fresh split: the rail keeps its browsing share.
-                self._run(["resize-pane", "-t", self.own_pane, "-x", "50%"])
+        self._ensure_window("session")
+        self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
         self.current_command = shell_command
 
+    def select_tab(self, name: str) -> None:
+        self._work(["select-window", "-t", f"=work:{name}"])
+
+    def open_diff_tab(self, pager_command: str) -> None:
+        """Fresh diff in the diff tab, and switch to it."""
+        self._ensure_window("diff")
+        self._work(["respawn-pane", "-k", "-t", "=work:diff", pager_command])
+        self.select_tab("diff")
+
+    def open_terminal_tab(self, directory: str) -> None:
+        """Switch to the persistent terminal tab (recreating it in
+        `directory` only if it died)."""
+        self._ensure_window("term-1", cwd=directory)
+        self.select_tab("term-1")
+
     def focus_session(self) -> None:
+        """Enter: the session tab, focused."""
+        self.select_tab("session")
         if self.pane_id:
             self._run(["select-pane", "-t", self.pane_id])
 
@@ -74,19 +155,10 @@ class Sidecar:
             self._run(["select-pane", "-t", self.own_pane])
 
     def hide_rail(self) -> None:
-        """WIDE -> HIDDEN: zoom the viewer to full width and focus it."""
+        """Zoom the viewer to full width and focus it."""
         if self.pane_id and self._pane_alive():
             self._run(["select-pane", "-t", self.pane_id])
             self._run(["resize-pane", "-Z", "-t", self.pane_id])
-
-    def split_shell(self, directory: str) -> None:
-        """A throwaway shell pane below the viewer, cwd'd into the
-        worktree/project. Exits with the shell."""
-        target = self.pane_id if (self.pane_id and self._pane_alive()) else self.own_pane
-        args = ["split-window", "-v", "-l", "12", "-c", directory]
-        if target:
-            args += ["-t", target]
-        self._run(args)
 
     def _pane_alive(self) -> bool:
         if not self.pane_id:
@@ -96,6 +168,28 @@ class Sidecar:
         except RuntimeError:
             return False
         return self.pane_id in out.split()
+
+
+def _work_tmux(args: list[str]) -> str:
+    """Talk to the workspace server (the tabs). $TMUX must be stripped:
+    we're inside the container, and tmux refuses new-session (even -d)
+    when it thinks we're nesting."""
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    proc = subprocess.run(
+        ["tmux", "-L", WORK_SOCKET, *args],
+        capture_output=True, text=True, timeout=10, env=env,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"tmux {args[0]} failed")
+    return proc.stdout
+
+
+def _placeholder(message: str) -> str:
+    import shlex
+
+    inner = f'printf "\\n  %s\\n" {shlex.quote(message)}; exec sleep 2147483647'
+    return "sh -c " + shlex.quote(inner)
 
 
 def _outer_tmux(args: list[str]) -> str:
@@ -190,7 +284,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size · C-s shell · C-d diff "],
+        ["set", "-g", "status-right", " ←/→ size · C-d diff tab · C-s terminal tab "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -287,6 +381,8 @@ def bootstrap_container(argv: list[str]) -> "None":
             [*tmux, "has-session", "-t", f"={CONTAINER_SESSION}"], capture_output=True
         )
     if has.returncode != 0:
+        # a stale workspace from a dead container would show ghost tabs
+        subprocess.run(["tmux", "-L", WORK_SOCKET, "kill-server"], capture_output=True)
         size = shutil.get_terminal_size()
         subprocess.run(
             [*tmux, "new-session", "-d", "-s", CONTAINER_SESSION,

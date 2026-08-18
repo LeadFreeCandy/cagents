@@ -168,6 +168,13 @@ class CagentsApp(App):
                 apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
             except Exception as error:
                 self.notify(f"Container key setup failed: {error}", severity="warning")
+        if self.sidecar is not None:
+            try:
+                self.sidecar.ensure_workspace(
+                    os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
+                )
+            except Exception as error:
+                self.notify(f"Workspace setup failed: {error}", severity="error")
 
     def notify(self, message, *, title="", severity="information", timeout=None, **kwargs):
         """Routine toasts are opt-in (settings). Warnings and errors always
@@ -285,7 +292,7 @@ class CagentsApp(App):
     def _write_context(self) -> None:
         view = self.selected_view()
         if view is not None:
-            write_context(self._context_path(), view.project_dir, view.session_id)
+            write_context(self._context_path(), view.work_dir, view.session_id)
 
     @staticmethod
     def _ctx_prog() -> str:
@@ -371,7 +378,7 @@ class CagentsApp(App):
                 severity="error", timeout=10,
             )
             return
-        directory = view.project_dir
+        directory = view.work_dir if Path(view.work_dir).is_dir() else view.project_dir
         if not Path(directory).is_dir():
             self.notify(
                 f"Project directory no longer exists: {directory}", severity="error", timeout=10
@@ -793,7 +800,7 @@ class CagentsApp(App):
             self.notify("Nothing selected to diff.", severity="warning")
             return
         self.notify("Building diff…")
-        self._diff_worker(view.project_dir)
+        self._diff_worker(view.work_dir)
 
     @work(thread=True, exclusive=True, group="diff")
     def _diff_worker(self, directory: str) -> None:
@@ -1010,6 +1017,9 @@ class CagentsApp(App):
         self.push_screen(SettingsModal(self.store, self._setting_changed))
 
     def _setting_changed(self, key: str, value) -> None:
+        if key == "state_order":
+            self.refresh_data()  # ranks are computed per refresh
+            return
         if key == "capture_left" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:
                 apply_left_capture(bool(value))

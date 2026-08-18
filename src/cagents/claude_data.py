@@ -96,7 +96,8 @@ _FILE_TOOLS = {
 class ParsedSession:
     session_id: str
     path: Path
-    cwd: str = ""
+    cwd: str = ""  # first cwd seen — stable, used for grouping
+    last_cwd: str = ""  # latest cwd seen — follows EnterWorktree etc.
     git_branch: str = ""
     title: str = ""
     model: str = ""
@@ -306,6 +307,7 @@ def parse_session_file(
         cwd = record.get("cwd")
         if isinstance(cwd, str) and cwd:
             parsed.cwd = parsed.cwd or cwd
+            parsed.last_cwd = cwd
         branch = record.get("gitBranch")
         if isinstance(branch, str) and branch:
             parsed.git_branch = branch

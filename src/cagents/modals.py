@@ -312,9 +312,10 @@ HELP_TEXT = """\
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
 
-[bold cyan]Anywhere — even inside the session[/bold cyan]
-  ctrl+s        split a terminal in the session's worktree/project
-  ctrl+d        diff popup: worktree changes vs master (q closes)
+[bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]
+  ctrl+d        build the selected session's diff vs master -> diff tab
+  ctrl+s        switch to the persistent terminal tab
+  click a tab   or press enter to return to the session tab
 
 [bold cyan]Act on a session[/bold cyan]
   enter         attach — the right pane IS the real session; enter focuses it
@@ -486,12 +487,15 @@ SETTINGS_META: list[tuple[str, str, str]] = [
 ]
 
 class SettingsModal(ModalScreen[None]):
-    """`,` — toggles, applied immediately and persisted to the store."""
+    """`,` — two tabs: General toggles, and the Priority order of states.
+    Everything applies immediately and persists."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("q", "close", "Close"),
         Binding("comma", "close", "Close"),
+        Binding("1", "show_tab('tab-general')", "General", show=False),
+        Binding("2", "show_tab('tab-priority')", "Priority", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -503,24 +507,48 @@ class SettingsModal(ModalScreen[None]):
     SettingsModal Label { text-style: bold; }
     SettingsModal .hint { color: $text-muted; margin-bottom: 1; }
     SettingsModal #setting-desc { color: $text-muted; margin-top: 1; min-height: 3; }
+    SettingsModal TabbedContent { height: auto; }
+    SettingsModal TabPane { padding: 1 0 0 0; }
     """
 
     def __init__(self, store, on_change) -> None:
-        """on_change(key: str, value: bool) fires after each toggle."""
+        """on_change(key: str, value) fires after each change."""
         super().__init__()
         self.store = store
         self.on_change = on_change
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import TabbedContent, TabPane
+
         with Vertical():
             yield Label("Settings")
-            yield Static("enter — toggle · esc — close", classes="hint")
-            yield OptionList(id="settings-list")
-            yield Static(id="setting-desc")
+            yield Static("1/2 — tabs · enter — toggle · esc — close", classes="hint")
+            with TabbedContent(initial="tab-general"):
+                with TabPane("General", id="tab-general"):
+                    yield OptionList(id="settings-list")
+                    yield Static(id="setting-desc")
+                with TabPane("Priority", id="tab-priority"):
+                    yield Static(
+                        "Queue order of the chat states, most-urgent first.\n"
+                        "J / K (shift) move the highlighted state down / up · "
+                        "0 restores the default.",
+                        classes="hint",
+                    )
+                    yield OptionList(id="priority-list")
 
     def on_mount(self) -> None:
         self._refill()
+        self._refill_priority()
         self.query_one("#settings-list", OptionList).focus()
+
+    def action_show_tab(self, tab_id: str) -> None:
+        from textual.widgets import TabbedContent
+
+        self.query_one(TabbedContent).active = tab_id
+        target = "#settings-list" if tab_id == "tab-general" else "#priority-list"
+        self.query_one(target, OptionList).focus()
+
+    # -- General tab -----------------------------------------------------------
 
     def _refill(self, keep: str | None = None) -> None:
         from rich.text import Text
@@ -540,12 +568,16 @@ class SettingsModal(ModalScreen[None]):
             option_list.highlighted = 0
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id != "settings-list":
+            return
         for key, _label, desc in SETTINGS_META:
             if key == event.option.id:
                 self.query_one("#setting-desc", Static).update(desc)
                 return
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "settings-list":
+            return
         key = event.option.id
         if key is None:
             return
@@ -554,9 +586,66 @@ class SettingsModal(ModalScreen[None]):
         self._refill(keep=key)
         self.on_change(key, value)
 
+    # -- Priority tab ------------------------------------------------------------
+
+    def _current_order(self) -> list[str]:
+        from cagents.sessions import SessionState, attention_rank_map
+
+        rank = attention_rank_map(self.store.get_setting("state_order"))
+        return [s.value for s in sorted(SessionState, key=rank.get)]
+
+    def _refill_priority(self, keep_index: int | None = None) -> None:
+        from rich.text import Text
+
+        from cagents.format import STATE_STYLE
+        from cagents.sessions import _STATE_BY_VALUE
+
+        option_list = self.query_one("#priority-list", OptionList)
+        option_list.clear_options()
+        for i, name in enumerate(self._current_order()):
+            state = _STATE_BY_VALUE[name]
+            glyph, style, label = STATE_STYLE[state]
+            row = Text()
+            row.append(f" {i + 1}. ", style="dim")
+            row.append(f"{glyph} ", style=style)
+            row.append(label, style=style)
+            option_list.add_option(Option(row, id=name))
+        if option_list.option_count:
+            option_list.highlighted = min(
+                keep_index if keep_index is not None else 0,
+                option_list.option_count - 1,
+            )
+
+    def on_key(self, event) -> None:
+        priority = self.query_one("#priority-list", OptionList)
+        if not priority.has_focus:
+            return
+        if event.key in ("J", "K"):
+            event.stop()
+            event.prevent_default()
+            index = priority.highlighted
+            if index is None:
+                return
+            order = self._current_order()
+            swap = index + 1 if event.key == "J" else index - 1
+            if not (0 <= swap < len(order)):
+                return
+            order[index], order[swap] = order[swap], order[index]
+            self.store.set_setting("state_order", order)
+            self._refill_priority(keep_index=swap)
+            self.on_change("state_order", order)
+        elif event.key == "0":
+            event.stop()
+            event.prevent_default()
+            from cagents.store import SETTINGS_DEFAULTS
+
+            default = list(SETTINGS_DEFAULTS["state_order"])
+            self.store.set_setting("state_order", default)
+            self._refill_priority(keep_index=priority.highlighted or 0)
+            self.on_change("state_order", default)
+
     def action_close(self) -> None:
         self.dismiss(None)
-
 
 class RelatedModal(ModalScreen[str | None]):
     """Lineage browser (*): parent, siblings, children of a session.

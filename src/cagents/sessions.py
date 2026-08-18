@@ -56,6 +56,27 @@ ATTENTION_ORDER = {
     SessionState.DONE: 7,
 }
 
+_STATE_BY_VALUE = {state.value: state for state in SessionState}
+
+
+def attention_rank_map(order_setting) -> dict[SessionState, int]:
+    """The effective priority of each state. A user-provided ordering (list
+    of state value strings) wins; unknown names are ignored and missing
+    states are appended in default order — so the setting can never brick
+    the sort."""
+    if not isinstance(order_setting, list):
+        return dict(ATTENTION_ORDER)
+    rank: dict[SessionState, int] = {}
+    for name in order_setting:
+        state = _STATE_BY_VALUE.get(str(name))
+        if state is not None and state not in rank:
+            rank[state] = len(rank)
+    for state in sorted(ATTENTION_ORDER, key=ATTENTION_ORDER.get):
+        if state not in rank:
+            rank[state] = len(rank)
+    return rank
+
+
 # If the transcript was written to this recently, Claude is mid-turn even if
 # we can't see a live pane marker (writes happen every few seconds during a
 # turn).
@@ -101,9 +122,19 @@ class SessionView:
 
     @property
     def project_dir(self) -> str:
+        """Where the session started — stable, used for grouping."""
         if self.parsed and self.parsed.cwd:
             return self.parsed.cwd
         return self.tracked.project_dir
+
+    @property
+    def work_dir(self) -> str:
+        """Where the session is working NOW (follows Claude's own worktrees —
+        EnterWorktree changes the cwd on subsequent records). This is what
+        diffs, terminals, and the ctx keys should act on."""
+        if self.parsed and self.parsed.last_cwd:
+            return self.parsed.last_cwd
+        return self.project_dir
 
     @property
     def project_name(self) -> str:
@@ -121,9 +152,8 @@ class SessionView:
     def started(self) -> datetime | None:
         return self.parsed.first_timestamp if self.parsed else None
 
-    @property
-    def attention_rank(self) -> int:
-        return ATTENTION_ORDER[self.state]
+    # Set by the registry from the (user-orderable) state priority.
+    attention_rank: int = 99
 
 
 def derive_state(
@@ -447,6 +477,11 @@ class SessionRegistry:
                     sid for sid in children.get(view.tracked.parent_id, [])
                     if sid != view.session_id
                 ]
+
+        # Attention ranks: the user can reorder state priority in settings.
+        rank_map = attention_rank_map(self.store.get_setting("state_order"))
+        for view in views:
+            view.attention_rank = rank_map[view.state]
 
         # Stable, human-friendly default order: project, then newest first.
         views.sort(

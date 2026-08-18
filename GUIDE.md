@@ -27,16 +27,33 @@ Clicking a pane also moves focus; the rail auto-sizes to follow. The trade-off, 
 accepted: the arrows don't move the text cursor while editing in the Claude prompt
 (toggle off in settings if it bites; you lose the layout keys).
 
+## The right side is tabbed
+
+The pane hosts three tabs (a clickable bar across its top), left to right:
+
+```
+  session    diff    term-1
+```
+
+- **session** — the live Claude attach / transcript (what browsing drives).
+- **diff** — everything the selected session's worktree changed vs master
+  (merge-base), colored, in a pager. Refreshed each time you press `ctrl+d`.
+- **term-1** — a persistent shell, started in your launch directory; it keeps its
+  state across tab switches and is only recreated (in the session's dir) if it died.
+
+Opening a tab takes the whole pane — the conversation is hidden until you switch
+back (click the tab, or `enter` from the list).
+
 ## Anywhere keys — they work while you're inside the session
 
-- **`ctrl+s`** — split a terminal below, cwd'd into the selected session's
-  worktree/project.
-- **`ctrl+d`** — diff popup: everything this worktree changed vs master (merge-base),
-  colored, plus `git status`; `q` closes. Not a repo → says so and does nothing.
-  (Accepted collision: Claude's quit-on-empty-prompt; `/exit` still works.)
+- **`ctrl+d`** — build the diff for the selected session and switch to the diff tab.
+  Not a repo → says so, stays put. (Accepted collision: Claude's
+  quit-on-empty-prompt; `/exit` still works.)
+- **`ctrl+s`** — switch to the terminal tab.
 
 Both are driven by a context file that follows your selection, so they always act on
-the session you're looking at.
+the session you're looking at. In `--fullscreen` mode (no tabs) they fall back to a
+popup diff and a split shell.
 
 ## Session states
 
@@ -60,7 +77,7 @@ the session you're looking at.
 
 | key | action |
 |---|---|
-| `enter` | focus the session (resuming it first if dead, on cagents' private socket) |
+| `enter` | the session tab, focused (resuming the session first if dead, on cagents' private socket) |
 | `d` | done / un-done |
 | `w` | waiting on external (PR watch) |
 | `f` | fork: new session continuing this conversation; you type its first prompt; named after it |

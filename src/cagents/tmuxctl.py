@@ -222,9 +222,11 @@ class TmuxClient:
                 self.create_socket,
                 "set-environment", "-t", f"={name}", "CAGENTS_SESSION_ID", session_id,
             )
-        # Mouse wheel should scroll these sessions when previewed.
+        # Mouse wheel should scroll these sessions when previewed; and their
+        # own status bar stays off — the workspace's tab bar is the chrome.
         if self.create_socket not in self._mouse_enabled:
             self._run(self.create_socket, "set", "-g", "mouse", "on")
+            self._run(self.create_socket, "set", "-g", "status", "off")
             self._mouse_enabled.add(self.create_socket)
         return name
 

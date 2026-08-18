@@ -42,7 +42,9 @@ class TestSettings:
     def test_meta_matches_defaults(self):
         from cagents.modals import SETTINGS_META
 
-        assert {k for k, _, _ in SETTINGS_META} == set(SETTINGS_DEFAULTS)
+        toggles = {k for k, _, _ in SETTINGS_META}
+        # state_order lives in the Priority tab, not the toggle list
+        assert toggles == set(SETTINGS_DEFAULTS) - {"state_order"}
 
     def test_reset_wipes_bookkeeping_only(self, tmp_path: Path):
         path = tmp_path / "state.json"
@@ -391,3 +393,96 @@ async def test_enter_refuses_duplicate_cli_for_active_elsewhere(world, claude_di
         app.action_attach()
         await pilot.pause()
         assert tmux.created == []  # no duplicate claude was spawned
+
+
+class TestStatePriority:
+    def test_default_rank_map(self):
+        from cagents.sessions import ATTENTION_ORDER, attention_rank_map
+
+        assert attention_rank_map(None) == dict(ATTENTION_ORDER)
+        assert attention_rank_map("garbage") == dict(ATTENTION_ORDER)
+
+    def test_custom_order_wins_and_is_unbrickable(self):
+        from cagents.sessions import attention_rank_map
+
+        rank = attention_rank_map(["working", "needs input", "not-a-state"])
+        assert rank[SessionState.WORKING] == 0
+        assert rank[SessionState.NEEDS_INPUT] == 1
+        # everything else appended in default order — nothing missing
+        assert len(rank) == len(SessionState)
+        assert rank[SessionState.NEEDS_REVIEW] == 2
+
+    def test_registry_applies_custom_order(self, claude_dir, tmp_path, now):
+        # one working (via recent record), one needs-review
+        TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(2)).write(
+            claude_dir, mtime=now - 2
+        )
+        TranscriptBuilder(SID2, "/proj/a").user("go").assistant_text("done").write(
+            claude_dir, mtime=now - 900
+        )
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, "/proj/a", "2026-08-18T09:00:00+00:00")
+        store.track(SID2, "/proj/a", "2026-08-18T09:00:00+00:00")
+        tmux = FakeTmux()
+        tmux.sessions.append(
+            TmuxSession(name="a", created=now - 60, activity=now, attached=False,
+                        pane_pid=1, pane_path="/proj/a", socket="claude")
+        )
+        registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+        snap = registry.refresh(now=now)
+        working = snap.by_id(SID1)
+        review = snap.by_id(SID2)
+        assert working.attention_rank > review.attention_rank  # default: review first
+        # flip: working outranks everything
+        store.set_setting("state_order", ["working"])
+        snap = registry.refresh(now=now)
+        assert snap.by_id(SID1).attention_rank < snap.by_id(SID2).attention_rank
+
+
+async def test_priority_tab_reorders_and_persists(claude_dir, tmp_path):
+    from conftest import render_text
+
+    store = Store.load(tmp_path / "state.json")
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+    async with app.run_test(size=(120, 45)) as pilot:
+        await pilot.pause()
+        await pilot.press("comma")
+        await pilot.pause()
+        await pilot.press("2")  # Priority tab
+        await pilot.pause()
+        from textual.widgets import OptionList
+
+        priority = app.screen.query_one("#priority-list", OptionList)
+        assert priority.has_focus
+        first = priority.get_option_at_index(0).id
+        assert first == "needs input"
+        await pilot.press("J")  # move it down one
+        await pilot.pause(0.1)
+        saved = store.get_setting("state_order")
+        assert saved[0] == "needs review" and saved[1] == "needs input"
+        assert Store.load(store.path).get_setting("state_order")[0] == "needs review"
+        await pilot.press("0")  # reset to default
+        await pilot.pause(0.1)
+        assert store.get_setting("state_order")[0] == "needs input"
+
+
+class TestWorkDir:
+    def test_work_dir_follows_latest_cwd(self, claude_dir, now):
+        from cagents.sessions import SessionView
+        from cagents.store import TrackedSession as TS
+
+        b = TranscriptBuilder(SID1, "/proj/repo")
+        b.user("start here")
+        b.cwd = "/proj/repo-worktrees/feature-x"  # Claude entered a worktree
+        b.assistant_text("now working in the worktree")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 10))
+        assert parsed.cwd == "/proj/repo"  # first: stable grouping
+        assert parsed.last_cwd == "/proj/repo-worktrees/feature-x"
+        view = SessionView(
+            session_id=SID1, tracked=TS(SID1, "/proj/repo", "x"),
+            parsed=parsed, state=SessionState.NEEDS_REVIEW, live=False,
+        )
+        assert view.project_dir == "/proj/repo"
+        assert view.work_dir == "/proj/repo-worktrees/feature-x"
