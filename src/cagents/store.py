@@ -46,6 +46,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "auto_pause_days": 7,
     # Todo rows waiting on a human get did/needs sub-rows under them.
     "todo_status_lines": True,
+    # The todos view/feature (view `4`, its footer key, `n` inside it,
+    # worktrees). Off for anyone who doesn't use todos and would rather
+    # not see it competing for room in the footer.
+    "todos_enabled": True,
 }
 
 

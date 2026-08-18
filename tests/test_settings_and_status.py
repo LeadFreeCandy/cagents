@@ -146,6 +146,26 @@ async def test_todo_did_needs_lines_for_review(world):
         assert "your review" in rows
 
 
+async def test_todos_disabled_blocks_switching_and_bounces_back(world):
+    app, store, _ = world
+    store.set_setting("todos_enabled", False)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.active_view_id == "grouped"
+        await pilot.press("4")
+        await pilot.pause()
+        assert app.active_view_id == "grouped"  # blocked, not switched
+
+        # If it gets disabled *while* on the todos view (via the settings
+        # modal, which is what actually calls this hook), bounce back too.
+        store.set_setting("todos_enabled", True)
+        app.action_switch_view("todos")
+        assert app.active_view_id == "todos"
+        store.set_setting("todos_enabled", False)
+        app._setting_changed("todos_enabled", False)
+        assert app.active_view_id == "grouped"
+
+
 async def test_todo_did_needs_lines_gated_by_setting(world):
     app, store, _ = world
     todo = store.add_todo("auth work", "2026-08-17T09:00:00+00:00", "/proj/alpha")

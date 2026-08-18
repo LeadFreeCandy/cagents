@@ -124,6 +124,46 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
     return store, tmux, registry, claude_dir
 
 
+async def test_sidecar_active_hides_internal_preview_pane(world):
+    """Two panes, never three: when the sidecar is doing the live-preview
+    job, cagents' own internal fallback text preview must not also be
+    showing next to the list — that was rendering as a third screen."""
+    store, tmux, registry, claude_dir = world
+    outer = FakeOuterTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0"),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert str(app.query_one("#preview-pane").styles.display) == "none"
+
+
+async def test_no_sidecar_still_shows_the_internal_preview_pane(world):
+    """Without a sidecar (no tmux at all), the internal text preview is
+    the only preview there is — it must stay visible."""
+    store, tmux, registry, claude_dir = world
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir, sidecar=None)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert str(app.query_one("#preview-pane").styles.display) != "none"
+
+
+async def test_sidebar_setting_off_shows_internal_preview_even_with_sidecar(world):
+    """Sidecar object present but the user turned the 'sidebar' setting
+    off: no live pane will ever be used, so the fallback must show."""
+    store, tmux, registry, claude_dir = world
+    store.set_setting("sidebar", False)
+    outer = FakeOuterTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0"),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert str(app.query_one("#preview-pane").styles.display) != "none"
+
+
 async def test_attach_uses_sidecar_pane_not_suspend(world):
     store, tmux, registry, claude_dir = world
     outer = FakeOuterTmux()

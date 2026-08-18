@@ -245,7 +245,7 @@ HELP_TEXT = """\
   V             rich diff — lazygit (per-commit + total, PR-style)
   t             shell — split terminal in the worktree/project
   o             open the newest recorded link (PR, artifact)
-  r             mark reviewed / unmark
+  r             mark done / unmark
   m             monitoring — seen it, keep watching; re-alerts on activity
   e             edit note
   L             edit label
@@ -479,6 +479,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Todo did/needs lines",
         "Todo rows waiting on a human get 'did' / 'needs' sub-rows summarizing the "
         "newest session. Off: just the todo row itself.",
+    ),
+    (
+        "todos_enabled",
+        "Todos view",
+        "The todos view (`4`) and its footer key. Off if you don't use todos and would "
+        "rather the footer spend that room on something else.",
     ),
 ]
 

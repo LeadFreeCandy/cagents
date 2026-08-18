@@ -23,10 +23,11 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import ContentSwitcher, Footer, OptionList, Static
+from textual.widgets import ContentSwitcher, OptionList, Static
 
 from .claude_data import default_claude_dir, parse_session_file, utcnow
 from .format import header_summary, preview_renderable
+from .footer import PriorityFooter
 from . import gitops
 from .diffview import DiffResult, DiffScreen
 from .modals import (
@@ -78,6 +79,7 @@ class CagentsApp(App):
     }
     #body.kanban #preview-pane { display: none; }
     #body.compact #preview-pane { display: none; }
+    #body.sidecar-active #preview-pane { display: none; }
     """
 
     BINDINGS = [
@@ -99,7 +101,7 @@ class CagentsApp(App):
         Binding("colon", "palette", "Fleet ':'", show=False),
         Binding("n", "new_session", "New"),
         Binding("a", "track_session", "Track"),
-        Binding("r", "toggle_reviewed", "Reviewed"),
+        Binding("r", "toggle_reviewed", "Done"),
         Binding("e", "edit_note", "Note", show=False),
         Binding("L", "edit_label", "Label", show=False),
         Binding("x", "untrack", "Untrack", show=False),
@@ -155,10 +157,11 @@ class CagentsApp(App):
                 yield TodoView(id="todos")
             with VerticalScroll(id="preview-pane"):
                 yield Static(id="preview-content")
-        yield Footer()
+        yield PriorityFooter(setting_enabled=self.store.get_setting, id="footer")
 
     def on_mount(self) -> None:
         self._apply_compact(self.size.width)
+        self._apply_sidecar_active()
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(60.0, self._wake_tick)
@@ -195,6 +198,17 @@ class CagentsApp(App):
             return  # before compose finishes
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
+
+    def _apply_sidecar_active(self) -> None:
+        """Two panes, never three: when the sidecar's real tmux pane is
+        doing the live-preview job, cagents' own internal fallback preview
+        widget (`#preview-pane`, plain re-parsed text) must not also be
+        showing next to it — that reads as a third, redundant screen."""
+        active = self.sidecar is not None and self.store.get_setting("sidebar")
+        try:
+            self.query_one("#body").set_class(active, "sidecar-active")
+        except Exception:
+            pass  # before compose finishes
 
     def check_action(self, action: str, parameters) -> bool:
         # App-level keys must not fire behind a modal (e.g. 'q' while a
@@ -359,6 +373,9 @@ class CagentsApp(App):
     # -- view switching --------------------------------------------------------
 
     def action_switch_view(self, view_id: str) -> None:
+        if view_id == "todos" and not self.store.get_setting("todos_enabled"):
+            self.notify("Todos are disabled — turn them on in settings (',').", severity="warning")
+            return
         self.active_view_id = view_id
         self.query_one("#views", ContentSwitcher).current = view_id
         self.query_one("#body").set_class(view_id == "kanban", "kanban")
@@ -369,6 +386,20 @@ class CagentsApp(App):
     def action_next_view(self) -> None:
         i = VIEW_IDS.index(self.active_view_id)
         self.action_switch_view(VIEW_IDS[(i + 1) % len(VIEW_IDS)])
+
+    def _apply_todos_enabled(self) -> None:
+        """If todos got disabled while that view was active, bounce back
+        to the grouped view rather than leaving an inaccessible one on
+        screen. Also refresh the footer, since Todos disappears from it."""
+        if self.active_view_id == "todos" and not self.store.get_setting("todos_enabled"):
+            self.action_switch_view("grouped")
+        self._refresh_footer()
+
+    def _refresh_footer(self) -> None:
+        try:
+            self.query_one(PriorityFooter).refresh_items()
+        except Exception:
+            pass  # before compose finishes
 
     # -- attaching (the core of the core loop) ---------------------------------
 
@@ -1412,8 +1443,11 @@ class CagentsApp(App):
                 apply_left_capture(value)
             except Exception as error:
                 self.notify(f"Could not apply Left binding: {error}", severity="error")
-        # "sidebar" is consulted live on every attach; "notifications" gates
-        # notify() directly — nothing else to do here.
+        if key == "sidebar":
+            self._apply_sidecar_active()
+        if key == "todos_enabled":
+            self._apply_todos_enabled()
+        # "notifications" gates notify() directly — nothing else to do here.
 
     def action_help(self) -> None:
         self.push_screen(HelpModal())
