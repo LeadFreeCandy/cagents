@@ -132,7 +132,11 @@ Three toggles, applied immediately and persisted:
 - **Sidebar rail** (on) — off returns to classic full-terminal attach everywhere.
 - **Toast notifications** (off) — bottom-right popups for routine events. Errors and
   warnings always show regardless.
-- **Left arrow returns to list** (on) — the ← capture described above.
+- **Left arrow returns to list** (on) — the ← capture described above. Works in both
+  modes: with the sidebar it closes the session pane; in full-screen mode it detaches
+  the attach (session keeps running) and cagents resumes. The full-screen binding is
+  scoped to cagents' own tmux client, so Left in your other attached clients (`cs`,
+  phone, other terminals) is untouched.
 
 ## Todos (`4`)
 

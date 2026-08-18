@@ -169,6 +169,17 @@ class TmuxClient:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError(f"tmux send failed: {error}")
 
+    def bind_left_detach(self, client_tty: str) -> None:
+        """Fullscreen-mode left-arrow capture: while a cagents attach is
+        active, Left detaches *our* client (returning to the list). The
+        client_tty filter keeps every other client's Left untouched."""
+        proc = self._run(*left_detach_bind_args(client_tty))
+        if proc.returncode != 0:
+            raise RuntimeError(f"tmux bind failed: {proc.stderr.strip()}")
+
+    def unbind_left_detach(self) -> None:
+        self._run("unbind", "-n", "Left")
+
     def new_claude_session(
         self,
         directory: str,
@@ -242,6 +253,16 @@ _WORKING_MARKERS = (
     "esc to interrupt",
     "ctrl+b to run in background",
 )
+
+
+def left_detach_bind_args(client_tty: str) -> list[str]:
+    """Root-table binding: Left detaches the client on `client_tty`; every
+    other client gets its Left passed straight through."""
+    return [
+        "bind", "-n", "Left",
+        "if", "-F", "#{==:#{client_tty}," + client_tty + "}",
+        "detach-client", "send-keys Left",
+    ]
 
 
 def pane_shows_prompt(pane_text: str) -> bool:

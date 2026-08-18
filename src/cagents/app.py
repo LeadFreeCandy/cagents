@@ -297,7 +297,37 @@ class CagentsApp(App):
                     timeout=8,
                 )
         else:
-            self._suspend_and_run(lambda: self.tmux.attach(name))
+            self._suspend_and_run(lambda: self._fullscreen_attach(name))
+
+    def _fullscreen_attach(self, name: str) -> None:
+        """Classic attach, with left-arrow capture when enabled: Left
+        detaches our client (only ours — tty-filtered) and cagents resumes.
+        Runs inside App.suspend(), so stdin is the real terminal."""
+        tty = self._current_tty() if self.store.get_setting("capture_left") else ""
+        if not tty:
+            self.tmux.attach(name)
+            return
+        try:
+            self.tmux.bind_left_detach(tty)
+        except Exception:
+            self.tmux.attach(name)  # capture is best-effort, attach is not
+            return
+        try:
+            self.tmux.attach(name)
+        finally:
+            try:
+                self.tmux.unbind_left_detach()
+            except Exception:
+                pass  # stale binding is tty-filtered and harmless
+
+    @staticmethod
+    def _current_tty() -> str:
+        import sys
+
+        try:
+            return os.ttyname(sys.stdin.fileno())
+        except OSError:
+            return ""
 
     def _resume_dead_session(self, view: SessionView) -> None:
         if view.missing:

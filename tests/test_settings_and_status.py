@@ -316,3 +316,62 @@ class TestDebounce:
         registry, _ = self._registry(claude_dir, tmp_path, now, "Do you want to proceed?\n❯ 1. Yes")
         # fresh startup with a visible dialog: no artificial delay
         assert registry.refresh(now=now).views[0].state == SessionState.NEEDS_INPUT
+
+
+# ------------------------------------ left capture in fullscreen mode -----
+
+
+def test_left_detach_bind_args_are_tty_filtered():
+    from cagents.tmuxctl import left_detach_bind_args
+
+    args = left_detach_bind_args("/dev/ttys009")
+    assert args[:3] == ["bind", "-n", "Left"]
+    joined = " ".join(args)
+    assert "#{==:#{client_tty},/dev/ttys009}" in joined
+    assert "detach-client" in joined
+    assert "send-keys Left" in joined  # other clients pass through
+
+
+class RecordingTmux(FakeTmux):
+    def __init__(self):
+        super().__init__()
+        self.log: list[str] = []
+
+    def attach(self, name: str) -> int:
+        self.log.append(f"attach:{name}")
+        return super().attach(name)
+
+    def bind_left_detach(self, client_tty: str) -> None:
+        self.log.append(f"bind:{client_tty}")
+
+    def unbind_left_detach(self) -> None:
+        self.log.append("unbind")
+
+
+async def test_fullscreen_attach_binds_left_when_enabled(claude_dir, tmp_path, now):
+    TranscriptBuilder(SID1, "/proj/alpha").user("go").write(claude_dir, mtime=now - 1)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
+    store.set_setting("sidebar", False)  # the reported scenario
+    tmux = RecordingTmux()
+    tmux.sessions.append(
+        TmuxSession(name="alpha", created=now - 60, activity=now, attached=False,
+                    pane_pid=1, pane_path="/proj/alpha")
+    )
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+    app._current_tty = lambda: "/dev/ttys009"  # tests have no real tty
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.action_attach()
+        await pilot.pause()
+        # bind wraps the attach, unbind always follows
+        assert tmux.log == ["bind:/dev/ttys009", "attach:alpha", "unbind"]
+
+        # capture off -> plain attach, no binding
+        tmux.log.clear()
+        store.set_setting("capture_left", False)
+        app.action_attach()
+        await pilot.pause()
+        assert tmux.log == ["attach:alpha"]
