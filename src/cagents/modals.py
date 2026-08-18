@@ -238,6 +238,9 @@ HELP_TEXT = """\
 [bold cyan]Act on a session[/bold cyan]
   enter         attach (the real Claude CLI; detach: ctrl-b d)
   F             fork — new session from this one, prompt typed by you
+  H             handoff — old session writes a spec, new one starts on it,
+                old is marked done (r restores)
+  *             related — visit this session's forks/handoffs/parent
   space         peek — read the transcript without attaching
   D             diff — review changes, comment, send comments to Claude
   V             rich diff — lazygit (per-commit + total, PR-style)
@@ -261,8 +264,10 @@ HELP_TEXT = """\
   p             pause / unpause — timer (2d), wake condition, or indefinite
   x             delete todo     enter  attach to its newest session
 
-[bold cyan]Fleet assistant[/bold cyan]
+[bold cyan]Fleet assistant & plugins[/bold cyan]
   :             ask in plain English (proposes a plan; you confirm)
+  +             add plugin — the "meta" session writes a new keybind or
+                automation into ~/.local/share/cagents/plugins (hot-loaded)
 
   ,             settings (sidebar rail · notifications · left-arrow capture)
   ?             this help · q quit\
@@ -667,3 +672,54 @@ class ScriptConfirmModal(ModalScreen[bool]):
 
     def action_no(self) -> None:
         self.dismiss(False)
+
+
+class RelatedModal(ModalScreen[str | None]):
+    """Lineage browser (*): parent, siblings, children of a session.
+    Dismisses with the chosen session id."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    RelatedModal { align: center middle; }
+    RelatedModal > Vertical {
+        width: 84; max-width: 95%; height: auto; max-height: 70%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    RelatedModal Label { text-style: bold; }
+    RelatedModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, rows: list[tuple[str, str, str]]) -> None:
+        """rows: (session_id, kind label, display title)."""
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        from rich.text import Text
+
+        with Vertical():
+            yield Label("Related sessions")
+            yield Static("enter — go to it · esc — close", classes="hint")
+            option_list = OptionList(id="related-list")
+            yield option_list
+
+    def on_mount(self) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#related-list", OptionList)
+        for session_id, kind, title in self.rows:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(f" {kind:<18}", style="magenta")
+            row.append(f"{title[:52]:<52} ", style="bold")
+            row.append(session_id[:8], style="dim")
+            option_list.add_option(Option(row, id=session_id))
+        if self.rows:
+            option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

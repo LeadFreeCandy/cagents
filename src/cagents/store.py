@@ -62,6 +62,10 @@ class TrackedSession:
     # "I've seen it, keep watching": quieter than needs-review until new
     # activity arrives (then it demands review again).
     monitoring_since: str = ""
+    # Lineage (spec §9's "lightweight relationships"): where this session
+    # came from, when cagents created it from another one.
+    parent_id: str = ""
+    relation: str = ""  # "fork" | "handoff" | ""
 
     def reviewed_datetime(self) -> datetime | None:
         return _parse_iso(self.reviewed_at)
@@ -78,6 +82,8 @@ class TrackedSession:
             "reviewed_at": self.reviewed_at,
             "archived": self.archived,
             "monitoring_since": self.monitoring_since,
+            "parent_id": self.parent_id,
+            "relation": self.relation,
         }
 
     @classmethod
@@ -91,6 +97,8 @@ class TrackedSession:
             reviewed_at=str(data.get("reviewed_at", "")),
             archived=bool(data.get("archived", False)),
             monitoring_since=str(data.get("monitoring_since", "")),
+            parent_id=str(data.get("parent_id", "")),
+            relation=str(data.get("relation", "")),
         )
 
 
@@ -204,7 +212,15 @@ class Store:
 
     # -- mutations (each saves immediately; the store is tiny) --------------
 
-    def track(self, session_id: str, project_dir: str, added_at: str, label: str = "") -> TrackedSession:
+    def track(
+        self,
+        session_id: str,
+        project_dir: str,
+        added_at: str,
+        label: str = "",
+        parent_id: str = "",
+        relation: str = "",
+    ) -> TrackedSession:
         tracked = self.sessions.get(session_id)
         if tracked is None:
             tracked = TrackedSession(
@@ -212,6 +228,8 @@ class Store:
                 project_dir=project_dir,
                 added_at=added_at,
                 label=label,
+                parent_id=parent_id,
+                relation=relation,
             )
             self.sessions[session_id] = tracked
             self.save()

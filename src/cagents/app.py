@@ -37,8 +37,10 @@ from .modals import (
     TodoModal,
     TrackModal,
 )
-from .modals import PauseModal, ScriptConfirmModal
+from .handoff import first_message, summary_prompt
+from .modals import PauseModal, RelatedModal, ScriptConfirmModal
 from .notifier import notify_desktop, read_select_request
+from .plugins import PluginAPI, PluginManager, PLUGIN_GUIDE
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .peek import PeekScreen, deep_view
 from .wake import WakeEngine, build_wake_prompt, extract_script, iso_in, parse_duration
@@ -85,6 +87,9 @@ class CagentsApp(App):
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("enter", "attach", "Attach", priority=False, show=True),
         Binding("F", "fork", "Fork", show=False),
+        Binding("H", "handoff", "Handoff", show=False),
+        Binding("asterisk", "related", "Related", show=False),
+        Binding("plus", "add_plugin", "Plugin", show=False),
         Binding("m", "toggle_monitoring", "Monitor", show=False),
         Binding("t", "split_shell", "Shell", show=False),
         Binding("V", "rich_diff", "Rich diff", show=False),
@@ -129,6 +134,7 @@ class CagentsApp(App):
         self.wake_engine = WakeEngine(self.store)
         self._prev_states: dict[str, SessionState] = {}
         self._seen_first_snapshot = False
+        self.plugins = PluginManager(self.store.path.parent / "plugins")
 
     # -- layout --------------------------------------------------------------
 
@@ -212,6 +218,31 @@ class CagentsApp(App):
         self._update_preview()
         self._notify_transitions(snapshot)
         self._handle_select_request()
+        self._run_plugin_hooks(snapshot)
+
+    def _run_plugin_hooks(self, snapshot: Snapshot) -> None:
+        for error in self.plugins.scan():
+            self.notify(f"Plugin error: {error}", severity="warning", timeout=10)
+        api = PluginAPI(self)
+        for record in self.plugins.snapshot_hooks():
+            try:
+                record.on_snapshot(api, snapshot)
+            except Exception as error:
+                record.error = f"on_snapshot: {error}"
+                self.notify(f"Plugin '{record.name}' failed: {error}", severity="warning")
+
+    def on_key(self, event) -> None:
+        # Plugin keybinds: only keys no built-in binding claimed reach here.
+        record = self.plugins.by_key(event.key)
+        if record is None:
+            return
+        event.stop()
+        api = PluginAPI(self)
+        try:
+            record.run(api)
+        except Exception as error:
+            record.error = f"run: {error}"
+            self.notify(f"Plugin '{record.name}' failed: {error}", severity="error")
 
     def _notify_transitions(self, snapshot: Snapshot) -> None:
         """Desktop-notify sessions that just started needing a human.
@@ -923,26 +954,199 @@ class CagentsApp(App):
             self.notify(f"Fork failed: {error}", severity="error", timeout=10)
             return
         # The fork is named after its prompt; the original is untouched.
-        self.store.track(new_id, view.project_dir, utcnow().isoformat(), label=label)
+        self.store.track(
+            new_id, view.project_dir, utcnow().isoformat(), label=label,
+            parent_id=source_id, relation="fork",
+        )
         self.selected_session_id = new_id
         self._attach_tmux_session(name)
-        self._send_fork_prompt(name, prompt)
+        self._send_prompt_later(name, prompt, "Forked — prompt sent to the new session.")
         self.refresh_data()
 
     @work(thread=True, group="send")
-    def _send_fork_prompt(self, tmux_name: str, prompt: str) -> None:
+    def _send_prompt_later(self, tmux_name: str, text: str, success_note: str) -> None:
         import time
 
-        time.sleep(4.0)  # let the resumed CLI boot before pasting
+        time.sleep(4.0)  # let the CLI boot before pasting
         try:
-            self.tmux.send_text(tmux_name, prompt)
+            self.tmux.send_text(tmux_name, text)
         except Exception as error:
             self.call_from_thread(
-                self.notify, f"Fork started but prompt not delivered: {error}",
+                self.notify, f"Session started but message not delivered: {error}",
                 severity="error", timeout=10,
             )
             return
-        self.call_from_thread(self.notify, "Forked — prompt sent to the new session.")
+        self.call_from_thread(self.notify, success_note)
+
+    # -- handoff --------------------------------------------------------------------
+
+    def action_handoff(self) -> None:
+        view = self.selected_view()
+        if view is None or view.missing or view.parsed is None:
+            self.notify("Select a session with a transcript to hand off.", severity="warning")
+            return
+        self.push_screen(
+            InputModal(
+                f"Handoff '{view.title}' — what should the successor focus on?",
+                placeholder="the new session's task",
+            ),
+            lambda prompt: self._handoff_confirmed(view.session_id, prompt),
+        )
+
+    def _handoff_confirmed(self, source_id: str, prompt: str | None) -> None:
+        if not prompt or not prompt.strip():
+            return
+        self.notify("Asking the session to write its handoff spec… (can take a minute)", timeout=10)
+        self._handoff_worker(source_id, prompt.strip())
+
+    def _handoff_runner(self, source_id: str):
+        # Summary turn runs on a throwaway FORK of the old session, so the
+        # original transcript is never touched.
+        return CliClaudeRunner(
+            claude_bin=self._claude_bin(),
+            extra_args=("--resume", source_id, "--fork-session"),
+        )
+
+    @work(thread=True, exclusive=True, group="handoff")
+    def _handoff_worker(self, source_id: str, prompt: str) -> None:
+        try:
+            spec = self._handoff_runner(source_id).run(summary_prompt(prompt))
+        except Exception as error:
+            self.call_from_thread(
+                self.notify, f"Handoff spec failed: {error}", severity="error", timeout=10
+            )
+            return
+        if not spec.strip():
+            self.call_from_thread(
+                self.notify, "Handoff spec came back empty — aborting.", severity="error"
+            )
+            return
+        self.call_from_thread(self._handoff_spec_ready, source_id, prompt, spec.strip())
+
+    def _handoff_spec_ready(self, source_id: str, prompt: str, spec: str) -> None:
+        view = self.snapshot.by_id(source_id)
+        if view is None:
+            self.notify("Source session vanished mid-handoff.", severity="error")
+            return
+        claude_bin = self._claude_bin()
+        new_id = str(uuid.uuid4())
+        try:
+            name = self.tmux.new_claude_session(
+                view.project_dir, ["--session-id", new_id],
+                session_id=new_id, claude_bin=claude_bin,
+            )
+        except Exception as error:
+            self.notify(f"Handoff session failed to start: {error}", severity="error", timeout=10)
+            return
+        self.store.track(
+            new_id, view.project_dir, utcnow().isoformat(), label=prompt[:60],
+            parent_id=source_id, relation="handoff",
+        )
+        # The predecessor is done — restore anytime with r.
+        self.store.mark_reviewed(source_id, utcnow().isoformat())
+        self.selected_session_id = new_id
+        self._attach_tmux_session(name)
+        self._send_prompt_later(
+            name, first_message(spec, prompt),
+            "Handed off — previous session marked done (r on it restores).",
+        )
+        self.refresh_data()
+
+    # -- lineage --------------------------------------------------------------------
+
+    def action_related(self) -> None:
+        view = self.selected_view()
+        if view is None:
+            return
+        rows: list[tuple[str, str, str]] = []
+
+        def title_of(sid: str) -> str:
+            other = self.snapshot.by_id(sid)
+            if other is not None:
+                return other.title
+            tracked = self.store.sessions.get(sid)
+            return tracked.label if tracked and tracked.label else sid[:8]
+
+        if view.parent_id:
+            rows.append((view.parent_id, f"parent ({view.relation})", title_of(view.parent_id)))
+        for sid in view.sibling_ids:
+            rows.append((sid, "sibling", title_of(sid)))
+        for sid in view.child_ids:
+            other = self.snapshot.by_id(sid)
+            relation = other.relation if other else "child"
+            rows.append((sid, f"child ({relation})", title_of(sid)))
+        if not rows:
+            self.notify("No forks or handoffs related to this session.")
+            return
+        self.push_screen(RelatedModal(rows), self._related_chosen)
+
+    def _related_chosen(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        if self.snapshot.by_id(session_id) is None:
+            self.notify("That session isn't in the current views (archived?).", severity="warning")
+            return
+        if self.active_view_id not in ("grouped", "queue"):
+            self.action_switch_view("queue")
+        from .views import SessionList
+
+        session_list = self.query_one(f"#{self.active_view_id}-list", SessionList)
+        for i in range(session_list.option_count):
+            if session_list.get_option_at_index(i).id == session_id:
+                session_list.highlighted = i
+                break
+
+    # -- plugins ---------------------------------------------------------------------
+
+    def action_add_plugin(self) -> None:
+        self.push_screen(
+            InputModal(
+                "New plugin — what keybind or automation do you want?",
+                placeholder="e.g. ctrl+g opens the session's PR in the browser",
+            ),
+            self._plugin_requested,
+        )
+
+    def _plugin_requested(self, request: str | None) -> None:
+        if not request or not request.strip():
+            return
+        request = request.strip()
+        plugin_dir = self.store.path.parent / "plugins"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        message = PLUGIN_GUIDE.format(plugin_dir=plugin_dir, request=request)
+
+        # Reuse the live meta session if there is one; otherwise start it.
+        meta_view = next(
+            (v for v in self.snapshot.views if v.tracked.label == "meta" and v.live), None
+        )
+        if meta_view is not None:
+            try:
+                self.tmux.send_text(meta_view.tmux_name, f"New plugin request: {request}")
+                self.notify("Sent to the meta session — attach to watch it build.")
+                self.selected_session_id = meta_view.session_id
+            except Exception as error:
+                self.notify(f"Could not reach meta session: {error}", severity="error")
+            return
+        claude_bin = self._claude_bin()
+        if not claude_bin:
+            self.notify("claude CLI not found.", severity="error")
+            return
+        session_id = str(uuid.uuid4())
+        try:
+            name = self.tmux.new_claude_session(
+                str(plugin_dir), ["--session-id", session_id],
+                session_id=session_id, claude_bin=claude_bin,
+            )
+        except Exception as error:
+            self.notify(f"Meta session failed to start: {error}", severity="error")
+            return
+        self.store.track(session_id, str(plugin_dir), utcnow().isoformat(), label="meta")
+        self.selected_session_id = session_id
+        self._attach_tmux_session(name)
+        self._send_prompt_later(
+            name, message, "Meta session building your plugin — it hot-loads when saved."
+        )
+        self.refresh_data()
 
     # -- monitoring ------------------------------------------------------------------
 
@@ -1051,6 +1255,18 @@ class CagentsApp(App):
             return newest
 
         report = self.wake_engine.tick(last_activity=last_activity)
+
+        # Plugin automations ride the same clock (worker thread: slow ok).
+        api = PluginAPI(self)
+        for record in self.plugins.due_automations():
+            try:
+                record.tick(api)
+            except Exception as error:
+                record.error = f"tick: {error}"
+                self.call_from_thread(
+                    self.notify, f"Plugin '{record.name}' failed: {error}", severity="warning"
+                )
+
         if not report.woken and not report.auto_paused:
             return
         self.call_from_thread(self._wake_report, report)

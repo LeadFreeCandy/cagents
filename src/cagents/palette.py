@@ -83,13 +83,14 @@ class CliClaudeRunner:
     """Runs a one-shot `claude -p` in print mode. Slow (seconds), so always
     call from a worker thread."""
 
-    def __init__(self, claude_bin: str = "", timeout: float = 120.0):
+    def __init__(self, claude_bin: str = "", timeout: float = 120.0, extra_args: tuple = ()):
         self.claude_bin = claude_bin or shutil.which("claude") or "claude"
         self.timeout = timeout
+        self.extra_args = list(extra_args)
 
     def run(self, prompt: str) -> str:
         proc = subprocess.run(
-            [self.claude_bin, "-p", prompt, "--output-format", "text"],
+            [self.claude_bin, "-p", prompt, *self.extra_args, "--output-format", "text"],
             capture_output=True,
             text=True,
             timeout=self.timeout,

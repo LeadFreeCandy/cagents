@@ -73,6 +73,17 @@ class SessionView:
     # Only set when the session is waiting on a human (review / input):
     did_line: str = ""  # single line: the agent's most recent statement
     needs_line: str = ""  # single line: what it needs from you
+    # Lineage, resolved against the snapshot (ids of *visible* sessions):
+    child_ids: list[str] = field(default_factory=list)
+    sibling_ids: list[str] = field(default_factory=list)
+
+    @property
+    def parent_id(self) -> str:
+        return self.tracked.parent_id
+
+    @property
+    def relation(self) -> str:
+        return self.tracked.relation
 
     @property
     def title(self) -> str:
@@ -373,6 +384,19 @@ class SessionRegistry:
                     needs_line=needs_line,
                 )
             )
+
+        # Lineage: resolve forks/handoffs against what's visible.
+        children: dict[str, list[str]] = {}
+        for view in views:
+            if view.tracked.parent_id:
+                children.setdefault(view.tracked.parent_id, []).append(view.session_id)
+        for view in views:
+            view.child_ids = children.get(view.session_id, [])
+            if view.tracked.parent_id:
+                view.sibling_ids = [
+                    sid for sid in children.get(view.tracked.parent_id, [])
+                    if sid != view.session_id
+                ]
 
         # Stable, human-friendly default order: project, then newest first.
         views.sort(

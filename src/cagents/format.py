@@ -89,6 +89,10 @@ def session_row(
         row.append("  ⇗", style="dim blue")  # PR / artifact recorded
     if view.parsed and view.parsed.pending_agents:
         row.append(f"  ⑂{view.parsed.pending_agents}", style="dim green")
+    if view.parent_id:
+        row.append("  ↳", style="dim magenta")  # forked/handed-off child
+    if view.child_ids:
+        row.append(f"  »{len(view.child_ids)}", style="dim magenta")  # has children
     return row
 
 
@@ -170,6 +174,20 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
         names = [f[len(common) :].lstrip("/") if common and f.startswith(common) else f for f in shown]
         touched.append(_truncate(" · ".join(names), width * 2), style="dim")
         parts.append(touched)
+
+    if view.parent_id or view.child_ids or view.sibling_ids:
+        lineage = Text()
+        lineage.append("↳ ", style="magenta")
+        bits = []
+        if view.parent_id:
+            bits.append(f"{view.relation or 'child'} of {view.parent_id[:8]}")
+        if view.child_ids:
+            bits.append(f"{len(view.child_ids)} child{'ren' if len(view.child_ids) != 1 else ''}")
+        if view.sibling_ids:
+            bits.append(f"{len(view.sibling_ids)} sibling{'s' if len(view.sibling_ids) != 1 else ''}")
+        lineage.append(" · ".join(bits), style="magenta")
+        lineage.append("   (* to visit)", style="dim italic")
+        parts.append(lineage)
 
     if view.tracked.note:
         note = Text()

@@ -120,6 +120,8 @@ Row markers: `⇄` someone is attached · `✎` has a note · `⇗` recorded a P
 |---|---|
 | `enter` | attach (the core loop — always the real CLI) |
 | `F` | **fork**: new session continuing this conversation — you type its first prompt, the fork is named after it, the original is untouched |
+| `H` | **handoff**: the old session writes a condensed task spec (on a throwaway fork — its transcript is untouched), a fresh session starts with spec+your prompt as its first message, and the old one is marked done (`r` on it restores) |
+| `*` | **related**: browse this session's parent / siblings / children (forks & handoffs) and jump to one. Rows show `↳` on children and `»N` on parents |
 | `space` | peek: full-screen transcript, `r` inside marks reviewed, `esc` closes |
 | `D` | built-in diff review (comment + send to Claude) |
 | `V` | **rich diff**: lazygit in a pane — commits panel for per-commit diffs, files panel for the total diff (PR-style); falls back to `D` if not installed |
@@ -209,6 +211,22 @@ it's merged". Claude gets a read-only snapshot of the session table and returns 
 whitelisted actions on cagents' own bookkeeping only, each with a reason. Nothing applies
 until you press `y`. Garbage replies fail loudly. Expect ~10–20s; it runs in the
 background and never blocks the list.
+
+## Plugins (`+`)
+
+cagents is user-extensible: plugins are Python files in
+`~/.local/share/cagents/plugins/`, hot-reloaded on save. Each defines a `PLUGIN` dict
+with an optional **keybind** (`"key": "ctrl+g"`, `"run": fn(api)`) and/or an
+**automation** (`"every": 300, "tick": fn(api)`, or `"on_snapshot": fn(api, snapshot)`
+per refresh). The `api` surface: snapshot/selected session, cagents' store
+(notes/labels/review), `notify`, `send_text` into a live session, subprocesses,
+`open_url`. Broken plugins are contained — the error shows, everything else keeps
+working. Reserved keys (cagents' own) are refused.
+
+Press `+`, describe what you want, and the **meta session** — a Claude session labeled
+`meta`, living in the plugins directory — writes the plugin for you (it gets the full
+framework docs plus your request as its first message, and is reused for later
+requests). The plugin loads the moment it's saved.
 
 ## When something looks wrong
 
