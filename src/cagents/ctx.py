@@ -61,6 +61,34 @@ def _work_windows() -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
+# Clicking the diff tab rebuilds via a tmux hook, and C-d both rebuilds and
+# selects — which itself fires the hook. A timestamp in the work server's
+# environment dedupes, so one keypress is one build, never a loop.
+DIFF_DEDUPE_SECONDS = 2.0
+
+
+def _recently_built(now=None) -> bool:
+    import time
+
+    proc = subprocess.run(
+        ["tmux", "-L", WORK_SOCKET, "show-environment", "-g", "CAGENTS_DIFF_TS"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if proc.returncode != 0 or "=" not in proc.stdout:
+        return False
+    try:
+        stamp = float(proc.stdout.strip().split("=", 1)[1])
+    except ValueError:
+        return False
+    return ((now if now is not None else time.time()) - stamp) < DIFF_DEDUPE_SECONDS
+
+
+def _mark_built() -> None:
+    import time
+
+    _work("set-environment", "-g", "CAGENTS_DIFF_TS", str(time.time()))
+
+
 def _display(message: str) -> None:
     _tmux("display-message", message)
 
@@ -98,7 +126,7 @@ def diff_popup_command(directory: str) -> str:
     )
 
 
-def do_diff(directory: str) -> int:
+def do_diff(directory: str, select: bool = True) -> int:
     if not directory or not Path(directory).is_dir():
         _display("cagents: no directory for the selected session")
         return 1
@@ -110,14 +138,18 @@ def do_diff(directory: str) -> int:
         _display("cagents: not a git repository")
         return 1
     if _workspace_alive():
-        # Tab mode: fresh diff in the diff tab, switch to it.
-        command = "sh -c " + shlex.quote(diff_popup_command(directory))
-        if "diff" not in _work_windows():
-            _work("new-window", "-d", "-t", "=work:", "-n", "diff", command)
-        else:
-            _work("respawn-pane", "-k", "-t", "=work:diff", command)
-        _work("select-window", "-t", "=work:diff")
-        _tmux("select-pane", "-t", ":.1")
+        # Tab mode: fresh diff in the diff tab; switch to it unless this run
+        # IS the tab-click hook (which is already there).
+        if not _recently_built():
+            command = "sh -c " + shlex.quote(diff_popup_command(directory))
+            if "diff" not in _work_windows():
+                _work("new-window", "-d", "-t", "=work:", "-n", "diff", command)
+            else:
+                _work("respawn-pane", "-k", "-t", "=work:diff", command)
+            _mark_built()
+        if select:
+            _work("select-window", "-t", "=work:diff")
+            _tmux("select-pane", "-t", ":.1")
         return 0
     return _tmux(
         "display-popup", "-E", "-w", "92%", "-h", "88%",
@@ -129,12 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
     parser.add_argument("command", choices=["shell", "diff"])
     parser.add_argument("--context", type=Path, required=True)
+    parser.add_argument("--no-select", action="store_true",
+                        help="rebuild without switching tabs (used by the tab-click hook)")
     args = parser.parse_args(argv)
 
     directory = str(read_context(args.context).get("dir", ""))
     if args.command == "shell":
         return do_shell(directory)
-    return do_diff(directory)
+    return do_diff(directory, select=not args.no_select)
 
 
 if __name__ == "__main__":

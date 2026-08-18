@@ -171,7 +171,9 @@ class CagentsApp(App):
         if self.sidecar is not None:
             try:
                 self.sidecar.ensure_workspace(
-                    os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
+                    os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd(),
+                    ctx_prog=self._ctx_prog(),
+                    context_path=str(self._context_path()),
                 )
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")

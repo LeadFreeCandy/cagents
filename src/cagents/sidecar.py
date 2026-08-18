@@ -56,9 +56,12 @@ class Sidecar:
     # switches by respawning a window's pane; shells persist across tab
     # switches because the windows never die with the view.
 
-    def ensure_workspace(self, terminal_dir: str = "") -> None:
+    def ensure_workspace(
+        self, terminal_dir: str = "", ctx_prog: str = "", context_path: str = ""
+    ) -> None:
         """Create the work session + default tabs (idempotent), and make
-        sure the right pane is attached to it."""
+        sure the right pane is attached to it. With ctx_prog given, clicking
+        the diff tab rebuilds the diff (an after-select-window hook)."""
         try:
             self._work(["has-session", "-t", "=work"])
         except RuntimeError:
@@ -87,6 +90,17 @@ class Sidecar:
                 ["set", "-g", "window-status-separator", ""],
             ):
                 self._work(option)
+            if ctx_prog and context_path:
+                import shlex
+
+                rebuild = (
+                    f"run-shell -b \"{ctx_prog} diff --context "
+                    f"{shlex.quote(context_path)} --no-select\""
+                )
+                self._work([
+                    "set-hook", "-g", "after-select-window",
+                    f"if -F '#{{==:#{{window_name}},diff}}' '{rebuild}' ''",
+                ])
             self._work(["select-window", "-t", "=work:session"])
         self._ensure_viewer_pane()
 

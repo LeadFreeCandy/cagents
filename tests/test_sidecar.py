@@ -361,3 +361,24 @@ async def test_context_file_follows_selection(world, tmp_path):
         context = read_context(store.path.parent / "context.json")
         assert context.get("dir") == "/proj/alpha"
         assert context.get("session_id") == SID1
+
+
+def test_ensure_workspace_installs_diff_click_hook():
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+    sidecar.ensure_workspace(
+        terminal_dir="/x", ctx_prog="/venv/bin/cagents-ctx",
+        context_path="/data/context.json",
+    )
+    hook = next(c for c in work.calls if c[0] == "set-hook")
+    joined = " ".join(hook)
+    assert "after-select-window" in joined
+    assert "window_name},diff" in joined  # only the diff tab triggers
+    assert "--no-select" in joined  # hook rebuilds without re-selecting
+    assert "cagents-ctx diff" in joined
+
+
+def test_ensure_workspace_without_ctx_installs_no_hook():
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    Sidecar(runner=outer, own_pane="%0", work_runner=work).ensure_workspace("/x")
+    assert not any(c[0] == "set-hook" for c in work.calls)

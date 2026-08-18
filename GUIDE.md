@@ -37,7 +37,8 @@ The pane hosts three tabs (a clickable bar across its top), left to right:
 
 - **session** — the live Claude attach / transcript (what browsing drives).
 - **diff** — everything the selected session's worktree changed vs master
-  (merge-base), colored, in a pager. Refreshed each time you press `ctrl+d`.
+  (merge-base), colored, in a pager. Rebuilt fresh every time you open it —
+  by `ctrl+d` or by clicking the tab itself.
 - **term-1** — a persistent shell, started in your launch directory; it keeps its
   state across tab switches and is only recreated (in the session's dir) if it died.
 
