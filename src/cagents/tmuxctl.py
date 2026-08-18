@@ -122,6 +122,45 @@ class TmuxClient:
             return ""
         return proc.stdout if proc.returncode == 0 else ""
 
+    def wait_for_alive_or_error(
+        self,
+        session_name: str,
+        sleep_fn=None,
+        checks: tuple[float, ...] = (0.3, 0.4, 0.6, 0.7),  # ~2s total, see below
+    ) -> str:
+        """Poll a just-created session briefly for it dying on its own.
+
+        The real Claude CLI exits (no error dialog, nothing — the tmux
+        session it was running in just vanishes) when asked to resume a
+        session id it doesn't recognize, printing "No conversation found
+        with session ID: ..." first. Measured against the real CLI
+        (v2.1.234): it takes on the order of a second (~1.0-1.2s in
+        testing) of real startup work before it gets far enough to notice
+        and exit — hence the generous total window here, tuned with
+        margin above that. Without this check, cagents would blindly try
+        to attach to that already-dead tmux session next, and the *user*
+        sees tmux's own raw "can't find session: <name>" printed to their
+        real terminal instead of a real error from cagents. The cost is
+        added latency on every new/resumed session's attach, not just
+        failing ones — a deliberate trade: correctness over speed here.
+
+        Returns "" if the session is still alive after the check window
+        (the common case — proceed with attaching normally). Returns the
+        last pane text we managed to capture before it died otherwise
+        (falling back to a generic message if we didn't catch any), so the
+        caller can show *why* instead of silently failing.
+        """
+        import time
+
+        sleep_fn = sleep_fn or time.sleep
+        last_text = ""
+        for delay in checks:
+            sleep_fn(delay)
+            if not self.has_session(session_name):
+                return last_text.strip() or "the session ended immediately"
+            last_text = self.capture_pane(session_name) or last_text
+        return ""
+
     def attach(self, session_name: str) -> int:
         """Attach to a live session. Blocks until the user detaches or the
         session ends. Must be called with the terminal handed over

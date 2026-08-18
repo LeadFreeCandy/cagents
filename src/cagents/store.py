@@ -210,6 +210,11 @@ class Store:
             "todos": {tid: t.to_dict() for tid, t in self.todos.items()},
             "settings": self.settings,
         }
+        if logger.isEnabledFor(logging.DEBUG):
+            import traceback
+
+            caller = "".join(traceback.format_stack(limit=4)[:-1])  # who called save(), 3 frames up
+            logger.debug("save() settings=%r called from:\n%s", self.settings, caller)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", "utf-8")

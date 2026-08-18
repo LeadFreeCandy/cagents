@@ -58,6 +58,7 @@ class FakeTmux:
         self.panes: dict[str, str] = {}
         self.attached_to: list[str] = []
         self.created: list[tuple[str, list[str], str]] = []
+        self.dies_immediately: set[str] = set()  # session names that "exit" right after creation
 
     def available(self) -> bool:
         return True
@@ -74,6 +75,12 @@ class FakeTmux:
 
     def has_session(self, name: str) -> bool:
         return any(s.name == name for s in self.sessions)
+
+    def wait_for_alive_or_error(self, name, sleep_fn=None, checks=()) -> str:
+        if name in self.dies_immediately:
+            self.sessions = [s for s in self.sessions if s.name != name]
+            return "No conversation found with session ID: (test)"
+        return ""
 
     def new_claude_session(self, directory, claude_args, session_id="", claude_bin=""):
         name = Path(directory).name or "session"
@@ -241,6 +248,35 @@ async def test_attach_dead_session_resumes_in_tmux(world):
         await pilot.pause()
         assert tmux.created and tmux.created[-1][1] == ["--resume", SID3]
         assert tmux.attached_to  # attached to the fresh tmux session
+
+
+async def test_resume_that_dies_immediately_shows_a_real_error_not_a_raw_attach(world):
+    """Regression, reproduced against the real `claude` binary in
+    tests/test_real_tmux_flow.py: resuming a session id the real Claude
+    CLI doesn't recognize prints "No conversation found with session ID:
+    ..." and exits immediately, which kills its hosting tmux session
+    before cagents gets to attach. Previously cagents didn't check for
+    this and just tried to attach anyway — the user saw tmux's own raw
+    "can't find session: <name>" printed straight to their terminal, with
+    nothing useful in cagents' own logs. It must surface a real error
+    instead, and must NOT try to attach to the (now nonexistent) pane."""
+    app, store, tmux, _ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID3)
+        await pilot.pause()
+        store.sessions[SID3].project_dir = "/tmp"
+        view = app.snapshot.by_id(SID3)
+        if view.parsed:
+            view.parsed.cwd = "/tmp"
+
+        tmux.dies_immediately.add("tmp")  # new_claude_session names it after the cwd
+        app.action_attach()
+        await pilot.pause()
+
+        assert tmux.created  # it did try to resume
+        assert tmux.attached_to == []  # but never attached to the dead session
+        assert not tmux.has_session("tmp")
 
 
 async def test_mashing_attach_on_a_dead_session_does_not_spawn_duplicates(world):

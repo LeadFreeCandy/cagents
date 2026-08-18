@@ -510,6 +510,11 @@ class CagentsApp(App):
             session_id=view.session_id,
             claude_bin=claude_bin,
         )
+        error = self.tmux.wait_for_alive_or_error(name)
+        if error:
+            logger.warning("resume of %s died immediately: %s", view.session_id, error)
+            self.notify(f"Claude could not resume this session: {error}", severity="error", timeout=15)
+            return
         self._recently_started[view.session_id] = name
         self._attach_tmux_session(name)
 
@@ -564,6 +569,11 @@ class CagentsApp(App):
             )
         except Exception as error:
             self.notify(f"Could not start session: {error}", severity="error", timeout=10)
+            return
+        error = self.tmux.wait_for_alive_or_error(name)
+        if error:
+            logger.warning("new session %s died immediately: %s", session_id, error)
+            self.notify(f"Claude could not start: {error}", severity="error", timeout=15)
             return
         self.store.track(session_id, directory, utcnow().isoformat(), label=label)
         pending = getattr(self, "_pending_todo_link", None)

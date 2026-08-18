@@ -128,3 +128,87 @@ class TestRealTmuxSessionMapping:
         tmux_sessions = real_tmux.list_sessions()
         claimants = [s for s in tmux_sessions if s.cagents_session_id == session_id]
         assert len(claimants) == 2, "real tmux allows two live sessions to claim one Claude id"
+
+
+class TestRealClaudeCliResumeFailure:
+    """The actual root cause of the reported "flickers and doesn't open,
+    can't find session" bug: the real `claude` binary, asked to resume a
+    session id it has no record of, prints an error and exits (measured:
+    ~1.2s of real startup work first) — which tears down its hosting tmux
+    session before cagents can attach to it. Skipped (not just
+    tmux-gated) when `claude` itself isn't on PATH, since this drives the
+    real CLI.
+
+    Deliberately does NOT use pytest's `tmp_path`: an unfamiliar directory
+    makes claude show its folder-trust prompt *before* it ever gets to
+    validating --resume, so it just sits there waiting — a different code
+    path entirely, not the one this test is for. CWD must be a directory
+    the local claude install already trusts; run from a real project of
+    yours if this fails "claude was expected to have already exited"."""
+
+    pytestmark = pytest.mark.skipif(
+        shutil.which("claude") is None, reason="claude CLI not installed"
+    )
+
+    TRUSTED_CWD = str(Path.home() / "src")
+
+    def test_resuming_an_unknown_session_id_kills_its_own_tmux_session(
+        self, real_tmux: TmuxClient
+    ):
+        if not Path(self.TRUSTED_CWD).is_dir():
+            pytest.skip(f"{self.TRUSTED_CWD} doesn't exist on this machine")
+        claude_bin = shutil.which("claude")
+        bogus_id = str(uuid.uuid4())  # never seen by claude -> "no conversation found"
+        name = real_tmux.new_claude_session(
+            self.TRUSTED_CWD, ["--resume", bogus_id], session_id=bogus_id, claude_bin=claude_bin,
+        )
+        error = real_tmux.wait_for_alive_or_error(name)
+        assert error, "claude was expected to have already exited by now"
+        assert not real_tmux.has_session(name)
+
+
+class TestWaitForAliveOrError:
+    """Fast, non-tmux unit coverage of the polling primitive itself."""
+
+    class _StubClient:
+        def __init__(self, alive_for_n_checks: int, pane_text: str = ""):
+            self.remaining = alive_for_n_checks
+            self.pane_text = pane_text
+            self.has_session_calls = 0
+
+        def has_session(self, name: str) -> bool:
+            self.has_session_calls += 1
+            if self.remaining <= 0:
+                return False
+            self.remaining -= 1
+            return True
+
+        def capture_pane(self, name: str, lines: int = 40) -> str:
+            return self.pane_text
+
+    def test_still_alive_returns_empty_string(self):
+        client = TmuxClient()
+        client.has_session = self._StubClient(alive_for_n_checks=99).has_session
+        client.capture_pane = lambda name, lines=40: ""
+        sleeps = []
+        error = client.wait_for_alive_or_error("x", sleep_fn=sleeps.append)
+        assert error == ""
+        assert len(sleeps) == 4  # every check in the default schedule ran, none found it dead
+
+    def test_dies_after_first_check_returns_text_captured_while_alive(self):
+        # Alive for exactly the first check (so we get a chance to capture
+        # its pane text), dead by the second.
+        stub = self._StubClient(alive_for_n_checks=1, pane_text="No conversation found: x")
+        client = TmuxClient()
+        client.has_session = stub.has_session
+        client.capture_pane = stub.capture_pane
+        error = client.wait_for_alive_or_error("x", sleep_fn=lambda d: None)
+        assert "No conversation found" in error
+
+    def test_dies_with_no_captured_text_falls_back_to_generic_message(self):
+        stub = self._StubClient(alive_for_n_checks=0, pane_text="")
+        client = TmuxClient()
+        client.has_session = stub.has_session
+        client.capture_pane = stub.capture_pane
+        error = client.wait_for_alive_or_error("x", sleep_fn=lambda d: None)
+        assert error == "the session ended immediately"
