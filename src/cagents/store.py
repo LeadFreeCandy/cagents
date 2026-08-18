@@ -44,6 +44,8 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Open todos with no activity for this many days pause themselves.
     # 0 disables.
     "auto_pause_days": 7,
+    # Todo rows waiting on a human get did/needs sub-rows under them.
+    "todo_status_lines": True,
 }
 
 

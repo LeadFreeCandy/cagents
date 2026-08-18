@@ -146,6 +146,21 @@ async def test_todo_did_needs_lines_for_review(world):
         assert "your review" in rows
 
 
+async def test_todo_did_needs_lines_gated_by_setting(world):
+    app, store, _ = world
+    todo = store.add_todo("auth work", "2026-08-17T09:00:00+00:00", "/proj/alpha")
+    store.link_todo_session(todo.todo_id, SID1)  # needs review
+    store.set_setting("todo_status_lines", False)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("4")
+        await pilot.pause()
+        rows = _todo_rows(app)
+        assert "did" not in rows
+        assert "needs" not in rows
+        assert "auth work" in rows  # the todo itself still renders
+
+
 async def test_todo_no_lines_while_working(world):
     app, store, _ = world
     todo = store.add_todo("db work", "2026-08-17T09:00:00+00:00", "/proj/beta")

@@ -474,6 +474,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Open todos with no session activity for this many days pause themselves. "
         "0 disables. Enter to type a new number.",
     ),
+    (
+        "todo_status_lines",
+        "Todo did/needs lines",
+        "Todo rows waiting on a human get 'did' / 'needs' sub-rows summarizing the "
+        "newest session. Off: just the todo row itself.",
+    ),
 ]
 
 

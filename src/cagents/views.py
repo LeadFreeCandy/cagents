@@ -438,6 +438,8 @@ class TodoView(Widget):
     def _status_lines(self, todo) -> list[Option]:
         """did/needs sub-rows for a todo waiting on a human. Deliberately
         absent while the agent is working — nothing would be current."""
+        if not self._store().get_setting("todo_status_lines"):
+            return []
         newest_id = self.newest_session_id(todo)
         newest = self.snapshot.by_id(newest_id) if newest_id else None
         if newest is None:
