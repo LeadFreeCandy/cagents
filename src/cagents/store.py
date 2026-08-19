@@ -156,6 +156,18 @@ class Store:
         tmp.write_text(json.dumps(payload, indent=2) + "\n", "utf-8")
         os.replace(tmp, self.path)
 
+    def export_sessions(self) -> dict:
+        """JSON-safe snapshot of the session bookkeeping (for undo)."""
+        return {sid: t.to_dict() for sid, t in self.sessions.items()}
+
+    def restore_sessions(self, payload: dict) -> None:
+        self.sessions = {
+            sid: TrackedSession.from_dict(sid, data)
+            for sid, data in payload.items()
+            if isinstance(data, dict)
+        }
+        self.save()
+
     def reset(self) -> None:
         """Wipe cagents' own bookkeeping. Claude's transcripts are untouched."""
         self.sessions.clear()

@@ -399,3 +399,73 @@ async def test_open_link_prompts_to_associate_pr(world):
         await pilot.pause()
         assert not isinstance(app.screen, InputModal)
         assert opened[-1] == "https://github.com/o/r/pull/5"
+
+
+class TestUndo:
+    async def test_undo_done_and_untrack_in_order(self, world):
+        app, store, tmux, _ = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("d")  # mark done
+            await pilot.pause(0.1)
+            assert store.sessions[SID1].reviewed_at != ""
+            select_session(app, SID3)
+            await pilot.pause()
+            await pilot.press("x")
+            await pilot.pause()
+            await pilot.press("y")  # untrack SID3
+            await pilot.pause(0.1)
+            assert SID3 not in store.sessions
+
+            await pilot.press("z")  # undo untrack -> SID3 restored
+            await pilot.pause(0.2)
+            assert SID3 in store.sessions
+            assert store.sessions[SID1].reviewed_at != ""  # earlier action intact
+
+            await pilot.press("z")  # undo done -> SID1 back to review
+            await pilot.pause(0.2)
+            assert store.sessions[SID1].reviewed_at == ""
+
+            await pilot.press("z")  # stack empty -> loud no-op
+            await pilot.pause(0.1)
+            assert SID1 in store.sessions and SID3 in store.sessions
+
+    async def test_undo_persists_to_disk(self, world):
+        app, store, tmux, _ = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("R")
+            await pilot.pause()
+            await pilot.press(*"renamed")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert store.sessions[SID1].label == "renamed"
+            await pilot.press("z")
+            await pilot.pause(0.1)
+            assert store.sessions[SID1].label == ""
+            from cagents.store import Store
+
+            assert Store.load(store.path).sessions[SID1].label == ""
+
+    async def test_undo_new_session_untracks_but_never_kills(self, world, tmp_path, monkeypatch):
+        app, store, tmux, _ = world
+        launch = tmp_path / "p"
+        launch.mkdir()
+        monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(launch))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            _, _, new_id = tmux.created[-1]
+            assert new_id in store.sessions
+            sessions_before = len(tmux.sessions)
+            await pilot.press("z")
+            await pilot.pause(0.2)
+            assert new_id not in store.sessions  # bookkeeping undone
+            assert len(tmux.sessions) == sessions_before  # the process lives on

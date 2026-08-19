@@ -328,7 +328,7 @@ HELP_TEXT = """\
   *             related — visit this session's forks/handoffs/parent
   D             diff review screen — comment on lines, send comments to Claude
   o             open the newest recorded link (PR, artifact)
-  R             rename       x  untrack
+  R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
   n             start a new session — starts in your launch directory;

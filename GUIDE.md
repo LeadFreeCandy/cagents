@@ -91,6 +91,7 @@ popup diff and a split shell.
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |
 | `o` | open the session's PR/artifact link — if none is recorded, prompts you to paste one (remembered for next time and for `w`) |
 | `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
+| `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association, fleet plans — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
 | `n` / `a` | new session (launch-dir default, tab completes/cycles, `ctrl+t` picks the dir in a real shell — zoxide works) / track existing |
 | `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
 | `:` | fleet assistant: plain English → a confirmed plan on cagents' bookkeeping |

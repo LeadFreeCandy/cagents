@@ -103,6 +103,7 @@ class CagentsApp(App):
         Binding("asterisk", "related", "Related", show=False),
         Binding("o", "open_link", "Open link", show=False),
         Binding("R", "rename", "Rename", show=False),
+        Binding("z", "undo", "Undo", show=False),
         Binding("x", "untrack", "Untrack", show=False),
         Binding("colon", "palette", "Fleet", show=False),
         Binding("R", "refresh_now", "Refresh", show=False),
@@ -140,6 +141,7 @@ class CagentsApp(App):
         self._viewer_timer = None
         self._viewer_target: str = ""
         self._pending_highlight: str | None = None
+        self._undo_stack: list[tuple[str, dict]] = []
 
     # -- layout --------------------------------------------------------------
 
@@ -522,12 +524,31 @@ class CagentsApp(App):
         fallback = Path.home() / ".local" / "bin" / "claude"
         return str(fallback) if fallback.exists() else ""
 
+    # -- undo ---------------------------------------------------------------------
+
+    def _checkpoint(self, label: str) -> None:
+        """Snapshot the session bookkeeping before a mutation, so `z` can
+        take it back. Only cagents' own state — never Claude's data, and
+        never processes (undoing a fork untracks it; the session lives on)."""
+        self._undo_stack.append((label, self.store.export_sessions()))
+        del self._undo_stack[:-20]
+
+    def action_undo(self) -> None:
+        if not self._undo_stack:
+            self.notify("Nothing to undo.", severity="warning")
+            return
+        label, payload = self._undo_stack.pop()
+        self.store.restore_sessions(payload)
+        self.notify(f"Undid: {label}")
+        self.refresh_data()
+
     # -- done / waiting ---------------------------------------------------------
 
     def action_toggle_done(self) -> None:
         view = self.selected_view()
         if view is None:
             return
+        self._checkpoint("done change")
         if view.state == SessionState.DONE:
             self.store.clear_reviewed(view.session_id)
             self.notify("Un-done — back in the queue.")
@@ -544,6 +565,7 @@ class CagentsApp(App):
         if view is None:
             return
         if view.state == SessionState.WAITING_EXTERNAL:
+            self._checkpoint("waiting change")
             self.store.clear_waiting(view.session_id)
             self.notify("No longer waiting on the PR.")
             self.refresh_data()
@@ -588,6 +610,7 @@ class CagentsApp(App):
         self._set_waiting(session_id, text.strip())
 
     def _set_waiting(self, session_id: str, pr_url: str) -> None:
+        self._checkpoint("waiting change")
         self.store.set_waiting(session_id, utcnow().isoformat(), pr_url)
         self.notify(f"Waiting on {pr_url} — comments re-alert; merge marks it done.")
         self.refresh_data()
@@ -703,6 +726,7 @@ class CagentsApp(App):
         except Exception as error:
             self.notify(f"Fork failed: {error}", severity="error", timeout=10)
             return
+        self._checkpoint("fork")
         self.store.track(
             new_id, view.project_dir, utcnow().isoformat(), label=prompt[:60],
             parent_id=source_id, relation="fork",
@@ -782,6 +806,7 @@ class CagentsApp(App):
         except Exception as error:
             self.notify(f"Handoff session failed to start: {error}", severity="error", timeout=10)
             return
+        self._checkpoint("handoff")
         self.store.track(
             new_id, view.project_dir, utcnow().isoformat(), label=prompt[:60],
             parent_id=source_id, relation="handoff",
@@ -919,6 +944,7 @@ class CagentsApp(App):
         except Exception as error:
             self.notify(f"Could not start session: {error}", severity="error", timeout=10)
             return
+        self._checkpoint("new session")
         self.store.track(session_id, directory, utcnow().isoformat(), label=label)
         self.selected_session_id = session_id
         self._pending_highlight = session_id
@@ -958,6 +984,7 @@ class CagentsApp(App):
         if not session_id:
             return
         cwd = getattr(self, "_track_cwds", {}).get(session_id, "")
+        self._checkpoint("track")
         self.store.track(session_id, cwd or str(Path.home()), utcnow().isoformat())
         self.selected_session_id = session_id
         self._pending_highlight = session_id
@@ -979,6 +1006,7 @@ class CagentsApp(App):
     def _label_saved(self, session_id: str, label: str | None) -> None:
         if label is None:
             return
+        self._checkpoint("rename")
         self.store.set_label(session_id, label.strip())
         self.refresh_data()
 
@@ -997,6 +1025,7 @@ class CagentsApp(App):
     def _untrack_confirmed(self, session_id: str, yes: bool) -> None:
         if not yes:
             return
+        self._checkpoint("untrack")
         self.store.untrack(session_id)
         if self.selected_session_id == session_id:
             self.selected_session_id = None
@@ -1038,6 +1067,7 @@ class CagentsApp(App):
         if not text or not text.strip():
             return
         url = text.strip()
+        self._checkpoint("PR association")
         self.store.set_pr_url(session_id, url)
         if open_after:
             self._open_url(url, "PR")
@@ -1073,6 +1103,7 @@ class CagentsApp(App):
     def _plan_confirmed(self, plan, yes: bool) -> None:
         if not yes:
             return
+        self._checkpoint("fleet plan")
         done = apply_plan(plan, self.store, utcnow().isoformat())
         self.notify("Applied: " + ", ".join(done) if done else "Nothing to apply.")
         self.refresh_data()
