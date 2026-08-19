@@ -4,10 +4,12 @@ The app continuously writes the current session's directory to a small
 context file; tmux root bindings invoke this script, which reads it and
 acts *inside the same tmux server* (run-shell provides $TMUX):
 
-    cagents-ctx shell --context <file>   split a terminal in that dir
-    cagents-ctx diff  --context <file>   popup: worktree diff vs master
+    cagents-ctx shell --context <file>   the terminal tab (or a split)
+    cagents-ctx diff  --context <file>   the diff tab (or a popup)
+    cagents-ctx event <Kind> --file <f>  Claude Code hook target: stamp a
+                                         state event for the session
 
-Kept dependency-free and instant — it runs on a keypress.
+Kept dependency-free and instant — it runs on a keypress / hook.
 """
 
 from __future__ import annotations
@@ -31,8 +33,10 @@ def read_context(path: Path) -> dict:
         return {}
 
 
-def write_context(path: Path, directory: str, session_id: str) -> None:
-    payload = json.dumps({"dir": directory, "session_id": session_id})
+def write_context(path: Path, directory: str, session_id: str, diff_mode: str = "branch") -> None:
+    payload = json.dumps(
+        {"dir": directory, "session_id": session_id, "diff_mode": diff_mode}
+    )
     try:
         path.write_text(payload, "utf-8")
     except OSError:
@@ -107,26 +111,43 @@ def do_shell(directory: str) -> int:
     return _tmux("split-window", "-v", "-l", "12", "-c", directory)  # fullscreen fallback
 
 
-def diff_popup_command(directory: str) -> str:
-    """One shell pipeline: header, diff vs the default branch's merge-base
-    (or just uncommitted changes on the default branch), untracked files
-    listed — through a pager. q closes the popup."""
+def diff_popup_command(directory: str, mode: str = "branch") -> str:
+    """One shell pipeline through a pager (q closes).
+
+    mode "branch" (the default, and the important one): this worktree —
+    committed AND uncommitted — versus master. The base is the merge-base
+    with the first of: origin/HEAD, origin/main, origin/master, main,
+    master. Remote-tracking refs first, because a linked worktree often has
+    no (or a stale) local main.
+
+    mode "uncommitted": only what isn't committed yet (vs HEAD).
+    """
     q = shlex.quote(directory)
+    if mode == "uncommitted":
+        return (
+            f"cd {q} && "
+            '{ echo "# ${PWD##*/} $(git branch --show-current) — uncommitted changes"; '
+            "git status --short; echo; git diff --color HEAD; } | less -R"
+        )
     return (
         f"cd {q} && "
-        "base=$(git merge-base $(git symbolic-ref --quiet --short "
-        "refs/remotes/origin/HEAD 2>/dev/null || echo main) HEAD 2>/dev/null || "
-        "git merge-base master HEAD 2>/dev/null); "
-        'if [ "$(git rev-parse HEAD 2>/dev/null)" = "$base" ]; then base=""; fi; '
-        'if [ -n "$base" ]; then vs=$(git name-rev --name-only "$base"); '
-        'else vs=uncommitted; fi; '
+        "ref=''; for cand in "
+        '"$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" '
+        "origin/main origin/master main master; do "
+        '[ -n "$cand" ] && git rev-parse --verify --quiet "$cand" >/dev/null 2>&1 '
+        '&& ref=$cand && break; done; '
+        'base=""; [ -n "$ref" ] && base=$(git merge-base "$ref" HEAD 2>/dev/null); '
+        'if [ "$(git rev-parse HEAD 2>/dev/null)" = "$base" ] && '
+        '[ -z "$(git status --porcelain)" ]; then :; fi; '
+        'if [ -n "$base" ] && [ "$(git rev-parse HEAD)" != "$base" ]; then vs=$ref; '
+        'elif [ -n "$base" ]; then base=""; vs=uncommitted; else vs=uncommitted; fi; '
         '{ echo "# ${PWD##*/} $(git branch --show-current) vs $vs"; '
         "git status --short; echo; "
         'git diff --color ${base:+"$base"}; } | less -R'
     )
 
 
-def do_diff(directory: str, select: bool = True) -> int:
+def do_diff(directory: str, select: bool = True, mode: str = "branch") -> int:
     if not directory or not Path(directory).is_dir():
         _display("cagents: no directory for the selected session")
         return 1
@@ -141,7 +162,7 @@ def do_diff(directory: str, select: bool = True) -> int:
         # Tab mode: fresh diff in the diff tab; switch to it unless this run
         # IS the tab-click hook (which is already there).
         if not _recently_built():
-            command = "sh -c " + shlex.quote(diff_popup_command(directory))
+            command = "sh -c " + shlex.quote(diff_popup_command(directory, mode))
             if "diff" not in _work_windows():
                 _work("new-window", "-d", "-t", "=work:", "-n", "diff", command)
             else:
@@ -153,22 +174,62 @@ def do_diff(directory: str, select: bool = True) -> int:
         return 0
     return _tmux(
         "display-popup", "-E", "-w", "92%", "-h", "88%",
-        "sh", "-c", diff_popup_command(directory),
+        "sh", "-c", diff_popup_command(directory, mode),
     )
+
+
+def do_event(kind: str, path: Path) -> int:
+    """Called by Claude Code hooks (Notification / Stop / UserPromptSubmit)
+    on sessions cagents spawned. Merges {kind: now} into the session's
+    events file; Notification also records its message from the hook's
+    stdin JSON. This is the authoritative 'what state is Claude in' signal
+    that replaces pane heuristics for spawned sessions."""
+    import time
+
+    events = read_context(path)  # same tolerant reader: dict or {}
+    events[kind] = time.time()
+    if kind == "Notification":
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+            message = str(payload.get("message", "")).strip()
+            if message:
+                events["message"] = message[:200]
+        except (json.JSONDecodeError, OSError):
+            pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(events), "utf-8")
+    except OSError:
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
-    parser.add_argument("command", choices=["shell", "diff"])
-    parser.add_argument("--context", type=Path, required=True)
+    parser.add_argument(
+        "command", choices=["shell", "diff", "event"], nargs="?", default="shell"
+    )
+    parser.add_argument("kind", nargs="?", default="")
+    parser.add_argument("--file", type=Path, default=None)
+    parser.add_argument("--context", type=Path, required=False)
     parser.add_argument("--no-select", action="store_true",
                         help="rebuild without switching tabs (used by the tab-click hook)")
     args = parser.parse_args(argv)
 
-    directory = str(read_context(args.context).get("dir", ""))
+    if args.command == "event":
+        if not args.kind or args.file is None:
+            return 2
+        return do_event(args.kind, args.file)
+    if args.context is None:
+        return 2
+    context = read_context(args.context)
+    directory = str(context.get("dir", ""))
     if args.command == "shell":
         return do_shell(directory)
-    return do_diff(directory, select=not args.no_select)
+    return do_diff(
+        directory, select=not args.no_select,
+        mode=str(context.get("diff_mode", "branch")),
+    )
 
 
 if __name__ == "__main__":

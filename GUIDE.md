@@ -36,9 +36,11 @@ The pane hosts three tabs (a clickable bar across its top), left to right:
 ```
 
 - **session** — the live Claude attach / transcript (what browsing drives).
-- **diff** — everything the selected session's worktree changed vs master
-  (merge-base), colored, in a pager. Rebuilt fresh every time you open it —
-  by `ctrl+d` or by clicking the tab itself.
+- **diff** — **this worktree versus master**: committed + uncommitted, from the
+  merge-base with the first of origin/HEAD, origin/main, origin/master, main,
+  master (remote refs first — a linked worktree often has no local main).
+  Rebuilt fresh every time you open it — `ctrl+d` or clicking the tab. The
+  settings panel can switch it to uncommitted-only mode.
 - **term-1** — a persistent shell, started in your launch directory; it keeps its
   state across tab switches and is only recreated (in the session's dir) if it died.
 
@@ -100,9 +102,15 @@ popup diff and a split shell.
 - A tmux session in a *parent* directory only maps to a transcript if its pane
   **actually displays that conversation** — wrong-session attaches can't happen;
   worst case something live shows as dead.
-- "Working" runs on the conversation clock (records, not file mtime — resuming
-  touches mtime without writing). "Needs you" requires a real dialog signature plus
-  a debounce, so phrases in Claude's own output can't fake it.
+- Sessions cagents spawns carry **Claude Code's own hooks** (Notification / Stop /
+  UserPromptSubmit) stamping a per-session events file — the authoritative state
+  signal. Validated against a live haiku session: zero false "needs you" through a
+  35s silent foreground tool; Stop flips to review instantly.
+- For sessions cagents didn't spawn: "working" runs on the conversation clock
+  (records, not file mtime), "needs you" requires a real on-screen dialog plus a
+  debounce, and an unanswered tool call without a visible dialog counts as a tool
+  still *running* — never a guessed permission prompt (that guess was the
+  intermittent false "needs you", replicated live and removed).
 - A crashed container is detected (pane 0 must be cagents) and rebuilt, never
   reattached.
 - `cagents --reset` wipes cagents' bookkeeping (confirm-gated). Claude's transcripts

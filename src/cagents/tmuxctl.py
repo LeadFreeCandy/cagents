@@ -308,6 +308,7 @@ _PROMPT_MARKERS = (
     "Yes, and don't ask again",
     "Waiting for your response",
     "Do you trust the files",
+    "trust this folder",  # workspace trust dialog (observed live, v2.1.235)
 )
 
 # The selection cursor on a numbered option — the signature of an actual
@@ -315,10 +316,13 @@ _PROMPT_MARKERS = (
 # "Do you want me to…", so a phrase alone must never count as a prompt.
 _CHOICE_ROW = re.compile(r"❯\s*\d+\.")
 
-# Patterns that mean Claude is actively running a turn.
+# Patterns that mean Claude is actively running a turn. The spinner hint
+# text varies by UI state ("esc to interrupt", "· 1 shell still running",
+# …) — observed live against v2.1.235.
 _WORKING_MARKERS = (
     "esc to interrupt",
     "ctrl+b to run in background",
+    "still running",
 )
 
 

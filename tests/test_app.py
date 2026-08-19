@@ -168,7 +168,11 @@ async def test_attach_dead_session_resumes_on_private_socket(world):
             view.parsed.cwd = "/tmp"
         app.action_attach()
         await pilot.pause()
-        assert tmux.created and tmux.created[-1][1] == ["--resume", SID3]
+        assert tmux.created and tmux.created[-1][1][:2] == ["--resume", SID3]
+        # every spawn carries the state hooks (the anti-flap authority)
+        assert "--settings" in tmux.created[-1][1]
+        settings_json = tmux.created[-1][1][tmux.created[-1][1].index("--settings") + 1]
+        assert "Notification" in settings_json and "Stop" in settings_json
         # Resume spawns on the PRIVATE socket (spawning next to a live
         # claude on a shared socket crashes it).
         assert tmux.attached_to[-1][1] == "cagents-sessions"

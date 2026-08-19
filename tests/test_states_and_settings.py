@@ -486,3 +486,99 @@ class TestWorkDir:
         )
         assert view.project_dir == "/proj/repo"
         assert view.work_dir == "/proj/repo-worktrees/feature-x"
+
+
+class TestEventDerivation:
+    """Hook events (Notification/Stop/UserPromptSubmit) are authoritative
+    for sessions cagents spawned — validated against a real haiku session
+    (35s quiet foreground tool, zero false needs-input)."""
+
+    def _parsed(self, claude_dir, now, pending=True):
+        b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(30))
+        if pending:
+            b.assistant_tool_use("t1", "Bash", {"command": "make"}, ts=ts_ago(28))
+        return parse_session_file(b.write(claude_dir, mtime=now - 28))
+
+    def test_submit_event_holds_working_through_quiet_tool(self, claude_dir, now):
+        parsed = self._parsed(claude_dir, now)
+        events = {"UserPromptSubmit": now - 29}
+        state, detail = derive_state(
+            parsed, _tracked(), live=True, now=now, events=events
+        )
+        assert state == SessionState.WORKING
+        assert detail == "running Bash"
+
+    def test_notification_event_means_needs_input(self, claude_dir, now):
+        parsed = self._parsed(claude_dir, now)
+        events = {"UserPromptSubmit": now - 29, "Notification": now - 5,
+                  "message": "Claude needs your permission to use Bash"}
+        state, detail = derive_state(
+            parsed, _tracked(), live=True, now=now, events=events
+        )
+        assert state == SessionState.NEEDS_INPUT
+        assert "permission" in detail
+
+    def test_notification_consumed_by_newer_activity(self, claude_dir, now):
+        # approval produced a tool_result newer than the notification
+        b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(30))
+        b.assistant_tool_use("t1", "Bash", {"command": "make"}, ts=ts_ago(28))
+        b.tool_result("t1", ts=ts_ago(3))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 3))
+        events = {"UserPromptSubmit": now - 29, "Notification": now - 10}
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state == SessionState.WORKING  # back to the turn
+
+    def test_stop_event_finishes_immediately(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(10))
+        b.assistant_text("done", ts=ts_ago(5))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 5))
+        events = {"UserPromptSubmit": now - 9, "Stop": now - 4}
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_no_events_falls_back_to_heuristics(self, claude_dir, now):
+        parsed = self._parsed(claude_dir, now)
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events={})
+        assert state == SessionState.WORKING  # heuristic path (pending tool)
+
+
+class TestCtxEvent:
+    def test_event_merges_and_records_message(self, tmp_path, monkeypatch):
+        import io
+
+        from cagents.ctx import do_event, read_context
+
+        path = tmp_path / "events" / "sid.json"
+        assert do_event("UserPromptSubmit", path) == 0
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO('{"message": "Claude needs your permission"}')
+        )
+        assert do_event("Notification", path) == 0
+        events = read_context(path)
+        assert events["UserPromptSubmit"] > 0
+        assert events["Notification"] >= events["UserPromptSubmit"]
+        assert events["message"] == "Claude needs your permission"
+
+
+class TestDiffMode:
+    def test_branch_pipeline_prefers_remote_refs(self):
+        from cagents.ctx import diff_popup_command
+
+        command = diff_popup_command("/proj/x", mode="branch")
+        assert "origin/main origin/master main master" in command
+        assert "merge-base" in command and "less -R" in command
+
+    def test_uncommitted_pipeline(self):
+        from cagents.ctx import diff_popup_command
+
+        command = diff_popup_command("/proj/x", mode="uncommitted")
+        assert "git diff --color HEAD" in command
+        assert "merge-base" not in command
+
+    def test_setting_cycles_and_reaches_context(self, tmp_path):
+        store = Store.load(tmp_path / "state.json")
+        assert store.get_setting("diff_mode") == "branch"
+        store.set_setting("diff_mode", "uncommitted")
+        assert Store.load(store.path).get_setting("diff_mode") == "uncommitted"
+        store.set_setting("diff_mode", 5)  # wrong type ignored
+        assert store.get_setting("diff_mode") == "uncommitted"

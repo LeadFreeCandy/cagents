@@ -50,13 +50,17 @@ def current_branch(directory: str) -> str:
 
 
 def default_branch(directory: str) -> str:
-    """The repo's main line: origin/HEAD if known, else main/master, else HEAD."""
+    """The repo's main line — the thing a worktree diff compares against.
+
+    Remote-tracking refs are preferred over local branches: a local `main`
+    can be stale or missing entirely in a linked worktree, while
+    origin/main is what "versus master" actually means."""
     try:
         ref = _run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], directory).strip()
         return ref.rsplit("/", 1)[-1]
     except GitError:
         pass
-    for name in ("main", "master"):
+    for name in ("origin/main", "origin/master", "main", "master"):
         try:
             _run(["git", "rev-parse", "--verify", "--quiet", name], directory)
             return name

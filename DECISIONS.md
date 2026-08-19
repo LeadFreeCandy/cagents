@@ -190,3 +190,26 @@ things flakier. Rebuilt from the last-good state (`v2` branch) keeping Sonnet's 
   the next human message; WAITING_EXTERNAL (w) tied to a PR, gh-polled (no push API
   exists): comments → re-alert "github comments", merge → done "merged".
 - Orphan containers (pane 0 not cagents) are killed and rebuilt, never reattached.
+
+## 10. The "needs you" flap, root-caused for real (Aug 18, haiku replication)
+
+Replicated with a live haiku session sampled every 2s through a permission prompt
+and a long tool. Three findings:
+- Spinner hint text varies by UI state ("esc to interrupt", "· 1 shell still
+  running", "Sautéed for 6s…") — marker lists will always leak.
+- Transcript record gaps exceed any freshness window during quiet tools, so the
+  pending-tool + stale + no-marker path fired "permission: Bash" intermittently.
+  That path is gone: an unanswered tool call with no visible dialog is WORKING.
+- The v2.1.235 CLI blocks foreground `sleep` outright, and haiku spontaneously
+  backgrounds long commands — replications must use non-sleep foreground work.
+
+The real fix: sessions cagents spawns get Claude Code's own hooks
+(`--settings` JSON, per session): UserPromptSubmit / Notification / Stop stamp an
+events file that derive_state treats as authoritative (notification = needs you,
+stop = finished, submit = working), each event invalidated by newer transcript
+activity. Validation run: zero false needs-input over 42 samples spanning submit,
+long quiet tool, and stop. Heuristics remain only for wrapper-socket sessions.
+
+Also: the diff tab's base is now resolved remote-first (origin/HEAD, origin/main,
+origin/master, then local) because linked worktrees often lack a local main; a
+diff_mode setting ("branch" default / "uncommitted") rides in context.json.

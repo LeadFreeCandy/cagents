@@ -459,6 +459,11 @@ class PlanConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+# Allowed values for string settings; enter cycles through them.
+SETTING_CHOICES: dict[str, list[str]] = {
+    "diff_mode": ["branch", "uncommitted"],
+}
+
 SETTINGS_META: list[tuple[str, str, str]] = [
     (
         "sidebar",
@@ -477,6 +482,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "← shrinks the Claude pane, → grows it (list ↔ small sidebar ↔ full "
         "width). Trade-off: the arrows no longer move the cursor while editing "
         "text in the Claude prompt.",
+    ),
+    (
+        "diff_mode",
+        "Diff tab compares against",
+        "branch: this worktree vs master (merge-base; committed + uncommitted — "
+        "the PR view). uncommitted: only changes not yet committed. Enter cycles.",
     ),
     (
         "desktop_notifications",
@@ -556,11 +567,17 @@ class SettingsModal(ModalScreen[None]):
         option_list = self.query_one("#settings-list", OptionList)
         option_list.clear_options()
         for i, (key, label, _desc) in enumerate(SETTINGS_META):
-            value = bool(self.store.get_setting(key))
+            value = self.store.get_setting(key)
             row = Text()
-            row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
-            row.append(f"{label:<34}", style="bold" if value else "")
-            row.append("on" if value else "off", style="green" if value else "dim")
+            if isinstance(value, str):
+                row.append(" ◈ ", style="bold cyan")
+                row.append(f"{label:<34}", style="bold")
+                row.append(value, style="cyan")
+            else:
+                value = bool(value)
+                row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
+                row.append(f"{label:<34}", style="bold" if value else "")
+                row.append("on" if value else "off", style="green" if value else "dim")
             option_list.add_option(Option(row, id=key))
             if keep == key:
                 option_list.highlighted = i
@@ -581,7 +598,13 @@ class SettingsModal(ModalScreen[None]):
         key = event.option.id
         if key is None:
             return
-        value = not bool(self.store.get_setting(key))
+        current = self.store.get_setting(key)
+        if isinstance(current, str):
+            choices = SETTING_CHOICES.get(key, [current])
+            value = choices[(choices.index(current) + 1) % len(choices)] \
+                if current in choices else choices[0]
+        else:
+            value = not bool(current)
         self.store.set_setting(key, value)
         self._refill(keep=key)
         self.on_change(key, value)

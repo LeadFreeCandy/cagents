@@ -50,13 +50,16 @@ class TestDeriveState:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.WORKING
 
-    def test_live_pending_tool_stale_is_needs_input(self, claude_dir: Path, now: float):
+    def test_live_pending_tool_stale_is_working(self, claude_dir: Path, now: float):
+        # Replicated live (haiku, 35s quiet foreground tool): an unanswered
+        # tool call with no visible dialog is a tool still RUNNING. Guessing
+        # "permission" here was the intermittent false "needs you".
         b = TranscriptBuilder(SID1, "/proj/alpha")
-        b.user("run it").assistant_tool_use("t1", "Bash", {"command": "rm -rf build"})
+        b.user("run it").assistant_tool_use("t1", "Bash", {"command": "make big"})
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 120))
         state, detail = derive_state(parsed, _tracked(), live=True, now=now)
-        assert state == SessionState.NEEDS_INPUT
-        assert detail == "permission: Bash"
+        assert state == SessionState.WORKING
+        assert detail == "running Bash"
 
     def test_live_pane_prompt_wins_even_with_fresh_writes(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha")

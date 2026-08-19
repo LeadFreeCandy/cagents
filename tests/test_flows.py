@@ -48,6 +48,7 @@ async def test_fork_flow(world, monkeypatch):
         directory, args, new_id = tmux.created[-1]
         assert args[0:3] == ["--resume", SID1, "--fork-session"]
         assert args[3] == "--session-id" and args[4] == new_id
+        assert "--settings" in args  # state hooks ride along
         child = store.sessions[new_id]
         assert child.label == "try the async approach"
         assert child.parent_id == SID1 and child.relation == "fork"
@@ -91,7 +92,7 @@ async def test_handoff_flow(world, monkeypatch):
         await pilot.pause(0.5)
         assert "finish the API layer" in runner.prompts[0]
         directory, args, new_id = tmux.created[-1]
-        assert args == ["--session-id", new_id]  # fresh session, not a fork
+        assert args[:2] == ["--session-id", new_id]  # fresh session, not a fork
         child = store.sessions[new_id]
         assert child.parent_id == SID1 and child.relation == "handoff"
         assert store.sessions[SID1].reviewed_at != ""  # old one marked done
@@ -237,7 +238,7 @@ async def test_send_review_resumes_dead_session(world, monkeypatch):
         assert not view.live
         app._diff_closed(SID1, DiffResult(send_message="comments here", comment_count=2))
         await pilot.pause(0.4)
-        assert tmux.created and tmux.created[-1][1] == ["--resume", SID1]
+        assert tmux.created and tmux.created[-1][1][:2] == ["--resume", SID1]
         assert tmux.sent and tmux.sent[0][1] == "comments here"
         assert tmux.sent[0][2] == "cagents-sessions"
 
@@ -248,8 +249,10 @@ async def test_send_review_resumes_dead_session(world, monkeypatch):
 class TestCtx:
     def test_context_roundtrip(self, tmp_path):
         path = tmp_path / "context.json"
-        write_context(path, "/proj/x", SID1)
-        assert read_context(path) == {"dir": "/proj/x", "session_id": SID1}
+        write_context(path, "/proj/x", SID1, diff_mode="uncommitted")
+        assert read_context(path) == {
+            "dir": "/proj/x", "session_id": SID1, "diff_mode": "uncommitted",
+        }
         assert read_context(tmp_path / "missing.json") == {}
 
     def test_diff_popup_command_shape(self):

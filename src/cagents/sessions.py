@@ -156,12 +156,49 @@ class SessionView:
     attention_rank: int = 99
 
 
+EVENT_TOLERANCE = 2.0  # records may trail their hook event by a moment
+
+
+def derive_from_events(
+    events: dict, parsed: ParsedSession, tracked: TrackedSession, now: float
+) -> tuple[SessionState, str] | None:
+    """Authoritative state from Claude Code's own hooks (sessions cagents
+    spawned carry Notification/Stop/UserPromptSubmit hooks that stamp an
+    events file). Returns None when the events are silent or superseded by
+    newer transcript activity — the heuristics take over then."""
+    conversation_ts = parsed.last_timestamp.timestamp() if parsed.last_timestamp else 0.0
+
+    def valid(kind: str) -> float:
+        ts = events.get(kind)
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            return 0.0
+        # A hook event is consumed once the conversation moves past it
+        # (e.g. the permission it announced was granted).
+        if conversation_ts > ts + EVENT_TOLERANCE:
+            return 0.0
+        return float(ts)
+
+    t_notif = valid("Notification")
+    t_stop = valid("Stop")
+    t_submit = valid("UserPromptSubmit")
+    latest = max(t_notif, t_stop, t_submit)
+    if latest <= 0:
+        return None
+    if t_notif == latest:
+        message = str(events.get("message") or "waiting on you")
+        return (SessionState.NEEDS_INPUT, message[:110])
+    if t_stop == latest:
+        return _finished_state(parsed, tracked)
+    return (SessionState.WORKING, _working_detail(parsed))
+
+
 def derive_state(
     parsed: ParsedSession | None,
     tracked: TrackedSession,
     live: bool,
     pane_text: str = "",
     now: float | None = None,
+    events: dict | None = None,
 ) -> tuple[SessionState, str]:
     """Derive the lifecycle state and a short human-readable detail.
 
@@ -190,6 +227,11 @@ def derive_state(
     if parsed is None:
         return (SessionState.STOPPED, "transcript missing")
 
+    if live and events:
+        from_events = derive_from_events(events, parsed, tracked, now)
+        if from_events is not None:
+            return from_events
+
     if live:
         if pane_text:
             if pane_shows_prompt(pane_text):
@@ -205,10 +247,12 @@ def derive_state(
         if conversation_ts is not None and now - conversation_ts < FRESH_WRITE_SECONDS:
             return (SessionState.WORKING, _working_detail(parsed))
         if parsed.pending_tool_use:
-            detail = "waiting on you"
-            if parsed.pending_tool_name:
-                detail = f"permission: {parsed.pending_tool_name}"
-            return (SessionState.NEEDS_INPUT, detail)
+            # An unanswered tool call with no visible dialog is a tool still
+            # RUNNING (long quiet Bash, variable spinner text) — replicated
+            # live: guessing "permission" here was the intermittent false
+            # "needs you". Real dialogs are caught by the pane check above
+            # (and by the Notification hook on sessions cagents spawns).
+            return (SessionState.WORKING, _working_detail(parsed))
         if parsed.last_record_role == "user":
             # A user message with no reply and no writes: waiting to start,
             # or the human is mid-conversation at the prompt.
@@ -445,7 +489,10 @@ class SessionRegistry:
             tmux = mapping.get(tracked.session_id)
             live = tmux is not None
             pane_text = pane_text_of(tmux) if tmux is not None else ""
-            state, detail = derive_state(parsed, tracked, live, pane_text, now)
+            events = self._load_events(tracked.session_id)
+            state, detail = derive_state(
+                parsed, tracked, live, pane_text, now, events=events
+            )
             state, detail = self._debounce(tracked.session_id, state, detail)
             did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
             views.append(
@@ -508,6 +555,17 @@ class SessionRegistry:
         self._input_streak.pop(session_id, None)
         self._last_state[session_id] = state
         return (state, detail)
+
+    def _load_events(self, session_id: str) -> dict | None:
+        """Hook-stamped state events for sessions cagents spawned."""
+        import json
+
+        path = self.store.path.parent / "events" / f"{session_id}.json"
+        try:
+            data = json.loads(path.read_text("utf-8"))
+            return data if isinstance(data, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def _find_session_file(self, tracked: TrackedSession) -> Path | None:
         path = session_file_path(self.claude_dir, tracked.project_dir, tracked.session_id)

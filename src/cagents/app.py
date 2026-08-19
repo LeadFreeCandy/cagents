@@ -294,7 +294,10 @@ class CagentsApp(App):
     def _write_context(self) -> None:
         view = self.selected_view()
         if view is not None:
-            write_context(self._context_path(), view.work_dir, view.session_id)
+            write_context(
+                self._context_path(), view.work_dir, view.session_id,
+                diff_mode=str(self.store.get_setting("diff_mode")),
+            )
 
     @staticmethod
     def _ctx_prog() -> str:
@@ -390,10 +393,7 @@ class CagentsApp(App):
         if not claude_bin:
             self.notify("claude CLI not found.", severity="error")
             return
-        name = self.tmux.new_claude_session(
-            directory, ["--resume", view.session_id],
-            session_id=view.session_id, claude_bin=claude_bin,
-        )
+        name = self._spawn_session(directory, ["--resume", view.session_id], view.session_id)
         self._show_new_session(name)
 
     def _show_new_session(self, tmux_name: str) -> None:
@@ -478,6 +478,34 @@ class CagentsApp(App):
             return os.ttyname(sys.stdin.fileno())
         except OSError:
             return ""
+
+    def _events_dir(self) -> Path:
+        return self.store.path.parent / "events"
+
+    def _hook_args(self, session_id: str) -> list[str]:
+        """--settings JSON wiring Claude Code's own hooks to stamp this
+        session's state events — the authoritative alternative to pane
+        heuristics (Notification = needs you, Stop = turn over,
+        UserPromptSubmit = working)."""
+        import json as _json
+
+        events_file = self._events_dir() / f"{session_id}.json"
+        prog = self._ctx_prog()
+
+        def hook(kind: str) -> list:
+            return [{"hooks": [{"type": "command",
+                                "command": f"{prog} event {kind} --file {events_file}"}]}]
+
+        settings = {"hooks": {k: hook(k) for k in ("Notification", "Stop", "UserPromptSubmit")}}
+        return ["--settings", _json.dumps(settings)]
+
+    def _spawn_session(self, directory: str, claude_args: list[str], session_id: str) -> str:
+        """Every session cagents starts goes through here: private socket,
+        state hooks attached."""
+        return self.tmux.new_claude_session(
+            directory, claude_args + self._hook_args(session_id),
+            session_id=session_id, claude_bin=self._claude_bin(),
+        )
 
     def _claude_bin(self) -> str:
         found = shutil.which("claude")
@@ -655,10 +683,10 @@ class CagentsApp(App):
             return
         new_id = str(uuid.uuid4())
         try:
-            name = self.tmux.new_claude_session(
+            name = self._spawn_session(
                 view.project_dir,
                 ["--resume", source_id, "--fork-session", "--session-id", new_id],
-                session_id=new_id, claude_bin=claude_bin,
+                new_id,
             )
         except Exception as error:
             self.notify(f"Fork failed: {error}", severity="error", timeout=10)
@@ -737,10 +765,7 @@ class CagentsApp(App):
             return
         new_id = str(uuid.uuid4())
         try:
-            name = self.tmux.new_claude_session(
-                view.project_dir, ["--session-id", new_id],
-                session_id=new_id, claude_bin=self._claude_bin(),
-            )
+            name = self._spawn_session(view.project_dir, ["--session-id", new_id], new_id)
         except Exception as error:
             self.notify(f"Handoff session failed to start: {error}", severity="error", timeout=10)
             return
@@ -843,9 +868,8 @@ class CagentsApp(App):
             if view.live:
                 tmux_name, socket = view.tmux_name, (view.tmux_socket or None)
             else:
-                tmux_name = self.tmux.new_claude_session(
-                    view.project_dir, ["--resume", view.session_id],
-                    session_id=view.session_id, claude_bin=self._claude_bin(),
+                tmux_name = self._spawn_session(
+                    view.project_dir, ["--resume", view.session_id], view.session_id
                 )
                 socket = self.tmux.create_socket
                 time.sleep(4.0)
@@ -877,10 +901,7 @@ class CagentsApp(App):
             return
         session_id = str(uuid.uuid4())
         try:
-            name = self.tmux.new_claude_session(
-                directory, ["--session-id", session_id],
-                session_id=session_id, claude_bin=claude_bin,
-            )
+            name = self._spawn_session(directory, ["--session-id", session_id], session_id)
         except Exception as error:
             self.notify(f"Could not start session: {error}", severity="error", timeout=10)
             return
@@ -1021,6 +1042,9 @@ class CagentsApp(App):
     def _setting_changed(self, key: str, value) -> None:
         if key == "state_order":
             self.refresh_data()  # ranks are computed per refresh
+            return
+        if key == "diff_mode":
+            self._write_context()  # the ctx keys read the mode from context
             return
         if key == "capture_left" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:
