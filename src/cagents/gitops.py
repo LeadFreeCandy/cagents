@@ -271,8 +271,10 @@ def github_pr_comments(directory: str, gh_bin: str = "gh") -> list[ReviewComment
 @dataclass
 class PRStatus:
     merged: bool = False
+    closed: bool = False  # closed WITHOUT merging
     state: str = ""  # OPEN / CLOSED / MERGED
     last_activity: str = ""  # ISO timestamp of newest comment/review, "" if none
+    updated_at: str = ""  # ISO timestamp of ANY change to the PR
 
 
 def _gh_runner_default(args: list[str], cwd: str | None = None) -> str:
@@ -294,7 +296,8 @@ def pr_status(pr_url: str, runner=None) -> PRStatus:
     """Merged? And when did a human last touch it (comment/review)?"""
     run = runner or _gh_runner_default
     out = run(
-        ["gh", "pr", "view", pr_url, "--json", "state,mergedAt,comments,reviews"], None
+        ["gh", "pr", "view", pr_url, "--json",
+         "state,mergedAt,comments,reviews,updatedAt"], None
     )
     data = json.loads(out)
     stamps: list[str] = []
@@ -306,8 +309,11 @@ def pr_status(pr_url: str, runner=None) -> PRStatus:
         submitted = item.get("submittedAt")
         if isinstance(submitted, str):
             stamps.append(submitted)
+    merged = bool(data.get("mergedAt")) or data.get("state") == "MERGED"
     return PRStatus(
-        merged=bool(data.get("mergedAt")) or data.get("state") == "MERGED",
+        merged=merged,
+        closed=(data.get("state") == "CLOSED") and not merged,
         state=str(data.get("state", "")),
         last_activity=max(stamps) if stamps else "",
+        updated_at=str(data.get("updatedAt") or ""),
     )

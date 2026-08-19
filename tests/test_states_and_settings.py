@@ -631,3 +631,41 @@ class TestDiffMode:
         assert Store.load(store.path).get_setting("diff_mode") == "uncommitted"
         store.set_setting("diff_mode", 5)  # wrong type ignored
         assert store.get_setting("diff_mode") == "uncommitted"
+
+
+async def test_pr_poll_reacts_to_close_and_any_update(world):
+    app, store, tmux = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        # closed without merge -> re-alert as "pr closed"
+        store.set_waiting(SID1, "2026-08-19T10:00:00+00:00", "https://x/pull/1")
+        app.gh_runner = lambda args, cwd=None: (
+            '{"state": "CLOSED", "mergedAt": null, "comments": [], "reviews": [],'
+            ' "updatedAt": "2026-08-19T09:00:00+00:00"}'
+        )
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        tracked = store.sessions[SID1]
+        assert tracked.waiting_since == "" and tracked.external_update == "pr closed"
+
+        # any other change (e.g. pushed commits): updatedAt newer -> "pr updated"
+        store.set_waiting(SID1, "2026-08-19T11:00:00+00:00", "https://x/pull/1")
+        app.gh_runner = lambda args, cwd=None: (
+            '{"state": "OPEN", "mergedAt": null, "comments": [], "reviews": [],'
+            ' "updatedAt": "2026-08-19T12:00:00+00:00"}'
+        )
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        tracked = store.sessions[SID1]
+        assert tracked.waiting_since == "" and tracked.external_update == "pr updated"
+        assert app.snapshot.by_id(SID1).state_detail == "pr updated"
+
+        # no change at all -> stays parked
+        store.set_waiting(SID1, "2026-08-19T13:00:00+00:00", "https://x/pull/1")
+        app.gh_runner = lambda args, cwd=None: (
+            '{"state": "OPEN", "mergedAt": null, "comments": [], "reviews": [],'
+            ' "updatedAt": "2026-08-19T12:00:00+00:00"}'
+        )
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].waiting_since != ""

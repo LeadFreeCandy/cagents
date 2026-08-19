@@ -759,21 +759,28 @@ exec {real!r} "$@"
                 status = gitops.pr_status(tracked.waiting_pr, runner=self.gh_runner)
             except Exception:
                 continue  # transient gh failure; try again next poll
+            short = tracked.label or tracked.session_id[:8]
             if status.merged:
                 self.store.mark_reviewed(tracked.session_id, utcnow().isoformat())
                 self.store.clear_waiting(tracked.session_id, external_update="merged")
                 changed = True
-                self._desktop_note(
-                    f"PR merged — {tracked.label or tracked.session_id[:8]} is done",
-                    tracked.session_id,
-                )
+                self._desktop_note(f"PR merged — {short} is done", tracked.session_id)
+            elif status.closed:
+                # Closed without merging: waiting would never resolve — re-alert.
+                self.store.clear_waiting(tracked.session_id, external_update="pr closed")
+                changed = True
+                self._desktop_note(f"PR closed — {short} needs review", tracked.session_id)
             elif status.last_activity and status.last_activity > tracked.waiting_since:
                 self.store.clear_waiting(tracked.session_id, external_update="github comments")
                 changed = True
                 self._desktop_note(
-                    f"New PR activity — {tracked.label or tracked.session_id[:8]} needs review",
-                    tracked.session_id,
+                    f"New PR activity — {short} needs review", tracked.session_id
                 )
+            elif status.updated_at and status.updated_at > tracked.waiting_since:
+                # ANY other change (pushed commits, labels, edits, base change…)
+                self.store.clear_waiting(tracked.session_id, external_update="pr updated")
+                changed = True
+                self._desktop_note(f"PR updated — {short} needs review", tracked.session_id)
         if changed:
             self.call_from_thread(self.refresh_data)
 
