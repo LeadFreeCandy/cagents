@@ -164,14 +164,44 @@ class TestTmuxMapping:
         mapping = map_tmux_sessions([(_tracked(), parsed)], [_tmux(created=now - 3600)])
         assert mapping == {}
 
-    def test_two_sessions_same_dir_newest_claims_it(self, claude_dir: Path, now: float):
+    def test_two_sessions_same_dir_without_content_signal_refuses_to_guess(
+        self, claude_dir: Path, now: float
+    ):
+        # Regression (found live, on a real shared apm_bundle checkout: 4
+        # tmux panes and several tracked sessions all sharing the exact
+        # same project_dir): tier 2 used to just hand the pane to whichever
+        # tracked session had the newest transcript mtime, with zero check
+        # that the pane was actually showing *that* conversation — a real
+        # session's row ended up titled for one PR while the live pane
+        # attached to it was an unrelated old conversation. Newest-mtime
+        # is a guess, not a match; with no pane text to verify against, it
+        # must refuse rather than wrongly attach.
         b1 = TranscriptBuilder(SID1, "/proj/alpha").user("old")
         p1 = parse_session_file(b1.write(claude_dir, mtime=now - 500))
         b2 = TranscriptBuilder(SID2, "/proj/alpha").user("new")
         p2 = parse_session_file(b2.write(claude_dir, mtime=now - 5))
         pairs = [(_tracked(SID1), p1), (_tracked(SID2), p2)]
         mapping = map_tmux_sessions(pairs, [_tmux(created=now - 600)])
-        assert set(mapping) == {SID2}
+        assert mapping == {}
+
+    def test_two_sessions_same_dir_content_verification_picks_the_right_one(
+        self, claude_dir: Path, now: float
+    ):
+        # Same setup as above, but now the pane's actual content is
+        # available — must correctly identify SID1 as the real occupant
+        # even though SID2 has the newer transcript mtime.
+        b1 = TranscriptBuilder(SID1, "/proj/alpha").user("old")
+        b1.assistant_text("The packets redesign is ready for review.")
+        p1 = parse_session_file(b1.write(claude_dir, mtime=now - 500))
+        b2 = TranscriptBuilder(SID2, "/proj/alpha").user("new")
+        b2.assistant_text("Saved your token to the env file.")
+        p2 = parse_session_file(b2.write(claude_dir, mtime=now - 5))
+        pairs = [(_tracked(SID1), p1), (_tracked(SID2), p2)]
+        tmux = _tmux(created=now - 600)
+        pane = "…\n  The packets redesign\nis ready for review.\n❯ "
+        mapping = map_tmux_sessions(pairs, [tmux], pane_text_fn=lambda t: pane)
+        assert set(mapping) == {SID1}
+        assert mapping[SID1].name == tmux.name
 
     def test_pane_in_ancestor_dir_matches_with_content(self, claude_dir: Path, now: float):
         # `claude` launched from $HOME, session working in a project subdir.
@@ -221,7 +251,10 @@ class TestTmuxMapping:
         # SID2 matches /home/u exactly, so it wins despite being older.
         assert set(mapping) == {SID2}
 
-    def test_two_tmux_two_sessions_same_dir(self, claude_dir: Path, now: float):
+    def test_two_tmux_two_sessions_same_dir_without_content_refuses_both(
+        self, claude_dir: Path, now: float
+    ):
+        # No way to tell which pane is which -> neither gets guessed.
         p1 = parse_session_file(
             TranscriptBuilder(SID1, "/proj/alpha").user("old").write(claude_dir, mtime=now - 50)
         )
@@ -234,8 +267,36 @@ class TestTmuxMapping:
             _tmux(name="alpha-2", created=now - 100),
         ]
         mapping = map_tmux_sessions(pairs, tmuxes)
+        assert mapping == {}
+
+    def test_two_tmux_two_sessions_same_dir_content_verification_pairs_correctly(
+        self, claude_dir: Path, now: float
+    ):
+        # The exact live scenario this was found in: several tracked
+        # sessions and several live panes all sharing one shared,
+        # non-worktree checkout's directory. Each pane's real content
+        # must route to its actual tracked session, never swapped.
+        p1 = parse_session_file(
+            TranscriptBuilder(SID1, "/proj/alpha").user("old")
+            .assistant_text("The packets redesign is ready for review.")
+            .write(claude_dir, mtime=now - 50)
+        )
+        p2 = parse_session_file(
+            TranscriptBuilder(SID2, "/proj/alpha").user("new")
+            .assistant_text("Saved your token to the env file.")
+            .write(claude_dir, mtime=now - 5)
+        )
+        pairs = [(_tracked(SID1), p1), (_tracked(SID2), p2)]
+        alpha = _tmux(name="alpha", created=now - 100)
+        alpha2 = _tmux(name="alpha-2", created=now - 100)
+        pane_text = {
+            alpha.name: "…\n  Saved your token\nto the env file.\n❯ ",
+            alpha2.name: "…\n  The packets redesign\nis ready for review.\n❯ ",
+        }
+        mapping = map_tmux_sessions(pairs, [alpha, alpha2], pane_text_fn=lambda t: pane_text[t.name])
         assert set(mapping) == {SID1, SID2}
-        assert mapping[SID1].name != mapping[SID2].name
+        assert mapping[SID1].name == "alpha-2"  # the one actually showing the packets text
+        assert mapping[SID2].name == "alpha"  # the one actually showing the token text
 
 
 class TestRegistry:

@@ -46,6 +46,8 @@ from .notifier import notify_desktop, read_select_request
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import (
+    CONTAINER_SOCKET,
+    WORK_SOCKET,
     Sidecar,
     apply_ctx_binds,
     apply_left_capture,
@@ -186,6 +188,33 @@ class CagentsApp(App):
                 )
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")
+
+    def action_quit(self) -> None:
+        """`q` from inside the container must actually return the user to
+        their real shell.
+
+        Textual's default action_quit just exits this process — but this
+        process is itself pane 0 of the container session. Exiting it
+        alone kills only that pane; the tabbed workspace (WORK_SOCKET) and
+        the container session (CONTAINER_SOCKET) it lived in don't close
+        with it, and tmux renumbers whatever pane/window is left into
+        slot 0 instead. The user is left staring at an orphaned,
+        app-less tmux session with no way to navigate it — exactly the
+        "q just closes the left window and leaves me in a buggy state"
+        bug. Tear down cagents' own scaffolding on the way out instead.
+        Real claude sessions live on an entirely separate socket
+        (cagents-sessions / claude) and are never touched here."""
+        if os.environ.get("CAGENTS_SIDECAR") == "1":
+            self._teardown_container()
+        self.exit()
+
+    def _teardown_container(self) -> None:
+        import subprocess
+
+        subprocess.run(["tmux", "-L", WORK_SOCKET, "kill-server"], capture_output=True)
+        # Killing this ends this process too (it's pane 0 on this very
+        # socket) — same as closing any terminal you're running in.
+        subprocess.run(["tmux", "-L", CONTAINER_SOCKET, "kill-server"], capture_output=True)
 
     def notify(self, message, *, title="", severity="information", timeout=None, **kwargs):
         """Routine toasts are opt-in (settings). Warnings and errors always

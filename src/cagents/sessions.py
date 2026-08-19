@@ -367,13 +367,22 @@ def map_tmux_sessions(
 
     Three tiers, strongest first:
     1. CAGENTS_SESSION_ID env var on the tmux session — exact.
-    2. Pane cwd == session cwd; newest qualifying transcript claims it.
+    2. Pane cwd == session cwd; newest qualifying transcript claims it —
+       *if* it's the only directory-matching candidate for that pane.
     3. Pane cwd is an *ancestor* of the session cwd — covers launching
-       `claude` from e.g. $HOME for a project deeper in the tree. Because
-       a parent directory can shelter many unrelated sessions, tier 3
-       additionally requires the pane to actually display text from the
-       transcript (content verification) — mapping the WRONG live session
-       is far worse than showing a live one as dead.
+       `claude` from e.g. $HOME for a project deeper in the tree.
+
+    Regression (found live, reproduced): a shared, non-worktree checkout
+    (several tracked sessions with the identical project_dir, several live
+    tmux panes with the identical pane cwd — routine for a repo people
+    don't always work in a dedicated worktree for) makes tier 2 exactly as
+    ambiguous as tier 3's "parent directory shelters many unrelated
+    sessions" case. So both tiers require the pane to actually display
+    text from the transcript (content verification) *whenever more than
+    one candidate matches* — newest-mtime-wins-by-default is a guess, and
+    mapping the WRONG live session is far worse than showing a live one as
+    dead. An unambiguous single-candidate match (the common case) still
+    needs no verification.
 
     In tiers 2–3 a transcript only qualifies if it was written after the
     tmux session was created (otherwise it's an older conversation that
@@ -406,8 +415,15 @@ def map_tmux_sessions(
                     continue
                 candidates.append((parsed.mtime, tracked.session_id))
             candidates.sort(reverse=True)
+            # More than one directory-matching candidate for this pane is
+            # exactly the "wrong live session" scenario tier 3 already
+            # guards against — a shared (non-worktree) checkout used by
+            # several tracked sessions hits this on tier 2 just as easily.
+            # Verify regardless of the tier once there's real ambiguity;
+            # newest-mtime-wins-by-default is a guess, not a match.
+            must_verify = verify_content or len(candidates) > 1
             for _mtime, sid in candidates:
-                if verify_content:
+                if must_verify:
                     if pane_text_fn is None:
                         continue
                     if not _content_match(parsed_by_id[sid], pane_text_fn(tmux)):

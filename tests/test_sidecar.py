@@ -382,3 +382,59 @@ def test_ensure_workspace_without_ctx_installs_no_hook():
     outer, work = FakeOuterTmux(), FakeWorkTmux()
     Sidecar(runner=outer, own_pane="%0", work_runner=work).ensure_workspace("/x")
     assert not any(c[0] == "set-hook" for c in work.calls)
+
+
+# --------------------------------------------------------- quit teardown ---
+
+
+class TestQuitTearsDownContainer:
+    """Regression: `q` used to just kill this app's own pane (it's pane 0
+    of the container session) and stop there. The tabbed workspace and
+    the rest of the container never closed with it, and tmux renumbered
+    whatever was left into slot 0 — the user was stranded in an orphaned,
+    app-less tmux session with no way to navigate it. `q` must tear down
+    cagents' own scaffolding on the way out, but ONLY when actually
+    running inside the dedicated container (CAGENTS_SIDECAR=1) — never
+    when merely split into the user's own separate tmux, where killing
+    a server would destroy unrelated windows that aren't cagents' to
+    touch. Real claude sessions live on an entirely separate socket and
+    are never touched either way."""
+
+    def _app(self, world) -> CagentsApp:
+        store, tmux, registry, claude_dir = world
+        return CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+
+    def test_teardown_kills_the_work_and_container_sockets_only(self, world):
+        import subprocess
+        from unittest import mock
+
+        from cagents.sidecar import CONTAINER_SOCKET, WORK_SOCKET
+
+        app = self._app(world)
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            app._teardown_container()
+
+        assert ["tmux", "-L", WORK_SOCKET, "kill-server"] in calls
+        assert ["tmux", "-L", CONTAINER_SOCKET, "kill-server"] in calls
+        # never anything mentioning the actual claude-session sockets
+        assert not any("claude" in a or "cagents-sessions" in a for c in calls for a in c)
+
+    def test_quit_tears_down_only_when_actually_inside_the_container(self, world, monkeypatch):
+        app = self._app(world)
+        torn_down = []
+        monkeypatch.setattr(app, "_teardown_container", lambda: torn_down.append(True))
+        monkeypatch.setattr(app, "exit", lambda *a, **k: None)
+
+        monkeypatch.delenv("CAGENTS_SIDECAR", raising=False)
+        app.action_quit()
+        assert torn_down == []  # split into the user's own tmux -> never touch it
+
+        monkeypatch.setenv("CAGENTS_SIDECAR", "1")
+        app.action_quit()
+        assert torn_down == [True]
