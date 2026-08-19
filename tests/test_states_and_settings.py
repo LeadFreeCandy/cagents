@@ -92,40 +92,89 @@ class TestNewStates:
     def _parse(self, claude_dir, builder):
         return parse_session_file(builder.write(claude_dir, mtime=time.time() - 300))
 
-    def test_monitor_ack_yields_monitoring(self, claude_dir, now):
+    def test_monitor_ack_yields_monitoring_until_expiry(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("watch the deploy")
         b.assistant_tool_use("t1", "Monitor", {"description": "watch deploy"})
-        b.raw_tool_result("t1", "Monitor started (task abc123, timeout 600000ms). "
-                                "You will be notified on each event.")
-        b.assistant_text("Watching the deploy now.", ts="2026-08-18T10:00:10.000Z")
+        b.raw_tool_result(
+            "t1",
+            "Monitor started (task abc123, timeout 600000ms). "
+            "You will be notified on each event.",
+            ts=ts_ago(60),
+        )
+        b.assistant_text("Watching the deploy now.", ts=ts_ago(55))
         parsed = self._parse(claude_dir, b)
-        assert parsed.monitor_active is True
+        assert parsed.monitor_running(now) is True
         state, detail = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.MONITORING
         assert "monitor" in detail.lower()
+        # ...and the timeout is a hard upper bound: expired -> plain review
+        assert parsed.monitor_running(now + 601) is False
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now + 601)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_monitor_survives_new_messages_but_not_timeout_notice(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("watch it")
+        b.assistant_tool_use("t1", "Monitor", {"description": "x"})
+        b.raw_tool_result(
+            "t1", "Monitor started (task mid42, timeout 900000ms).", ts=ts_ago(120)
+        )
+        # a NEW human exchange does not stop the monitor
+        b.user("also do this other thing", ts=ts_ago(100))
+        b.assistant_text("Done with the other thing.", ts=ts_ago(95))
+        parsed = self._parse(claude_dir, b)
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.MONITORING
+        # the terminal notification ends it
+        b.raw(
+            {"type": "queue-operation", "operation": "enqueue",
+             "timestamp": ts_ago(50), "sessionId": SID1,
+             "content": "<task-notification> <task-id>mid42</task-id> "
+                        "<summary>Monitor event</summary> "
+                        "<event>[Monitor timed out — re-arm if needed.]</event> "
+                        "</task-notification>"}
+        )
+        b.assistant_text("Noted the timeout.", ts=ts_ago(45))
+        parsed = self._parse(claude_dir, b)
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_REVIEW
 
     def test_background_ack_yields_background(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("run the long build")
         b.assistant_tool_use("t1", "Bash", {"command": "make", "run_in_background": True})
-        b.raw_tool_result("t1", "Command running in background with ID: bash_1. "
-                                "You will be notified when it completes.")
+        b.raw_tool_result("t1", "Command running in background with ID: bv49j5apt. "
+                                "Output is being written to: /tmp/x.output")
         b.assistant_text("Build started in the background.", ts="2026-08-18T10:00:10.000Z")
         parsed = self._parse(claude_dir, b)
         assert parsed.background_active is True
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.BACKGROUND
 
-    def test_new_human_message_resets_watches(self, claude_dir, now):
+    def test_background_survives_new_messages_until_completion(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
-        b.user("watch it")
-        b.assistant_tool_use("t1", "Monitor", {"description": "x"})
-        b.raw_tool_result("t1", "Monitor started (task z, timeout 1ms).")
-        b.user("actually, do something else", ts="2026-08-18T10:05:00.000Z")
-        b.assistant_text("Done with the new thing.", ts="2026-08-18T10:06:00.000Z")
+        b.user("run it")
+        b.assistant_tool_use("t1", "Bash", {"command": "make", "run_in_background": True})
+        b.raw_tool_result("t1", "Command running in background with ID: bv49j5apt. …")
+        # you message it, it responds — the shell is STILL running
+        b.user("quick question meanwhile", ts="2026-08-18T10:05:00.000Z")
+        b.assistant_text("Answer.", ts="2026-08-18T10:05:10.000Z")
         parsed = self._parse(claude_dir, b)
-        assert parsed.monitor_active is False
+        assert parsed.background_active is True
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.BACKGROUND  # not review!
+        # the completion notification ends it (real transcript format)
+        b.raw(
+            {"type": "queue-operation", "operation": "enqueue",
+             "timestamp": "2026-08-18T10:20:00.000Z", "sessionId": SID1,
+             "content": '<task-notification> <task-id>bv49j5apt</task-id> '
+                        '<status>completed</status> <summary>Background command '
+                        '"make" completed (exit code 0)</summary> </task-notification>'}
+        )
+        b.assistant_text("Build finished.", ts="2026-08-18T10:20:10.000Z")
+        parsed = self._parse(claude_dir, b)
+        assert parsed.background_active is False
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_REVIEW
 

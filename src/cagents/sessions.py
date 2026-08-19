@@ -188,7 +188,7 @@ def derive_from_events(
         message = str(events.get("message") or "waiting on you")
         return (SessionState.NEEDS_INPUT, message[:110])
     if t_stop == latest:
-        return _finished_state(parsed, tracked)
+        return _finished_state(parsed, tracked, now)
     return (SessionState.WORKING, _working_detail(parsed))
 
 
@@ -260,7 +260,7 @@ def derive_state(
         if parsed.last_record_role == "":
             # A live session with no conversation yet: it's waiting for you.
             return (SessionState.NEEDS_INPUT, "at the prompt")
-        return _finished_state(parsed, tracked)
+        return _finished_state(parsed, tracked, now)
 
     # Not live in any tmux we can see. If the transcript is being written
     # RIGHT NOW, some other host (e.g. cmux, a bare terminal) is running it:
@@ -272,10 +272,12 @@ def derive_state(
         return (SessionState.STOPPED, "ended mid-turn")
     if parsed.last_record_role == "":
         return (SessionState.STOPPED, "empty session")
-    return _finished_state(parsed, tracked)
+    return _finished_state(parsed, tracked, now)
 
 
-def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[SessionState, str]:
+def _finished_state(
+    parsed: ParsedSession, tracked: TrackedSession, now: float
+) -> tuple[SessionState, str]:
     reviewed = tracked.reviewed_datetime()
     last = parsed.last_timestamp
     if reviewed is not None and (last is None or reviewed >= last):
@@ -286,8 +288,10 @@ def _finished_state(parsed: ParsedSession, tracked: TrackedSession) -> tuple[Ses
         # Parked on the outside world; the PR poller resolves it. New local
         # activity makes the comparison fail -> back to needs-review.
         return (SessionState.WAITING_EXTERNAL, "waiting on PR")
-    # Fire-and-forget watches make an idle prompt "not really needs you".
-    if parsed.monitor_active:
+    # Long-lived side tasks make an idle prompt "not really needs you" —
+    # and they survive new messages: only their own completion/timeout
+    # (or, for monitors, the expiry deadline) ends them.
+    if parsed.monitor_running(now):
         return (SessionState.MONITORING, "Claude monitor active")
     if parsed.background_active:
         return (SessionState.BACKGROUND, "background task running")

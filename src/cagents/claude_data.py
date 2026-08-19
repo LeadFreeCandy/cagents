@@ -117,13 +117,19 @@ class ParsedSession:
     truncated: bool = False  # tail parse did not cover the whole file
     # First line of the newest assistant text — "what the agent last did/said".
     last_assistant_text: str = ""
-    # Fire-and-forget acks (verified against real transcripts): Claude's
-    # Monitor tool and backgrounded commands resolve IMMEDIATELY with a
-    # distinctive tool_result, then the turn just ends — so an idle prompt
-    # right after one is "watching"/"running things", not "needs you".
-    # Reset whenever the human says something new.
-    monitor_active: bool = False
-    background_active: bool = False
+    # Long-lived side tasks (lifecycle verified against real transcripts).
+    # A backgrounded command starts with a "running in background with
+    # ID: <id>" ack and ends with a <task-notification> carrying that
+    # <task-id> and a terminal <status>; a Monitor starts with
+    # "Monitor started (task <id>, timeout <N>ms)" and ends on its timeout
+    # notification — or, as a hard upper bound, when the timeout elapses.
+    # Sending a new message does NOT stop them, so nothing here resets on
+    # human input.
+    background_active: bool = False  # any background command still running
+    monitor_expiries: list[float] = field(default_factory=list)  # epoch deadlines
+
+    def monitor_running(self, now: float) -> bool:
+        return any(deadline > now for deadline in self.monitor_expiries)
     # Derived extras, all read straight from records Claude already writes:
     links: list[Link] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)  # ordered, deduped
@@ -183,6 +189,30 @@ def _iter_content_blocks(message: object):
                 yield block
 
 
+_BG_ACK = re.compile(r"running in background with ID:\s*(\S+?)\.?(?:\s|$)")
+_MONITOR_ACK = re.compile(r"Monitor started \(task (\S+), timeout (\d+)ms\)")
+_TASK_NOTIF_ID = re.compile(r"<task-id>(\S+)</task-id>")
+_TASK_TERMINAL = re.compile(r"<status>(?:completed|failed|killed)</status>")
+_MONITOR_TIMED_OUT = re.compile(r"\[Monitor timed out")
+
+
+def _scan_lifecycle(text: str, ts, active_background: dict, active_monitors: dict) -> None:
+    """Track long-lived side tasks through their transcript lifecycle."""
+    match = _BG_ACK.search(text)
+    if match:
+        active_background[match.group(1).rstrip(".")] = True
+    match = _MONITOR_ACK.search(text)
+    if match and ts is not None:
+        active_monitors[match.group(1)] = ts.timestamp() + int(match.group(2)) / 1000.0
+    match = _TASK_NOTIF_ID.search(text)
+    if match:
+        task_id = match.group(1)
+        if _TASK_TERMINAL.search(text):
+            active_background.pop(task_id, None)
+        if _MONITOR_TIMED_OUT.search(text):
+            active_monitors.pop(task_id, None)
+
+
 _SYSTEMISH_USER = re.compile(
     r"^\s*(<system-reminder>|<task-notification>|<local-command|<command-name>|\[Request interrupted)"
 )
@@ -237,6 +267,8 @@ def parse_session_file(
     seen_links: set[str] = set()
     seen_files: set[str] = set()
     background_tool_ids: set[str] = set()  # tool_use ids with run_in_background
+    active_background: dict[str, bool] = {}  # task id -> running
+    active_monitors: dict[str, float] = {}  # task id -> expiry epoch
 
     for line in lines:
         line = line.strip()
@@ -283,6 +315,15 @@ def parse_session_file(
                 parsed.links.append(link)
             continue
 
+        if rtype == "queue-operation":
+            content = record.get("content")
+            if isinstance(content, str):
+                _scan_lifecycle(
+                    content, _parse_ts(record.get("timestamp")),
+                    active_background, active_monitors,
+                )
+            continue
+
         if rtype == "system":
             agents = record.get("pendingBackgroundAgentCount")
             if isinstance(agents, int):
@@ -324,24 +365,20 @@ def parse_session_file(
                 if btype == "tool_result":
                     tool_id = block.get("tool_use_id")
                     if isinstance(tool_id, str):
-                        name = open_tool_uses.pop(tool_id, "")
-                        ack = _result_text(block)
-                        if name == "Monitor" and ack.startswith("Monitor started"):
-                            parsed.monitor_active = True
-                        if (
-                            tool_id in background_tool_ids
-                            or "running in background with ID" in ack
-                        ):
-                            parsed.background_active = True
+                        open_tool_uses.pop(tool_id, None)
+                        _scan_lifecycle(
+                            _result_text(block), ts, active_background, active_monitors
+                        )
                 elif btype == "text":
                     text = block.get("text", "")
-                    if isinstance(text, str) and text.strip() and not _SYSTEMISH_USER.match(text):
+                    if not isinstance(text, str):
+                        continue
+                    if _SYSTEMISH_USER.match(text):
+                        _scan_lifecycle(text, ts, active_background, active_monitors)
+                    elif text.strip():
                         if not fallback_title:
                             fallback_title = _first_line(text, 80)
                         preview.append(PreviewItem("user", text.strip(), ts))
-                        # A fresh human instruction supersedes old watches.
-                        parsed.monitor_active = False
-                        parsed.background_active = False
             continue
 
         # assistant
@@ -389,6 +426,9 @@ def parse_session_file(
 
     if not parsed.title:
         parsed.title = fallback_title or _first_line(last_prompt, 80) or parsed.session_id[:8]
+
+    parsed.background_active = bool(active_background)
+    parsed.monitor_expiries = sorted(active_monitors.values())
 
     if open_tool_uses:
         parsed.pending_tool_use = True

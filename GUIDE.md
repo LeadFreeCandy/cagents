@@ -67,8 +67,10 @@ popup diff and a split shell.
 - `◉ needs you` — a real dialog (permission/question) or idle at the prompt.
 - `◆ review` — finished, no human has looked. `d` marks **done** (toggle).
 - `◎ monitoring` / `◌ background` — idle, but Claude's own Monitor is watching /
-  a backgrounded command or agent is still running. Low priority: below review,
-  above working. Derived from the transcript's ack records; no keybind.
+  a backgrounded command is still running. Low priority: below review, above
+  working. Tracked through the tasks' real lifecycle: they persist across new
+  messages and only end when the task's completion/timeout notification lands
+  (monitors also expire at their declared timeout). No keybind.
 - `⧖ waiting` — you pressed `w`: done here, parked on its PR. Auto-found from the
   branch via `gh` (or you paste the URL). Polled every ~5 min: **new PR
   comments → back to `◆ review` marked "github comments"; merged → `✓ done`
