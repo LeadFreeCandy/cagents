@@ -249,9 +249,10 @@ async def test_send_review_resumes_dead_session(world, monkeypatch):
 class TestCtx:
     def test_context_roundtrip(self, tmp_path):
         path = tmp_path / "context.json"
-        write_context(path, "/proj/x", SID1, diff_mode="uncommitted")
+        write_context(path, "/proj/x", SID1, diff_mode="uncommitted", shim_dir="/data/bin")
         assert read_context(path) == {
             "dir": "/proj/x", "session_id": SID1, "diff_mode": "uncommitted",
+            "shim_dir": "/data/bin",
         }
         assert read_context(tmp_path / "missing.json") == {}
 
@@ -298,3 +299,89 @@ class TestShellPick:
                 shell_cmd=["/bin/sh", "-c", f"cd '{target}' && sleep 0.7"],
             )
             assert picked == str(target)
+
+
+class TestShellClaude:
+    """Typing `claude` in a cagents shell pulls the session into cagents."""
+
+    async def test_spawn_request_flow(self, world, tmp_path):
+        app, store, tmux = world
+        project = tmp_path / "typedhere"
+        project.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": str(project), "args": []})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.3)
+            # spawned with a fresh session id + hooks, in the typed cwd
+            directory, args, sid = tmux.created[-1]
+            assert directory == str(project)
+            assert "--session-id" in args and "--settings" in args
+            assert sid in store.sessions
+            assert app.selected_session_id == sid
+            assert not app._spawn_request_path().exists()  # consumed
+
+    async def test_spawn_request_resume_keeps_id(self, world, tmp_path):
+        app, store, tmux = world
+        project = tmp_path / "resumehere"
+        project.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": str(project), "args": ["--resume", SID2]})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.3)
+            directory, args, sid = tmux.created[-1]
+            assert sid == SID2  # explicit resume keeps its identity
+            assert "--session-id" not in args
+            assert SID2 in store.sessions
+
+    async def test_bad_directory_is_loud_and_consumed(self, world):
+        app, store, tmux = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": "/not/a/real/dir", "args": []})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.2)
+            assert tmux.created == []
+            assert not app._spawn_request_path().exists()
+
+    async def test_shim_script_contents(self, world):
+        app, store, tmux = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            shim = app._shim_dir() / "claude"
+            assert shim.exists()
+            import os as _os
+
+            assert _os.access(shim, _os.X_OK)
+            script = shim.read_text()
+            assert str(app._spawn_request_path()) in script
+            assert "exec" in script and "not responding" in script  # fallback path
+
+
+async def test_shift_n_opens_terminal_tab(world, tmp_path):
+    from conftest import FakeOuterTmux, FakeWorkTmux
+    from cagents.sidecar import Sidecar
+
+    app, store, tmux = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app.sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        work.calls.clear()
+        await pilot.press("N")
+        await pilot.pause()
+        assert ["select-window", "-t", "=work:term-1"] in work.calls
+        assert ["select-pane", "-t", "%1"] in outer.calls  # pane focused, tab untouched

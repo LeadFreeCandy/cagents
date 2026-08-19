@@ -43,6 +43,9 @@ The pane hosts three tabs (a clickable bar across its top), left to right:
   settings panel can switch it to uncommitted-only mode.
 - **term-1** — a persistent shell, started in your launch directory; it keeps its
   state across tab switches and is only recreated (in the session's dir) if it died.
+  **Typing `claude` here opens a managed cagents session in your cwd** — the shim
+  overrides your `claude` alias inside cagents shells only (via ZDOTDIR), so your
+  normal terminals are untouched.
 
 Opening a tab takes the whole pane — the conversation is hidden until you switch
 back (click the tab, or `enter` from the list).
@@ -92,7 +95,8 @@ popup diff and a split shell.
 | `o` | open the session's PR/artifact link — if none is recorded, prompts you to paste one (remembered for next time and for `w`) |
 | `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
 | `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association, fleet plans — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
-| `n` / `a` | new session (launch-dir default, tab completes/cycles, `ctrl+t` picks the dir in a real shell — zoxide works) / track existing |
+| `n` / `a` | new session via the dialog (launch-dir default, tab completes, `ctrl+t` shell-pick) / track existing |
+| `N` | **the shell way to start sessions**: jumps to the terminal tab. `cd`/`z`/`mkdir` around like always, then type `claude` — it opens as a managed cagents session in that directory (tracked, selected, session tab focused). `claude --resume <id>` works too. If cagents isn't running, the shim falls back to real claude |
 | `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
 | `:` | fleet assistant: plain English → a confirmed plan on cagents' bookkeeping |
 | `,` `?` `q` | settings / help / quit |

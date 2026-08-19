@@ -33,9 +33,13 @@ def read_context(path: Path) -> dict:
         return {}
 
 
-def write_context(path: Path, directory: str, session_id: str, diff_mode: str = "branch") -> None:
+def write_context(
+    path: Path, directory: str, session_id: str,
+    diff_mode: str = "branch", shim_dir: str = "",
+) -> None:
     payload = json.dumps(
-        {"dir": directory, "session_id": session_id, "diff_mode": diff_mode}
+        {"dir": directory, "session_id": session_id, "diff_mode": diff_mode,
+         "shim_dir": shim_dir}
     )
     try:
         path.write_text(payload, "utf-8")
@@ -97,18 +101,35 @@ def _display(message: str) -> None:
     _tmux("display-message", message)
 
 
-def do_shell(directory: str) -> int:
+def shim_path_env(shim_dir: str) -> list[str]:
+    """-e args putting the cagents `claude` shim first in shells: PATH for
+    plain shells, ZDOTDIR (sibling of the shim dir) so zsh overrides any
+    `claude` alias from the user's rc."""
+    import os
+
+    if not shim_dir:
+        return []
+    zdot = str(Path(shim_dir).parent / "zdot")
+    return [
+        "-e", f"PATH={shim_dir}:{os.environ.get('PATH', '')}",
+        "-e", f"ZDOTDIR={zdot}",
+    ]
+
+
+def do_shell(directory: str, shim_dir: str = "") -> int:
     if not directory or not Path(directory).is_dir():
         _display("cagents: no directory for the selected session")
         return 1
+    env = shim_path_env(shim_dir)
     if _workspace_alive():
         # Tab mode: the persistent terminal tab (recreate only if it died).
         if "term-1" not in _work_windows():
-            _work("new-window", "-d", "-t", "=work:", "-n", "term-1", "-c", directory)
+            _work("new-window", "-d", "-t", "=work:", "-n", "term-1",
+                  *env, "-c", directory)
         _work("select-window", "-t", "=work:term-1")
         _tmux("select-pane", "-t", ":.1")  # focus the workspace pane
         return 0
-    return _tmux("split-window", "-v", "-l", "12", "-c", directory)  # fullscreen fallback
+    return _tmux("split-window", "-v", "-l", "12", *env, "-c", directory)
 
 
 def diff_popup_command(directory: str, mode: str = "branch") -> str:
@@ -225,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     context = read_context(args.context)
     directory = str(context.get("dir", ""))
     if args.command == "shell":
-        return do_shell(directory)
+        return do_shell(directory, shim_dir=str(context.get("shim_dir", "")))
     return do_diff(
         directory, select=not args.no_select,
         mode=str(context.get("diff_mode", "branch")),

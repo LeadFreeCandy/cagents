@@ -331,8 +331,9 @@ HELP_TEXT = """\
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
-  n             start a new session — starts in your launch directory;
-                tab completes/cycles dirs · ctrl+t: pick the dir in a real shell (zoxide!)
+  n             new session dialog (launch dir default; tab completes; ctrl+t shell-pick)
+  N             the shell way: terminal tab -> cd/z/mkdir anywhere -> type "claude"
+                and it opens as a managed session right there
   a             track an existing session
   :             fleet assistant — plain English, proposes a plan, you confirm
   R             refresh now

@@ -35,6 +35,7 @@ class Sidecar:
         # server that holds the tabs. Both injectable for tests.
         self._run = runner or _outer_tmux
         self._work = work_runner or _work_tmux
+        self.term_env: list[str] = []  # -e PATH=... for terminal tabs (claude shim)
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
         self.pane_id: str = ""  # the viewer pane on the right
         self.current_command: str = ""  # what the session tab currently runs
@@ -57,11 +58,14 @@ class Sidecar:
     # switches because the windows never die with the view.
 
     def ensure_workspace(
-        self, terminal_dir: str = "", ctx_prog: str = "", context_path: str = ""
+        self, terminal_dir: str = "", ctx_prog: str = "", context_path: str = "",
+        shim_env: list[str] | None = None,
     ) -> None:
         """Create the work session + default tabs (idempotent), and make
         sure the right pane is attached to it. With ctx_prog given, clicking
         the diff tab rebuilds the diff (an after-select-window hook)."""
+        if shim_env is not None:
+            self.term_env = shim_env
         try:
             self._work(["has-session", "-t", "=work"])
         except RuntimeError:
@@ -70,6 +74,7 @@ class Sidecar:
             self._work(["new-window", "-d", "-t", "=work:", "-n", "diff",
                         _placeholder("C-d builds the diff for the selected session")])
             term_args = ["new-window", "-d", "-t", "=work:", "-n", "term-1"]
+            term_args += self.term_env
             if terminal_dir:
                 term_args += ["-c", terminal_dir]
             self._work(term_args)
@@ -126,6 +131,8 @@ class Sidecar:
         if name in windows:
             return
         args = ["new-window", "-d", "-t", "=work:", "-n", name]
+        if name.startswith("term"):
+            args += self.term_env
         if cwd:
             args += ["-c", cwd]
         if command:
@@ -161,6 +168,11 @@ class Sidecar:
     def focus_session(self) -> None:
         """Enter: the session tab, focused."""
         self.select_tab("session")
+        if self.pane_id:
+            self._run(["select-pane", "-t", self.pane_id])
+
+    def focus_pane(self) -> None:
+        """Focus the workspace pane without changing which tab is active."""
         if self.pane_id:
             self._run(["select-pane", "-t", self.pane_id])
 

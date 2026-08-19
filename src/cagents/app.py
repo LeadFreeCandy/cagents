@@ -94,6 +94,7 @@ class CagentsApp(App):
         Binding("h", "handoff", "Handoff"),
         Binding("D", "show_diff", "Diff"),
         Binding("n", "new_session", "New"),
+        Binding("N", "open_terminal", "Terminal", show=False),
         Binding("a", "track_session", "Track", show=False),
         Binding("1", "switch_view('queue')", "Queue", show=False),
         Binding("2", "switch_view('grouped')", "Grouped", show=False),
@@ -171,12 +172,17 @@ class CagentsApp(App):
                 apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
             except Exception as error:
                 self.notify(f"Container key setup failed: {error}", severity="warning")
+        try:
+            self._write_claude_shim()
+        except OSError as error:
+            self.notify(f"claude shim not written: {error}", severity="warning")
         if self.sidecar is not None:
             try:
                 self.sidecar.ensure_workspace(
                     os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd(),
                     ctx_prog=self._ctx_prog(),
                     context_path=str(self._context_path()),
+                    shim_env=self._shim_env(),
                 )
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")
@@ -237,6 +243,7 @@ class CagentsApp(App):
         self._update_preview()
         self._notify_transitions(snapshot)
         self._handle_select_request()
+        self._handle_spawn_request()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -307,6 +314,7 @@ class CagentsApp(App):
             write_context(
                 self._context_path(), view.work_dir, view.session_id,
                 diff_mode=str(self.store.get_setting("diff_mode")),
+                shim_dir=str(self._shim_dir()),
             )
 
     @staticmethod
@@ -491,6 +499,128 @@ class CagentsApp(App):
 
     def _events_dir(self) -> Path:
         return self.store.path.parent / "events"
+
+    def _spawn_request_path(self) -> Path:
+        return self.store.path.parent / "spawn-request.json"
+
+    def _shim_dir(self) -> Path:
+        return self.store.path.parent / "bin"
+
+    def _write_claude_shim(self) -> None:
+        """`claude` typed in a cagents shell becomes a managed session: the
+        shim files a spawn request that the app picks up within a refresh
+        (~2s), spawning it properly — tracked, hooked, auto-selected, session
+        tab focused. If cagents doesn't answer, it falls back to the real
+        claude so the shell never dead-ends."""
+        real = self._claude_bin() or "claude"
+        request = self._spawn_request_path()
+        shim = self._shim_dir() / "claude"
+        script = f"""#!/bin/bash
+# cagents shim — `claude` here opens a managed session in cagents.
+REQUEST={str(request)!r}
+python3 -c 'import json,sys; print(json.dumps({{"dir": sys.argv[1], "args": sys.argv[2:]}}))' \
+  "$PWD" "$@" > "$REQUEST.tmp" && mv "$REQUEST.tmp" "$REQUEST"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 0.4
+  [ ! -e "$REQUEST" ] && {{ echo "opened in cagents → session tab"; exit 0; }}
+done
+rm -f "$REQUEST"
+echo "cagents not responding — running claude directly"
+exec {real!r} "$@"
+"""
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_text(script, "utf-8")
+        shim.chmod(0o755)
+        self._write_zdot(shim)
+
+    def _write_zdot(self, shim: Path) -> None:
+        """zsh loads aliases from the user's rc AFTER any environment we
+        inject, and an `alias claude=...` (like the user's claude-tmux
+        wrapper) beats PATH resolution. The standard fix: a ZDOTDIR that
+        sources the real config, then overrides `claude` with a function."""
+        zdot = self.store.path.parent / "zdot"
+        zdot.mkdir(parents=True, exist_ok=True)
+        (zdot / ".zshenv").write_text(
+            '[ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"\n', "utf-8"
+        )
+        (zdot / ".zprofile").write_text(
+            '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"\n', "utf-8"
+        )
+        (zdot / ".zshrc").write_text(
+            '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n'
+            "unalias claude 2>/dev/null\n"
+            f'claude() {{ "{shim}" "$@" }}\n', "utf-8"
+        )
+
+    def _shim_env(self) -> list[str]:
+        return [
+            "-e", f"PATH={self._shim_dir()}:{os.environ.get('PATH', '')}",
+            "-e", f"ZDOTDIR={self.store.path.parent / 'zdot'}",
+        ]
+
+    def _handle_spawn_request(self) -> None:
+        """A cagents shell typed `claude` — spawn it for real."""
+        import json as _json
+
+        request = self._spawn_request_path()
+        try:
+            payload = _json.loads(request.read_text("utf-8"))
+        except (OSError, _json.JSONDecodeError):
+            return
+        try:
+            request.unlink()
+        except OSError:
+            pass
+        directory = str(payload.get("dir", ""))
+        args = [str(a) for a in payload.get("args", [])]
+        if not directory or not Path(directory).is_dir():
+            self.notify(f"Shell claude: bad directory {directory!r}", severity="error")
+            return
+        # An explicit resume keeps its id; anything else gets a fresh one.
+        session_id = ""
+        if "--resume" in args:
+            candidate = args[args.index("--resume") + 1] if args.index("--resume") + 1 < len(args) else ""
+            if len(candidate) == 36:
+                session_id = candidate
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            args = args + ["--session-id", session_id]
+        try:
+            name = self._spawn_session(directory, args, session_id)
+        except Exception as error:
+            self.notify(f"Shell claude failed: {error}", severity="error", timeout=10)
+            return
+        self._checkpoint("new session")
+        self.store.track(session_id, directory, utcnow().isoformat())
+        self.selected_session_id = session_id
+        self._pending_highlight = session_id
+        self._show_new_session(name)
+        self.notify("Session opened from the shell.")
+        self.refresh_data()
+
+    def action_open_terminal(self) -> None:
+        """N: give me the shell — the terminal tab, focused. cd around,
+        type `claude`, and it lands back here."""
+        view = self.selected_view()
+        directory = ""
+        if view and Path(view.work_dir).is_dir():
+            directory = view.work_dir
+        else:
+            directory = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
+        if self.sidecar is not None and self.store.get_setting("sidebar"):
+            try:
+                self.sidecar.open_terminal_tab(directory)
+                self.sidecar.focus_pane()
+            except Exception as error:
+                self.notify(f"Terminal failed: {error}", severity="error")
+        else:
+            shell = os.environ.get("SHELL", "/bin/zsh")
+            env = os.environ.copy()
+            env["PATH"] = f"{self._shim_dir()}:{env.get('PATH', '')}"
+            env["ZDOTDIR"] = str(self.store.path.parent / "zdot")
+            self._suspend_and_run(
+                lambda: __import__("subprocess").run([shell, "-i"], cwd=directory, env=env)
+            )
 
     def _hook_args(self, session_id: str) -> list[str]:
         """--settings JSON wiring Claude Code's own hooks to stamp this
