@@ -534,10 +534,11 @@ exec {real!r} "$@"
         self._write_zdot(shim)
 
     def _write_zdot(self, shim: Path) -> None:
-        """zsh loads aliases from the user's rc AFTER any environment we
-        inject, and an `alias claude=...` (like the user's claude-tmux
-        wrapper) beats PATH resolution. The standard fix: a ZDOTDIR that
-        sources the real config, then overrides `claude` with a function."""
+        """The scoped `claude` override for zsh: rc files run AFTER any
+        environment we inject and typically prepend their own PATH entries
+        (defeating a plain PATH shim), so a ZDOTDIR sources the real config
+        and then defines `claude` as a function. Applies ONLY to shells
+        cagents creates — regular terminals are untouched."""
         zdot = self.store.path.parent / "zdot"
         zdot.mkdir(parents=True, exist_ok=True)
         (zdot / ".zshenv").write_text(
