@@ -89,10 +89,10 @@ popup diff and a split shell.
 | `h` | handoff: the old session writes a spec (on a throwaway fork), a fresh session starts on it, the old one is marked done (`d` restores) |
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |
-| `o` | open the newest recorded PR/artifact link |
+| `o` | open the session's PR/artifact link — if none is recorded, prompts you to paste one (remembered for next time and for `w`) |
 | `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
 | `n` / `a` | new session (launch-dir default, tab completes/cycles, `ctrl+t` picks the dir in a real shell — zoxide works) / track existing |
-| `1 2 3` `tab` | grouped / queue / kanban (←/→ move kanban columns) |
+| `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
 | `:` | fleet assistant: plain English → a confirmed plan on cagents' bookkeeping |
 | `,` `?` `q` | settings / help / quit |
 

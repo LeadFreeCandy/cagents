@@ -73,6 +73,7 @@ class TrackedSession:
     # activity; resolved by the PR poller (comments -> re-alert, merge -> done).
     waiting_since: str = ""  # ISO 8601
     waiting_pr: str = ""  # PR url the wait is tied to
+    pr_url: str = ""  # manually associated PR (o / w prompt when none recorded)
     external_update: str = ""  # last poller verdict: "github comments" | "merged"
     # Lineage (spec §9's "lightweight relationships").
     parent_id: str = ""
@@ -93,6 +94,7 @@ class TrackedSession:
             "archived": self.archived,
             "waiting_since": self.waiting_since,
             "waiting_pr": self.waiting_pr,
+            "pr_url": self.pr_url,
             "external_update": self.external_update,
             "parent_id": self.parent_id,
             "relation": self.relation,
@@ -109,6 +111,7 @@ class TrackedSession:
             archived=bool(data.get("archived", False)),
             waiting_since=str(data.get("waiting_since", "")),
             waiting_pr=str(data.get("waiting_pr", "")),
+            pr_url=str(data.get("pr_url", "")),
             external_update=str(data.get("external_update", "")),
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
@@ -204,6 +207,12 @@ class Store:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
             tracked.label = label
+            self.save()
+
+    def set_pr_url(self, session_id: str, url: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.pr_url = url
             self.save()
 
     def set_archived(self, session_id: str, archived: bool) -> None:

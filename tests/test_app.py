@@ -59,12 +59,12 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
     return app, store, tmux, claude_dir
 
 
-async def test_startup_shows_grouped_sessions(world):
+async def test_startup_shows_queue_default(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        # Always starts on the grouped view, no persisted view state exists.
-        assert app.active_view_id == "grouped"
+        # View 1 = queue is the default; no persisted view state exists.
+        assert app.active_view_id == "queue"
         assert app.snapshot.views and len(app.snapshot.views) == 3
         by_id = {v.session_id: v for v in app.snapshot.views}
         assert by_id[SID2].state == SessionState.WORKING
@@ -96,17 +96,19 @@ async def test_view_switching_cycles_three_views(world):
     app, *_ = world
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
-        assert app.active_view_id == "grouped"
+        assert app.active_view_id == "queue"  # 1 = queue, the default
         await pilot.press("2")
         await pilot.pause()
-        assert app.active_view_id == "queue"
-        assert app.query_one("#queue-list", SessionList).option_count == 3
+        assert app.active_view_id == "grouped"
         await pilot.press("3")
         await pilot.pause()
         assert app.active_view_id == "kanban"
         await pilot.press("tab")
         await pilot.pause()
-        assert app.active_view_id == "grouped"
+        assert app.active_view_id == "queue"
+        await pilot.press("1")
+        await pilot.pause()
+        assert app.active_view_id == "queue"
 
 
 async def test_queue_orders_by_attention(world):
@@ -348,3 +350,52 @@ async def test_empty_store_shows_hint(claude_dir, tmp_path):
         grouped = app.query_one("#grouped-list", SessionList)
         assert grouped.option_count == 1
         assert grouped.get_option_at_index(0).disabled
+
+
+async def test_new_session_is_selected_and_previewed(world, tmp_path, monkeypatch):
+    app, store, tmux, _ = world
+    launch = tmp_path / "newproj"
+    launch.mkdir()
+    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(launch))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)  # somewhere else first
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.3)  # spawn + refresh + pending highlight
+        _, _, new_id = tmux.created[-1]
+        # the list highlight moved to the new session -> it drives the preview
+        assert app.selected_session_id == new_id
+        listing = app.query_one(f"#{app.active_view_id}-list", SessionList)
+        assert listing.highlighted_session_id == new_id
+        # ...and it survives another refresh (highlight is real, not transient)
+        app.refresh_data()
+        await pilot.pause(0.2)
+        assert app.selected_session_id == new_id
+
+
+async def test_open_link_prompts_to_associate_pr(world):
+    app, store, tmux, _ = world
+    opened = []
+    app._open_url = lambda url, label: opened.append(url)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)  # no links recorded
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        from cagents.modals import InputModal
+
+        assert isinstance(app.screen, InputModal)  # prompted instead of warning
+        await pilot.press(*"https://github.com/o/r/pull/5")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert store.sessions[SID1].pr_url == "https://github.com/o/r/pull/5"
+        assert opened == ["https://github.com/o/r/pull/5"]  # opened right away
+        # next time, o opens it directly — no prompt
+        await pilot.press("o")
+        await pilot.pause()
+        assert not isinstance(app.screen, InputModal)
+        assert opened[-1] == "https://github.com/o/r/pull/5"

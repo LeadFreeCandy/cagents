@@ -61,7 +61,7 @@ VIEWER_DEBOUNCE = 0.25  # settle time before the viewer follows the highlight
 PR_POLL_SECONDS = 300.0
 COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 
-VIEW_IDS = ["grouped", "queue", "kanban"]
+VIEW_IDS = ["queue", "grouped", "kanban"]
 
 ALERT_STATES = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
 
@@ -95,8 +95,8 @@ class CagentsApp(App):
         Binding("D", "show_diff", "Diff"),
         Binding("n", "new_session", "New"),
         Binding("a", "track_session", "Track", show=False),
-        Binding("1", "switch_view('grouped')", "Grouped", show=False),
-        Binding("2", "switch_view('queue')", "Queue", show=False),
+        Binding("1", "switch_view('queue')", "Queue", show=False),
+        Binding("2", "switch_view('grouped')", "Grouped", show=False),
         Binding("3", "switch_view('kanban')", "Kanban", show=False),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("right", "grow_session", "Grow session", show=False),
@@ -132,22 +132,23 @@ class CagentsApp(App):
         self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.snapshot = Snapshot()
-        self.active_view_id = "grouped"
+        self.active_view_id = "queue"
         self.selected_session_id: str | None = None
         self.compact = False
         self._prev_states: dict[str, SessionState] = {}
         self._seen_first_snapshot = False
         self._viewer_timer = None
         self._viewer_target: str = ""
+        self._pending_highlight: str | None = None
 
     # -- layout --------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Static(id="summary")
         with Horizontal(id="body"):
-            with ContentSwitcher(initial="grouped", id="views"):
-                yield GroupedView(id="grouped")
+            with ContentSwitcher(initial="queue", id="views"):
                 yield QueueView(id="queue")
+                yield GroupedView(id="grouped")
                 yield KanbanView(id="kanban")
             with VerticalScroll(id="preview-pane"):
                 yield Static(id="preview-content")
@@ -161,7 +162,7 @@ class CagentsApp(App):
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
-        self.query_one("#grouped", GroupedView).focus_list()
+        self.query_one("#queue", QueueView).focus_list()
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
                 apply_left_capture(bool(self.store.get_setting("capture_left")))
@@ -224,6 +225,13 @@ class CagentsApp(App):
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
+        if self._pending_highlight and snapshot.by_id(self._pending_highlight):
+            # A session we just created/tracked: select it in the list so
+            # the viewer previews it (selection follows the highlight).
+            if self.active_view_id == "kanban":
+                self.action_switch_view("queue")
+            self._highlight_session(self._pending_highlight)
+            self._pending_highlight = None
         self._update_preview()
         self._notify_transitions(snapshot)
         self._handle_select_request()
@@ -543,13 +551,16 @@ class CagentsApp(App):
         if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
             self.notify("Still in flight — park it once Claude is finished.", severity="warning")
             return
-        # Prefer a PR the session itself recorded; else look one up; else ask.
+        # Prefer a PR the session itself recorded; else the manual
+        # association; else look one up; else ask.
         recorded = ""
         if view.parsed:
             for link in reversed(view.parsed.links):
                 if link.kind == "pr" and link.url:
                     recorded = link.url
                     break
+        if not recorded:
+            recorded = view.tracked.pr_url
         if recorded:
             self._set_waiting(view.session_id, recorded)
         else:
@@ -573,6 +584,7 @@ class CagentsApp(App):
     def _waiting_pr_entered(self, session_id: str, text: str | None) -> None:
         if not text or not text.strip():
             return
+        self.store.set_pr_url(session_id, text.strip())  # remember for o / next time
         self._set_waiting(session_id, text.strip())
 
     def _set_waiting(self, session_id: str, pr_url: str) -> None:
@@ -696,6 +708,7 @@ class CagentsApp(App):
             parent_id=source_id, relation="fork",
         )
         self.selected_session_id = new_id
+        self._pending_highlight = new_id
         self._show_new_session(name)
         self._send_prompt_later(name, prompt, "Forked — prompt sent to the new session.")
         self.refresh_data()
@@ -776,6 +789,7 @@ class CagentsApp(App):
         # The predecessor is done — restore anytime with d.
         self.store.mark_reviewed(source_id, utcnow().isoformat())
         self.selected_session_id = new_id
+        self._pending_highlight = new_id
         self._show_new_session(name)
         self._send_prompt_later(
             name, first_message(spec, prompt),
@@ -907,6 +921,7 @@ class CagentsApp(App):
             return
         self.store.track(session_id, directory, utcnow().isoformat(), label=label)
         self.selected_session_id = session_id
+        self._pending_highlight = session_id
         self._show_new_session(name)
         self.refresh_data()
 
@@ -945,6 +960,7 @@ class CagentsApp(App):
         cwd = getattr(self, "_track_cwds", {}).get(session_id, "")
         self.store.track(session_id, cwd or str(Path.home()), utcnow().isoformat())
         self.selected_session_id = session_id
+        self._pending_highlight = session_id
         self.refresh_data()
         self.notify("Session tracked.")
 
@@ -990,17 +1006,42 @@ class CagentsApp(App):
 
     def action_open_link(self) -> None:
         view = self.selected_view()
-        if view is None or not view.parsed or not view.parsed.links:
-            self.notify("No links recorded for this session.", severity="warning")
+        if view is None:
             return
-        link = view.parsed.links[-1]
+        url, label = "", "link"
+        if view.parsed and view.parsed.links:
+            link = view.parsed.links[-1]
+            url, label = link.url, link.label
+        elif view.tracked.pr_url:
+            url, label = view.tracked.pr_url, "PR"
+        if not url:
+            self.push_screen(
+                InputModal(
+                    "No PR recorded for this session — paste one to associate",
+                    placeholder="https://github.com/owner/repo/pull/123",
+                ),
+                lambda text: self._pr_associated(view.session_id, text, open_after=True),
+            )
+            return
+        self._open_url(url, label)
+
+    def _open_url(self, url: str, label: str) -> None:
         import subprocess
 
         try:
-            subprocess.run(["open", link.url], check=True, timeout=10)
-            self.notify(f"Opened {link.label}.")
+            subprocess.run(["open", url], check=True, timeout=10)
+            self.notify(f"Opened {label}.")
         except Exception as error:
-            self.notify(f"Could not open {link.label}: {error}", severity="error")
+            self.notify(f"Could not open {label}: {error}", severity="error")
+
+    def _pr_associated(self, session_id: str, text: str | None, open_after: bool = False) -> None:
+        if not text or not text.strip():
+            return
+        url = text.strip()
+        self.store.set_pr_url(session_id, url)
+        if open_after:
+            self._open_url(url, "PR")
+        self.refresh_data()
 
     def action_palette(self) -> None:
         self.push_screen(PaletteModal(), self._palette_submitted)
