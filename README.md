@@ -5,6 +5,43 @@ owns visibility and human review state. See `SPEC.md` for what this must do and 
 file describes what's actually implemented. `OPEN_QUESTIONS.md` records where the
 implementation makes judgment calls.
 
+## Install
+
+Requirements (mandatory):
+
+- **macOS** with **tmux** ≥ 3.2 and **git** — sessions live in tmux; cagents is a tmux supervisor.
+- **Python 3.10+**.
+- **Claude Code CLI** (`claude`) on your PATH.
+- **terminal-notifier** — desktop notifications (on by default). Without it cagents falls
+  back to `osascript`, which is unreliable, unbranded, and can't do click-to-select:
+
+  ```sh
+  brew install terminal-notifier
+  ```
+
+  macOS asks for notification permission the first time one fires; if you miss the prompt,
+  allow it under **System Settings → Notifications → terminal-notifier**.
+
+Optional, used automatically when present:
+
+- **gh** (GitHub CLI, authenticated) — PR association (`o`) and the waiting-on-PR watcher (`w`).
+- **lazygit** — the diff tab becomes a real interactive diff viewer instead of a pager.
+- **zoxide** — smarter directory jumps in the new-session shell-pick (`ctrl+o`).
+
+Setup:
+
+```sh
+git clone https://github.com/LeadFreeCandy/cagents.git
+cd cagents
+python3 -m venv .venv
+.venv/bin/pip install -e .
+ln -s "$PWD/.venv/bin/cagents" ~/.local/bin/cagents   # or anywhere on your PATH
+```
+
+Then run `cagents` from a terminal (inside or outside tmux — it builds its own tmux
+container either way). Settings live in the in-app panel (`,`); desktop notifications can
+be toggled there.
+
 ## What it does
 
 - Shows the Claude Code sessions **you chose to track** — never everything on the machine.

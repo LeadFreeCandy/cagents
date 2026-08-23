@@ -49,8 +49,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # scan can be slow across many/large transcripts.
     "conversation_search": False,
     # macOS notification when a session starts needing you; clicking it
-    # selects the task in the list.
-    "desktop_notifications": False,
+    # selects the task in the list. On by default — terminal-notifier is a
+    # documented install step (README), and a one-time in-app warning covers
+    # the case where it's missing.
+    "desktop_notifications": True,
     # What the diff tab shows. "branch": this worktree vs master
     # (merge-base, committed + uncommitted). "uncommitted": vs HEAD only.
     "diff_mode": "branch",

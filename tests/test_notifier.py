@@ -84,3 +84,15 @@ def test_osascript_fallback_when_terminal_notifier_absent(tmp_path: Path, monkey
         notify_desktop("cagents", "hi", "sid123", tmp_path, tn_bin="")
     args = run.call_args[0][0]
     assert args[0] == "osascript"  # no click/activate support without terminal-notifier
+
+
+def test_bundle_id_prefers_launcher_stash_over_tmux(monkeypatch):
+    """Inside the container TERM_PROGRAM is 'tmux'; the launcher's
+    CAGENTS_TERM_PROGRAM must win so branding/click-activate still work."""
+    from cagents.notifier import _terminal_bundle_id
+
+    monkeypatch.setenv("TERM_PROGRAM", "tmux")
+    monkeypatch.setenv("CAGENTS_TERM_PROGRAM", "ghostty")
+    assert _terminal_bundle_id() == "com.mitchellh.ghostty"
+    monkeypatch.delenv("CAGENTS_TERM_PROGRAM")
+    assert _terminal_bundle_id() is None

@@ -435,10 +435,11 @@ def self_command(argv: list[str]) -> str:
 
     parts = program_invocation(argv)
     launch_cwd = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
-    return (
-        f"CAGENTS_SIDECAR=1 CAGENTS_LAUNCH_CWD={shlex.quote(launch_cwd)} "
-        + " ".join(shlex.quote(p) for p in parts)
-    )
+    term = os.environ.get("CAGENTS_TERM_PROGRAM", "")
+    env = f"CAGENTS_SIDECAR=1 CAGENTS_LAUNCH_CWD={shlex.quote(launch_cwd)} "
+    if term:
+        env += f"CAGENTS_TERM_PROGRAM={shlex.quote(term)} "
+    return env + " ".join(shlex.quote(p) for p in parts)
 
 
 def _container_is_healthy(tmux: list[str]) -> bool:

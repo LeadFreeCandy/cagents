@@ -65,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     # Remember where the user actually launched from — new sessions default
     # here, and the container re-exec must not lose it.
     os.environ.setdefault("CAGENTS_LAUNCH_CWD", os.getcwd())
+    # Remember the real terminal app before tmux overwrites TERM_PROGRAM with
+    # "tmux" inside the container — the notifier needs it for branding and
+    # click-to-activate.
+    term = os.environ.get("TERM_PROGRAM", "")
+    if term and term != "tmux":
+        os.environ.setdefault("CAGENTS_TERM_PROGRAM", term)
 
     from cagents.sidecar import bootstrap_container, should_bootstrap
 

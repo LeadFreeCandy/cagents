@@ -40,7 +40,10 @@ _TERM_PROGRAM_BUNDLE_IDS = {
 
 
 def _terminal_bundle_id() -> str | None:
-    return _TERM_PROGRAM_BUNDLE_IDS.get(os.environ.get("TERM_PROGRAM", ""))
+    # Inside the tmux container TERM_PROGRAM is just "tmux"; the launcher
+    # stashes the real terminal's identity in CAGENTS_TERM_PROGRAM.
+    term = os.environ.get("CAGENTS_TERM_PROGRAM") or os.environ.get("TERM_PROGRAM", "")
+    return _TERM_PROGRAM_BUNDLE_IDS.get(term)
 
 
 def notify_desktop(
