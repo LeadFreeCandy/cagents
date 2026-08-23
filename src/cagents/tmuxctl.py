@@ -54,6 +54,17 @@ class TmuxSession:
         return f"{self.socket}:{self.name}"
 
 
+# tmux commands that DO something (vs the read-only polling volume of
+# capture-pane / list-* / show-*, which would drown the log). Every one of
+# these is a state change worth a debug-log line.
+_MUTATING_COMMANDS = {
+    "new-session", "new-window", "kill-session", "kill-window", "kill-pane",
+    "select-window", "select-pane", "respawn-pane", "respawn-window",
+    "split-window", "resize-pane", "send-keys", "paste-buffer", "swap-pane",
+    "break-pane", "bind", "unbind", "set-hook", "set-option", "set-environment",
+}
+
+
 class TmuxClient:
     """Thin wrapper over the tmux CLI. Safe to call when no server is
     running (reports an empty world rather than raising)."""
@@ -70,6 +81,10 @@ class TmuxClient:
         self._mouse_enabled: set[str] = set()
 
     def _run(self, socket: str, *args: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
+        if args and args[0] in _MUTATING_COMMANDS:
+            from .ctx import _log
+
+            _log(f"tmux[{socket}]: {' '.join(args)}")
         return subprocess.run(
             [self.tmux_bin, "-L", socket, *args],
             capture_output=True,

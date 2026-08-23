@@ -120,7 +120,76 @@ def _mark_built() -> None:
     _work("set-environment", "-g", "CAGENTS_DIFF_TS", str(time.time()))
 
 
+_LOG_FILE: Path | None = None
+LOG_FILE_NAME = "ctx.log"
+
+
+def init_log(state_dir: Path) -> None:
+    """Point cagents-ctx logging at <state_dir>/ctx.log. The app calls this
+    too, so hook processes and the app narrate into the same file."""
+    global _LOG_FILE
+    _LOG_FILE = state_dir / LOG_FILE_NAME
+
+
+_VERSION_STAMP: str | None = None
+
+
+def version_stamp() -> str:
+    """'cagents <version> @<commit>[+dirty]' for THIS running code — a stale
+    long-running app and a freshly installed hook can differ, and the log
+    must show which code each line came from. Memoized: the git lookup
+    runs once per process."""
+    global _VERSION_STAMP
+    if _VERSION_STAMP is not None:
+        return _VERSION_STAMP
+    try:
+        from importlib.metadata import version
+
+        ver = version("cagents")
+    except Exception:
+        ver = "?"
+    commit = ""
+    try:
+        import subprocess
+
+        repo = Path(__file__).resolve().parents[2]
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0:
+            commit = "@" + out.stdout.strip()
+            dirty = subprocess.run(
+                ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                commit += "+dirty"
+    except Exception:
+        pass
+    _VERSION_STAMP = f"cagents {ver} {commit}".strip()
+    return _VERSION_STAMP
+
+
+def _log(message: str) -> None:
+    """Append-only trace of everything cagents-ctx does. These processes
+    are invisible tmux hooks — when one misbehaves, this file is the only
+    place the story exists. Best-effort: logging must never break the
+    hook it's narrating."""
+    if _LOG_FILE is None:
+        return
+    try:
+        from datetime import datetime
+
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with _LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"{stamp} [{os.getpid()}] {message}\n")
+    except OSError:
+        pass
+
+
 def _display(message: str) -> None:
+    _log(f"display: {message}")
     _tmux("display-message", message)
 
 
@@ -135,6 +204,7 @@ def queue_toast(state_dir: Path | None, message: str, severity: str = "warning")
     produce two lines)."""
     if state_dir is None:
         return
+    _log(f"toast[{severity}]: {message}")
     try:
         with (state_dir / TOAST_REQUEST_FILE).open("a", encoding="utf-8") as f:
             f.write(json.dumps({"message": message, "severity": severity}) + "\n")
@@ -223,7 +293,12 @@ def do_shell(
     after-select-window hook, --no-select) or by the global C-t / "N"
     key (select=True)."""
     effective_dir, kind, warning = resolve_terminal_directory(directory)
+    _log(
+        f"do_shell: dir={directory!r} -> effective={effective_dir!r} kind={kind!r} "
+        f"session={session_id[:8]!r} tmux={tmux_name!r}@{tmux_socket!r} select={select}"
+    )
     if not _workspace_alive():
+        _log("do_shell: workspace not alive -> split-window fallback")
         if kind == "":
             _display("cagents: no git worktree found for this session")
             queue_toast(state_dir, "No git worktree found for this session.", "error")
@@ -255,7 +330,11 @@ def do_shell(
             client.ensure_session_window(tmux_name, "term", effective_dir, socket=socket)
             group = client.ensure_window_view(tmux_name, "term", socket=socket)
         except RuntimeError as error:
+            import traceback
+
+            _log("do_shell: terminal setup failed:\n" + traceback.format_exc())
             _display(f"cagents: terminal setup failed: {error}")
+            queue_toast(state_dir, f"Terminal setup failed: {error}", "error")
             return 1
         command = f"env -u TMUX tmux -L {socket} attach-session -t '={group}'"
     else:
@@ -268,6 +347,7 @@ def do_shell(
         command = "sh -c " + shlex.quote(
             f"cd {shlex.quote(effective_dir)} && exec {env_prefix}${{SHELL:-sh}}"
         )
+    _log(f"do_shell: target command = {command!r}")
     if command != _last_term_target():
         if "term-1" not in _work_windows():
             _work("new-window", "-d", "-t", "=work:", "-n", "term-1", command)
@@ -527,7 +607,12 @@ def main(argv: list[str] | None = None) -> int:
         return do_event(args.kind, args.file)
     if args.context is None:
         return 2
+    init_log(args.context.parent)
     context = read_context(args.context)
+    _log(
+        f"invoked ({version_stamp()}): "
+        f"{argv if argv is not None else sys.argv[1:]} context={context}"
+    )
     directory = str(context.get("dir", ""))
     if args.command == "shell":
         return do_shell(
@@ -547,5 +632,22 @@ def main(argv: list[str] | None = None) -> int:
     )
 
 
+def tmux_entry(argv: list[str] | None = None) -> int:
+    """Entry point for tmux run-shell hooks. ALWAYS exits 0: a nonzero
+    exit makes tmux paint a raw \'command returned N\' screen over the
+    user's pane — pure noise, since every failure is already surfaced as
+    an app toast and recorded in ctx.log. Crashes are logged, never shown."""
+    try:
+        code = main(argv)
+        _log(f"exit: {code}")
+    except SystemExit as error:  # argparse
+        _log(f"exit: SystemExit {error.code}")
+    except Exception:
+        import traceback
+
+        _log("crash:\n" + traceback.format_exc())
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(tmux_entry())

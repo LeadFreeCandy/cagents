@@ -600,6 +600,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "complete history, not just titles. Off by default: a full scan can take a "
         "while across many/large transcripts.",
     ),
+    (
+        "debug_log",
+        "Debug log",
+        "Verbose trace of keys, clicks, tmux commands and state changes into ctx.log "
+        "(next to state.json) — for cross-validating 'it did something on its own' reports.",
+    ),
 ]
 
 class SettingsModal(ModalScreen[None]):

@@ -192,6 +192,11 @@ def _hermetic_env(monkeypatch):
     that doesn't inject one, splitting actual panes on the developer's tmux."""
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("CAGENTS_SIDECAR", raising=False)
+    # Warm the memoized version stamp so no test observes its one-time git
+    # subprocess (tests that patch subprocess.run globally would catch it).
+    from cagents.ctx import version_stamp
+
+    version_stamp()
 
 
 @pytest.fixture(autouse=True)

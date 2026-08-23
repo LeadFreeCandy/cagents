@@ -185,6 +185,10 @@ class CagentsApp(App):
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
         self.set_interval(JIRA_POLL_SECONDS, self._poll_jira_prs)
         self.query_one("#queue", QueueView).focus_list()
+        from . import ctx as _ctx
+
+        _ctx.init_log(self.store.path.parent)
+        _ctx._log(f"app started: {_ctx.version_stamp()} sidecar={self.sidecar is not None}")
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
                 apply_left_capture(bool(self.store.get_setting("capture_left")))
@@ -1002,6 +1006,28 @@ exec {real!r} "$@"
 
     # -- desktop notifications / click-select ------------------------------------
 
+    def _dbg(self, message: str) -> None:
+        """Verbose debug trace into ctx.log (same file the tmux hooks use,
+        so user input, app behavior, and hook activity cross-validate on
+        one timeline). Toggleable via the debug_log setting."""
+        if self.store.get_setting("debug_log"):
+            from .ctx import _log
+
+            _log(f"app: {message}")
+
+    async def on_event(self, event) -> None:
+        from textual import events
+
+        if isinstance(event, events.Key):
+            focused = type(self.focused).__name__ if self.focused else "-"
+            self._dbg(f"key {event.key!r} focus={focused} screen={type(self.screen).__name__}")
+        elif isinstance(event, (events.MouseDown, events.MouseUp)):
+            kind = "mousedown" if isinstance(event, events.MouseDown) else "mouseup"
+            self._dbg(f"{kind} ({event.x},{event.y}) button={event.button}")
+        elif isinstance(event, events.Paste):
+            self._dbg(f"paste ({len(event.text)} chars)")
+        await super().on_event(event)
+
     def _notify_transitions(self, snapshot: Snapshot) -> None:
         first = not self._seen_first_snapshot
         self._seen_first_snapshot = True
@@ -1021,6 +1047,11 @@ exec {real!r} "$@"
         for view in snapshot.views:
             previous = self._prev_states.get(view.session_id)
             self._prev_states[view.session_id] = view.state
+            if previous is not None and previous != view.state:
+                self._dbg(
+                    f"state {view.session_id[:8]}: {previous.value} -> {view.state.value}"
+                    f" ({view.state_detail})"
+                )
             if first or not enabled:
                 continue
             if view.state in ALERT_STATES and previous not in ALERT_STATES and previous is not None:
@@ -1055,12 +1086,14 @@ exec {real!r} "$@"
             message = str(data.get("message", "")).strip()
             severity = data.get("severity", "warning")
             if message and severity in ("information", "warning", "error"):
+                self._dbg(f"toast from ctx [{severity}]: {message}")
                 self.notify(message, severity=severity)
 
     def _handle_select_request(self) -> None:
         session_id = read_select_request(self.store.path.parent)
         if not session_id or self.snapshot.by_id(session_id) is None:
             return
+        self._dbg(f"select-request -> {session_id[:8]} (notification click)")
         if self.active_view_id == "kanban":
             self.action_switch_view("queue")
         self._highlight_session(session_id)

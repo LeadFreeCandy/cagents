@@ -45,8 +45,8 @@ class Sidecar:
     def __init__(self, runner=None, own_pane: str = "", work_runner=None):
         # runner: outer-tmux (the container); work_runner: the workspace
         # server that holds the tabs. Both injectable for tests.
-        self._run = runner or _outer_tmux
-        self._work = work_runner or _work_tmux
+        self._run = _logged_runner("outer", runner or _outer_tmux)
+        self._work = _logged_runner("work", work_runner or _work_tmux)
         self.term_env: list[str] = []  # -e PATH=... for terminal tabs (claude shim)
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
         self.pane_id: str = ""  # the viewer pane on the right
@@ -295,6 +295,21 @@ def _placeholder(message: str) -> str:
 
     inner = f'printf "\\n  %s\\n" {shlex.quote(message)}; exec sleep 2147483647'
     return "sh -c " + shlex.quote(inner)
+
+
+def _logged_runner(tag: str, fn):
+    """Wrap a tmux runner so every mutating command lands in ctx.log —
+    the cross-validation timeline for 'the app switched my tab' reports."""
+    from .tmuxctl import _MUTATING_COMMANDS
+
+    def run(args: list[str]) -> str:
+        if args and args[0] in _MUTATING_COMMANDS:
+            from .ctx import _log
+
+            _log(f"tmux[{tag}]: {' '.join(str(a) for a in args)}")
+        return fn(args)
+
+    return run
 
 
 def _outer_tmux(args: list[str]) -> str:

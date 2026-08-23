@@ -53,6 +53,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # documented install step (README), and a one-time in-app warning covers
     # the case where it's missing.
     "desktop_notifications": True,
+    # Verbose debug trace (keys, clicks, tmux commands, state changes)
+    # into ctx.log next to state.json. Cheap and invaluable for "it
+    # switched tabs on its own" reports — on by default for now.
+    "debug_log": True,
     # What the diff tab shows. "branch": this worktree vs master
     # (merge-base, committed + uncommitted). "uncommitted": vs HEAD only.
     "diff_mode": "branch",

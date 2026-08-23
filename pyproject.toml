@@ -15,7 +15,7 @@ dev = [
 
 [project.scripts]
 cagents = "cagents.__main__:main"
-cagents-ctx = "cagents.ctx:main"
+cagents-ctx = "cagents.ctx:tmux_entry"
 
 [build-system]
 requires = ["setuptools>=68"]

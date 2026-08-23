@@ -671,3 +671,56 @@ class TestCtxToasts:
             assert not path.exists()  # consumed
             app._handle_toast_requests()  # empty queue: no crash, no repeats
             assert len(shown) == 1
+
+
+class TestCtxLogging:
+    def test_tmux_entry_never_exits_nonzero_and_logs(self, monkeypatch, tmp_path):
+        """A nonzero exit from a tmux run-shell hook paints a raw
+        'returned N' screen over the user's pane — tmux_entry must swallow
+        every failure into ctx.log instead."""
+        import json
+
+        from cagents import ctx
+
+        context = tmp_path / "context.json"
+        # dir points nowhere usable -> do_shell's error path (exit 1 inside)
+        context.write_text(json.dumps({"dir": str(tmp_path / "not-a-repo")}))
+        (tmp_path / "not-a-repo").mkdir()
+        monkeypatch.setattr(ctx, "_workspace_alive", lambda: True)
+        monkeypatch.setattr(ctx, "_work", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_tmux", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_set_last_term_target", lambda v: None)
+
+        assert ctx.tmux_entry(["shell", "--context", str(context)]) == 0
+        log = (tmp_path / ctx.LOG_FILE_NAME).read_text()
+        assert "invoked (" in log and "do_shell:" in log and "exit: 1" in log
+        # queued as an error toast for the app to show
+        assert "No git worktree found" in (tmp_path / ctx.TOAST_REQUEST_FILE).read_text()
+
+    def test_tmux_entry_logs_crashes(self, monkeypatch, tmp_path):
+        import json
+
+        from cagents import ctx
+
+        context = tmp_path / "context.json"
+        context.write_text(json.dumps({"dir": "/x"}))
+        monkeypatch.setattr(
+            ctx, "do_shell",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        assert ctx.tmux_entry(["shell", "--context", str(context)]) == 0
+        assert "boom" in (tmp_path / ctx.LOG_FILE_NAME).read_text()
+
+
+    def test_invocation_logs_version_and_commit(self, monkeypatch, tmp_path):
+        import json
+
+        from cagents import ctx
+
+        context = tmp_path / "context.json"
+        context.write_text(json.dumps({"dir": "/x"}))
+        monkeypatch.setattr(ctx, "do_shell", lambda *a, **k: 0)
+        ctx.tmux_entry(["shell", "--context", str(context)])
+        log = (tmp_path / ctx.LOG_FILE_NAME).read_text()
+        assert "invoked (cagents " in log
+        assert "@" in log  # commit hash resolved (editable install from the repo)
