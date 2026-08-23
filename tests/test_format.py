@@ -63,6 +63,16 @@ def test_session_row_shows_project(claude_dir: Path):
     assert "alpha" in row.plain
 
 
+def test_session_row_shows_state_detail(claude_dir: Path):
+    row = session_row(_view(claude_dir), NOW)
+    assert "thinking" in row.plain
+
+
+def test_session_row_compact_omits_state_detail(claude_dir: Path):
+    row = session_row(_view(claude_dir), NOW, compact=True)
+    assert "thinking" not in row.plain
+
+
 def test_label_overrides_title(claude_dir: Path):
     view = _view(claude_dir, label="my label")
     assert view.title == "my label"

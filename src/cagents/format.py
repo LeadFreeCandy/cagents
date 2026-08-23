@@ -17,6 +17,8 @@ STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
     SessionState.WORKING: ("●", "bold green", "working"),
     SessionState.NEEDS_INPUT: ("◉", "bold red", "needs you"),
     SessionState.NEEDS_REVIEW: ("◆", "bold yellow", "review"),
+    SessionState.EXTERNAL_UPDATE: ("✉", "bold orange3", "external update"),
+    SessionState.SHELL_RUNNING: ("◍", "bold cyan", "shell running"),
     SessionState.MONITORING: ("◎", "cyan", "monitoring"),
     SessionState.BACKGROUND: ("◌", "cyan", "background"),
     SessionState.WAITING_EXTERNAL: ("⧖", "blue", "waiting"),
@@ -61,14 +63,25 @@ def state_badge(view: SessionView) -> Text:
     return badge
 
 
+# Jira columns (session_row / jira_header must stay in lockstep on width).
+JIRA_KEY_WIDTH = 10
+JIRA_STATUS_WIDTH = 16
+JIRA_ASSIGNEE_WIDTH = 18
+# Width of the fixed prefix before the jira columns start: " {glyph} " (3) +
+# title field (44 + 2 trailing) + label field (10) + age field (4 + 1).
+_JIRA_PREFIX_WIDTH = 3 + 46 + 10 + 5
+
+
 def session_row(
     view: SessionView,
     now: datetime | None = None,
     show_project: bool = False,
     compact: bool = False,
+    show_jira: bool = False,
 ) -> Text:
-    """One list row: glyph, title, state, age (and optionally the project).
-    Compact form (sidecar rail): glyph, short title, age — nothing else."""
+    """One list row: glyph, title, state, age (and optionally the project,
+    and optionally Jira key/status/assignee columns). Compact form (sidecar
+    rail): glyph, short title, age — nothing else."""
     glyph, style, label = STATE_STYLE[view.state]
     if compact:
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -81,6 +94,16 @@ def session_row(
     row.append(f"{_truncate(view.title, 44):<44}  ", style="bold" if view.live else "")
     row.append(f"{label:<10}", style=style)
     row.append(f"{human_age(view.last_activity, now):>4} ", style="dim")
+    if show_jira:
+        row.append(f"{view.jira_key or '—':<{JIRA_KEY_WIDTH}}", style="dim magenta" if view.jira_key else "dim")
+        row.append(
+            f"{_truncate(view.jira_status, JIRA_STATUS_WIDTH - 1) or '—':<{JIRA_STATUS_WIDTH}}",
+            style="cyan" if view.jira_status else "dim",
+        )
+        row.append(
+            f"{_truncate(view.jira_assignee, JIRA_ASSIGNEE_WIDTH - 1) or '—':<{JIRA_ASSIGNEE_WIDTH}}",
+            style="green" if view.jira_assignee else "dim",
+        )
     if show_project:
         row.append(f" {view.project_name}", style="dim cyan")
     if view.attached:
@@ -93,7 +116,20 @@ def session_row(
         row.append("  ↳", style="dim magenta")  # forked/handed-off child
     if view.child_ids:
         row.append(f"  »{len(view.child_ids)}", style="dim magenta")  # has children
+    if view.state_detail:
+        row.append(f"  {_truncate(view.state_detail, 40)}", style="dim italic")
     return row
+
+
+def jira_header() -> Text:
+    """Column titles aligned over session_row's jira columns — shown above
+    the list only when the jira_integration setting is on."""
+    header = Text(no_wrap=True, overflow="ellipsis", style="dim")
+    header.append(" " * _JIRA_PREFIX_WIDTH)
+    header.append(f"{'JIRA':<{JIRA_KEY_WIDTH}}", style="bold dim")
+    header.append(f"{'STATUS':<{JIRA_STATUS_WIDTH}}", style="bold dim")
+    header.append(f"{'ASSIGNEE':<{JIRA_ASSIGNEE_WIDTH}}", style="bold dim")
+    return header
 
 
 def group_header(project_dir: str, count: int, compact: bool = False) -> Text:
@@ -223,7 +259,9 @@ def header_summary(counts: dict[SessionState, int]) -> Text:
     text.append(f" {total} session{'s' if total != 1 else ''}", style="bold")
     for state in (
         SessionState.NEEDS_INPUT,
+        SessionState.EXTERNAL_UPDATE,
         SessionState.NEEDS_REVIEW,
+        SessionState.SHELL_RUNNING,
         SessionState.MONITORING,
         SessionState.BACKGROUND,
         SessionState.WORKING,

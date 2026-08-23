@@ -26,6 +26,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 
 from . import gitops
+from . import jira
 from .claude_data import default_claude_dir, utcnow
 from .ctx import CONTEXT_FILE, write_context
 from .diffview import DiffResult, DiffScreen
@@ -39,6 +40,7 @@ from .modals import (
     PaletteModal,
     PlanConfirmModal,
     RelatedModal,
+    SearchModal,
     SettingsModal,
     TrackModal,
 )
@@ -47,12 +49,10 @@ from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import (
     CONTAINER_SOCKET,
-    WORK_SOCKET,
     Sidecar,
     apply_ctx_binds,
     apply_left_capture,
     nested_attach_command,
-    preview_command,
 )
 from .store import Store
 from .tmuxctl import TmuxClient
@@ -61,6 +61,7 @@ from .views import GroupedView, KanbanView, QueueView, SelectionChanged
 REFRESH_SECONDS = 2.0
 VIEWER_DEBOUNCE = 0.25  # settle time before the viewer follows the highlight
 PR_POLL_SECONDS = 300.0
+JIRA_POLL_SECONDS = 300.0
 COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 
 VIEW_IDS = ["queue", "grouped", "kanban"]
@@ -85,6 +86,12 @@ class CagentsApp(App):
     #body.kanban #preview-pane { display: none; }
     #body.compact #preview-pane { display: none; }
     #body.sidecar #preview-pane { display: none; }
+
+    /* Toasts bottom-left instead of Textual's default bottom-right —
+    the preview pane lives on the right, so a right-docked toast covers
+    exactly what you're most likely looking at. */
+    ToastRack { align: left bottom; }
+    ToastHolder { align-horizontal: left; }
     """
 
     # Footer shows these in order; the important ones come first.
@@ -105,10 +112,12 @@ class CagentsApp(App):
         Binding("right", "grow_session", "Grow session", show=False),
         Binding("asterisk", "related", "Related", show=False),
         Binding("o", "open_link", "Open link", show=False),
+        Binding("O", "open_jira", "Jira", show=False),
         Binding("R", "rename", "Rename", show=False),
         Binding("z", "undo", "Undo", show=False),
         Binding("x", "untrack", "Untrack", show=False),
         Binding("colon", "palette", "Fleet", show=False),
+        Binding("slash", "search", "Search", show=False),
         Binding("R", "refresh_now", "Refresh", show=False),
         Binding("comma", "settings", "Settings", show=False),
         Binding("question_mark", "help", "Help"),
@@ -124,6 +133,7 @@ class CagentsApp(App):
         claude_runner=None,
         sidecar: Sidecar | None = None,
         gh_runner=None,
+        jira_fetch=None,
     ):
         super().__init__()
         self.store = store or Store.load()
@@ -135,6 +145,7 @@ class CagentsApp(App):
         self.sidecar = sidecar if sidecar is not None else (Sidecar() if Sidecar.enabled() else None)
         self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
         self.gh_runner = gh_runner  # injectable for the PR poller
+        self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
         self.active_view_id = "queue"
         self.selected_session_id: str | None = None
@@ -145,6 +156,10 @@ class CagentsApp(App):
         self._viewer_target: str = ""
         self._pending_highlight: str | None = None
         self._undo_stack: list[tuple[str, dict]] = []
+        # Dead sessions the passive preview has already tried (silently)
+        # to resume — at most once each, until the next snapshot reflects
+        # the result. See _resume_for_preview.
+        self._resumed_for_preview: set[str] = set()
 
     # -- layout --------------------------------------------------------------
 
@@ -167,6 +182,7 @@ class CagentsApp(App):
         self.refresh_data()
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
+        self.set_interval(JIRA_POLL_SECONDS, self._poll_jira_prs)
         self.query_one("#queue", QueueView).focus_list()
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
@@ -195,15 +211,21 @@ class CagentsApp(App):
 
         Textual's default action_quit just exits this process — but this
         process is itself pane 0 of the container session. Exiting it
-        alone kills only that pane; the tabbed workspace (WORK_SOCKET) and
-        the container session (CONTAINER_SOCKET) it lived in don't close
-        with it, and tmux renumbers whatever pane/window is left into
-        slot 0 instead. The user is left staring at an orphaned,
-        app-less tmux session with no way to navigate it — exactly the
-        "q just closes the left window and leaves me in a buggy state"
-        bug. Tear down cagents' own scaffolding on the way out instead.
-        Real claude sessions live on an entirely separate socket
-        (cagents-sessions / claude) and are never touched here."""
+        alone kills only that pane; the container session (CONTAINER_SOCKET)
+        it lived in doesn't close with it, and tmux renumbers whatever
+        pane/window is left into slot 0 instead. The user is left staring
+        at an orphaned, app-less tmux session with no way to navigate it —
+        exactly the "q just closes the left window and leaves me in a
+        buggy state" bug. Tear down the container on the way out instead.
+
+        The tabbed workspace (WORK_SOCKET) is deliberately NOT torn down —
+        it's a separate, detached tmux server that survives independently
+        of this process, and that's the whole point: terminal tabs (and
+        whatever's running in them) persist across a cagents restart.
+        ensure_workspace() re-attaches to it next launch, recreating only
+        whatever structural tab actually died. Real claude sessions live
+        on an entirely separate socket (cagents-sessions / claude) and are
+        never touched here either way."""
         if os.environ.get("CAGENTS_SIDECAR") == "1":
             self._teardown_container()
         self.exit()
@@ -211,7 +233,6 @@ class CagentsApp(App):
     def _teardown_container(self) -> None:
         import subprocess
 
-        subprocess.run(["tmux", "-L", WORK_SOCKET, "kill-server"], capture_output=True)
         # Killing this ends this process too (it's pane 0 on this very
         # socket) — same as closing any terminal you're running in.
         subprocess.run(["tmux", "-L", CONTAINER_SOCKET, "kill-server"], capture_output=True)
@@ -300,10 +321,8 @@ class CagentsApp(App):
         self._viewer_timer = self.set_timer(VIEWER_DEBOUNCE, self._sync_viewer)
 
     def _viewer_command(self, view: SessionView) -> str:
-        if view.live:
-            socket = view.tmux_socket or self.tmux.create_socket
-            return nested_attach_command(socket, view.tmux_name)
-        return preview_command(view.session_id, str(self.store.path), str(self.claude_dir))
+        socket = view.tmux_socket or self.tmux.create_socket
+        return nested_attach_command(socket, view.tmux_name)
 
     def _sync_viewer(self) -> None:
         if self.sidecar is None:
@@ -311,9 +330,65 @@ class CagentsApp(App):
         view = self.selected_view()
         if view is None:
             return
+        if not view.live:
+            # Never a fake/static rendering of a dead session — resume the
+            # real CLI right then, lazily (only the one you've actually
+            # settled on, via the debounce that got us here).
+            self._resume_for_preview(view)
+            return
+        self._sync_terminal(view)
         command = self._viewer_command(view)
         if command == self._viewer_target:
             return
+        try:
+            self.sidecar.show_viewer(command)
+            self._viewer_target = command
+        except Exception as error:
+            self.notify(f"Viewer failed: {error}", severity="error")
+
+    def _sync_terminal(self, view: SessionView) -> None:
+        """Keep the term-1 PANE pointed at the currently selected session
+        even while you're not looking at that tab — mirrors _sync_viewer
+        for the session tab. Without this, term-1 only ever updated when
+        you explicitly opened it (N / a tab click), so just scrolling
+        through the list while sitting on the terminal tab looked exactly
+        like one shell shared by every session — it was never re-pointed
+        until you re-triggered it. Silent on the expected edge cases (no
+        worktree, not live) — action_open_terminal is the loud path for
+        those; passively scrolling past a session without one shouldn't
+        spam a toast."""
+        if self.sidecar is None or not view.live or not view.tmux_name:
+            return
+        from .ctx import resolve_terminal_directory
+
+        directory, kind, _warning = resolve_terminal_directory(view.work_dir)
+        if kind == "":
+            return
+        try:
+            socket = view.tmux_socket or self.tmux.create_socket
+            self.tmux.ensure_session_window(view.tmux_name, "term", directory, socket=socket)
+            group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
+            self.sidecar.sync_terminal_tab(nested_attach_command(socket, group))
+        except Exception:
+            pass
+
+    def _resume_for_preview(self, view: SessionView) -> None:
+        """Lazily resume a dead session's real CLI the moment you settle
+        on it while browsing. Silent on the expected edge cases (running
+        elsewhere, missing transcript, no project dir) — those get loud
+        feedback from the explicit attach path (Enter) instead; passively
+        scrolling past one shouldn't spam a toast. Tried at most once per
+        session_id: once we've decided to attempt it, we wait for the
+        next snapshot to reflect the result rather than retrying on every
+        subsequent settle."""
+        if view.session_id in self._resumed_for_preview:
+            return
+        self._resumed_for_preview.add(view.session_id)
+        name, _reason, _severity = self._resume_target(view)
+        if name is None:
+            return
+        self.refresh_data()  # so the list picks up "live" as soon as possible
+        command = nested_attach_command(self.tmux.create_socket, name)
         try:
             self.sidecar.show_viewer(command)
             self._viewer_target = command
@@ -344,6 +419,8 @@ class CagentsApp(App):
                 self._context_path(), view.work_dir, view.session_id,
                 diff_mode=str(self.store.get_setting("diff_mode")),
                 shim_dir=str(self._shim_dir()),
+                tmux_name=view.tmux_name if view.live else "",
+                tmux_socket=view.tmux_socket,
             )
 
     @staticmethod
@@ -414,34 +491,41 @@ class CagentsApp(App):
             self._fullscreen_attach(view.tmux_name, view.tmux_socket or None)
 
     def _resume_dead_session(self, view: SessionView) -> None:
+        """Explicit attach (Enter) on a dead session: resume its real
+        `claude --resume` CLI for real and walk in. Loud on failure —
+        this is a deliberate user action."""
+        name, reason, severity = self._resume_target(view)
+        if name is None:
+            self.notify(reason, severity=severity, timeout=10)
+            return
+        self._show_new_session(name)
+
+    def _resume_target(self, view: SessionView) -> tuple[str | None, str, str]:
+        """Validate + spawn `claude --resume <id>` for a dead session.
+        (tmux_name, "", "") on success, or (None, reason, severity) if it
+        can't be resumed right now. Shared by the explicit attach path
+        (loud on failure) and the passive-preview path (silent — see
+        _resume_for_preview)."""
         if view.state == SessionState.WORKING:
             # Actively writing its transcript but hosted somewhere cagents
             # can't see (cmux, a bare terminal). Resuming would put a second
             # live CLI on one conversation — refuse.
-            self.notify(
+            return None, (
                 "This session is running outside cagents' tmux right now — "
-                "attach from wherever it lives, or wait for it to finish.",
-                severity="warning", timeout=8,
-            )
-            return
+                "attach from wherever it lives, or wait for it to finish."
+            ), "warning"
         if view.missing:
-            self.notify(
-                "This session's transcript is gone from Claude's store; nothing to resume.",
-                severity="error", timeout=10,
-            )
-            return
+            return None, (
+                "This session's transcript is gone from Claude's store; nothing to resume."
+            ), "error"
         directory = view.work_dir if Path(view.work_dir).is_dir() else view.project_dir
         if not Path(directory).is_dir():
-            self.notify(
-                f"Project directory no longer exists: {directory}", severity="error", timeout=10
-            )
-            return
+            return None, f"Project directory no longer exists: {directory}", "error"
         claude_bin = self._claude_bin()
         if not claude_bin:
-            self.notify("claude CLI not found.", severity="error")
-            return
+            return None, "claude CLI not found.", "error"
         name = self._spawn_session(directory, ["--resume", view.session_id], view.session_id)
-        self._show_new_session(name)
+        return name, "", ""
 
     def _show_new_session(self, tmux_name: str) -> None:
         """Point the viewer at a session we just created and walk in."""
@@ -630,16 +714,51 @@ exec {real!r} "$@"
 
     def action_open_terminal(self) -> None:
         """N: give me the shell — the terminal tab, focused. cd around,
-        type `claude`, and it lands back here."""
+        type `claude`, and it lands back here.
+
+        Each session gets its OWN persistent terminal (a second window
+        inside that session's own tmux session, viewed through a grouped
+        session so it doesn't drag the live claude pane's view along) —
+        never one shell shared across every session in the app. Same
+        resolution ctx.py's do_shell uses for a tab click (see
+        resolve_terminal_directory) so a keypress and a click agree:
+          - a genuine linked worktree -> open there, no fuss.
+          - the shared repo checkout (no dedicated worktree for this
+            session) -> still opens, but with a loud warning.
+          - neither -> an explicit error, never a generic shell elsewhere.
+        Re-derived fresh from the live view every time this runs (not
+        cached), so a stale mapping from before a cagents restart is
+        always rechecked and reassigned to whatever is actually live now."""
+        from .ctx import resolve_terminal_directory
+
         view = self.selected_view()
-        directory = ""
-        if view and Path(view.work_dir).is_dir():
-            directory = view.work_dir
-        else:
-            directory = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
+        if view is None:
+            self.notify("No session selected.", severity="error")
+            return
+        directory, kind, warning = resolve_terminal_directory(view.work_dir)
+        if kind == "":
+            self.notify(
+                f"No git worktree found for this session ({view.work_dir or 'no directory'}).",
+                severity="error",
+            )
+            return
+        if warning:
+            self.notify(warning, severity="warning")
         if self.sidecar is not None and self.store.get_setting("sidebar"):
             try:
-                self.sidecar.open_terminal_tab(directory)
+                if view.live and view.tmux_name:
+                    socket = view.tmux_socket or self.tmux.create_socket
+                    self.tmux.ensure_session_window(
+                        view.tmux_name, "term", directory, socket=socket
+                    )
+                    group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
+                    command = nested_attach_command(socket, group)
+                else:
+                    import shlex
+
+                    shell = os.environ.get("SHELL", "/bin/zsh")
+                    command = f"cd {shlex.quote(directory)} && exec {shlex.quote(shell)}"
+                self.sidecar.open_terminal_tab(command)
                 self.sidecar.focus_pane()
             except Exception as error:
                 self.notify(f"Terminal failed: {error}", severity="error")
@@ -702,6 +821,15 @@ exec {real!r} "$@"
         self.notify(f"Undid: {label}")
         self.refresh_data()
 
+    def _notify_undoable(self, message: str, *, severity: str = "information") -> None:
+        """A routine toast for a `z`-undoable mutation — clicking the toast
+        itself undoes it (same action as pressing z), not just dismisses
+        it. Only meaningful right after a _checkpoint(); the undo stack is
+        a single shared LIFO, so clicking an older toast undoes whatever
+        is *currently* on top, same as `z` always has — acceptable since
+        toasts are short-lived."""
+        self.notify(f"{message} [@click=app.undo]click to undo[/]", severity=severity)
+
     # -- done / waiting ---------------------------------------------------------
 
     def action_toggle_done(self) -> None:
@@ -711,13 +839,13 @@ exec {real!r} "$@"
         self._checkpoint("done change")
         if view.state == SessionState.DONE:
             self.store.clear_reviewed(view.session_id)
-            self.notify("Un-done — back in the queue.")
+            self._notify_undoable("Un-done — back in the queue.")
         elif view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
             self.notify("Still in flight — mark it done when Claude is finished.", severity="warning")
             return
         else:
             self.store.mark_reviewed(view.session_id, utcnow().isoformat())
-            self.notify("Done.")
+            self._notify_undoable("Done.")
         self.refresh_data()
 
     def action_toggle_waiting(self) -> None:
@@ -727,7 +855,7 @@ exec {real!r} "$@"
         if view.state == SessionState.WAITING_EXTERNAL:
             self._checkpoint("waiting change")
             self.store.clear_waiting(view.session_id)
-            self.notify("No longer waiting on the PR.")
+            self._notify_undoable("No longer waiting on the PR.")
             self.refresh_data()
             return
         if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
@@ -735,18 +863,22 @@ exec {real!r} "$@"
             return
         # Prefer a PR the session itself recorded; else the manual
         # association; else look one up; else ask.
-        recorded = ""
-        if view.parsed:
-            for link in reversed(view.parsed.links):
-                if link.kind == "pr" and link.url:
-                    recorded = link.url
-                    break
-        if not recorded:
-            recorded = view.tracked.pr_url
+        recorded = self._recorded_pr_url(view)
         if recorded:
             self._set_waiting(view.session_id, recorded)
         else:
             self._find_pr_worker(view.session_id, view.project_dir)
+
+    @staticmethod
+    def _recorded_pr_url(view: SessionView) -> str:
+        """The PR this session is actually tied to: what Claude itself
+        recorded in the transcript, else a manual/waiting association.
+        Never re-derived from "whatever branch is checked out now"."""
+        if view.parsed:
+            for link in reversed(view.parsed.links):
+                if link.kind == "pr" and link.url:
+                    return link.url
+        return view.tracked.pr_url or view.tracked.waiting_pr
 
     @work(thread=True, exclusive=True, group="findpr")
     def _find_pr_worker(self, session_id: str, directory: str) -> None:
@@ -772,7 +904,7 @@ exec {real!r} "$@"
     def _set_waiting(self, session_id: str, pr_url: str) -> None:
         self._checkpoint("waiting change")
         self.store.set_waiting(session_id, utcnow().isoformat(), pr_url)
-        self.notify(f"Waiting on {pr_url} — comments re-alert; merge marks it done.")
+        self._notify_undoable(f"Waiting on {pr_url} — comments re-alert; merge marks it done.")
         self.refresh_data()
 
     def _poll_waiting_prs(self) -> None:
@@ -791,31 +923,80 @@ exec {real!r} "$@"
             short = tracked.label or tracked.session_id[:8]
             if status.merged:
                 self.store.mark_reviewed(tracked.session_id, utcnow().isoformat())
-                self.store.clear_waiting(tracked.session_id, external_update="merged")
+                self.store.clear_waiting(tracked.session_id, finished_reason="merged")
                 changed = True
                 self._desktop_note(f"PR merged — {short} is done", tracked.session_id)
             elif status.closed:
                 # Closed without merging: waiting would never resolve — re-alert.
-                self.store.clear_waiting(tracked.session_id, external_update="pr closed")
+                self.store.clear_waiting(tracked.session_id, finished_reason="pr closed")
                 changed = True
                 self._desktop_note(f"PR closed — {short} needs review", tracked.session_id)
             elif status.last_activity and status.last_activity > tracked.waiting_since:
-                self.store.clear_waiting(tracked.session_id, external_update="github comments")
+                self.store.mark_external_update(tracked.session_id, utcnow().isoformat(), "github comments")
                 changed = True
                 self._desktop_note(
-                    f"New PR activity — {short} needs review", tracked.session_id
+                    f"New PR comments — {short} external update", tracked.session_id
                 )
             elif status.updated_at and status.updated_at > tracked.waiting_since:
-                # ANY other change (pushed commits, labels, edits, base change…)
-                self.store.clear_waiting(tracked.session_id, external_update="pr updated")
+                # ANY other change (pushed commits, labels, edits, base
+                # change…) — folded into the same "external update" bucket
+                # as comments, not a generic needs-review: something
+                # specific happened on the PR while this was parked.
+                self.store.mark_external_update(tracked.session_id, utcnow().isoformat(), "pr updated")
                 changed = True
-                self._desktop_note(f"PR updated — {short} needs review", tracked.session_id)
+                self._desktop_note(f"PR updated — {short} external update", tracked.session_id)
         if changed:
             self.call_from_thread(self.refresh_data)
 
     def _desktop_note(self, message: str, session_id: str) -> None:
         if self.store.get_setting("desktop_notifications"):
             notify_desktop("cagents", message, session_id, self.store.path.parent)
+
+    # -- Jira (optional; jira_integration setting) ---------------------------
+
+    def _poll_jira_prs(self) -> None:
+        if not self.store.get_setting("jira_integration"):
+            return
+        self._poll_jira_worker(list(self.snapshot.views))
+
+    @work(thread=True, exclusive=True, group="jirapoll")
+    def _poll_jira_worker(self, views: list[SessionView]) -> None:
+        if not jira.credentials_configured():
+            return
+        changed = False
+        for view in views:
+            tracked = view.tracked
+            # Re-derived fresh every poll, never trusted from cache — a
+            # session's *recorded* PR can change after its jira_key was
+            # first set (confirmed live: a session that incidentally
+            # linked an unrelated PR early on, before its real one
+            # existed, got that unrelated PR's ticket cached forever,
+            # since the old code only ever derived the key once and then
+            # just re-polled that same key's status). _recorded_pr_url
+            # always prefers the session's real recorded PR over the
+            # directory guess, so once a real PR exists this self-heals.
+            pr_url = self._recorded_pr_url(view) or gitops.find_pr_url(
+                view.project_dir, runner=self.gh_runner
+            )
+            if not pr_url:
+                continue
+            title, body, branch = gitops.pr_jira_sources(pr_url, runner=self.gh_runner)
+            key = jira.extract_jira_key(title, body, branch)
+            if not key:
+                continue
+            try:
+                issue = jira.fetch_issue(key, fetch=self.jira_fetch)
+            except jira.JiraError:
+                continue  # transient Jira failure; try again next poll
+            if (key, issue.status, issue.assignee) != (
+                tracked.jira_key, tracked.jira_status, tracked.jira_assignee
+            ):
+                changed = True
+            self.store.set_jira_info(
+                tracked.session_id, key, issue.status, issue.assignee, utcnow().isoformat()
+            )
+        if changed:
+            self.call_from_thread(self.refresh_data)
 
     # -- desktop notifications / click-select ------------------------------------
 
@@ -1156,7 +1337,27 @@ exec {real!r} "$@"
         self.selected_session_id = session_id
         self._pending_highlight = session_id
         self.refresh_data()
-        self.notify("Session tracked.")
+        self._notify_undoable("Session tracked.")
+
+    def action_search(self) -> None:
+        if not self.store.get_setting("conversation_search"):
+            self.notify(
+                "Conversation search is off — enable it in Settings (,).",
+                severity="warning",
+            )
+            return
+        self.push_screen(SearchModal(self.claude_dir), self._search_chosen)
+
+    def _search_chosen(self, result) -> None:
+        if result is None:
+            return
+        # Found via a full-history scan — it may not be a session cagents
+        # is tracking yet; track() is a no-op if it already is.
+        self._checkpoint("track")
+        self.store.track(result.session_id, result.project_dir or str(Path.home()), utcnow().isoformat())
+        self.selected_session_id = result.session_id
+        self._pending_highlight = result.session_id
+        self.refresh_data()
 
     # -- note / label / untrack --------------------------------------------------
 
@@ -1176,6 +1377,7 @@ exec {real!r} "$@"
         self._checkpoint("rename")
         self.store.set_label(session_id, label.strip())
         self.refresh_data()
+        self._notify_undoable("Renamed.")
 
     def action_untrack(self) -> None:
         view = self.selected_view()
@@ -1197,6 +1399,7 @@ exec {real!r} "$@"
         if self.selected_session_id == session_id:
             self.selected_session_id = None
         self.refresh_data()
+        self._notify_undoable("Untracked.")
 
     # -- links / palette / settings ------------------------------------------------
 
@@ -1220,6 +1423,15 @@ exec {real!r} "$@"
             )
             return
         self._open_url(url, label)
+
+    def action_open_jira(self) -> None:
+        view = self.selected_view()
+        if view is None:
+            return
+        if not view.jira_key:
+            self.notify("No Jira card linked to this session yet.", severity="warning")
+            return
+        self._open_url(view.jira_url, f"Jira {view.jira_key}")
 
     def _open_url(self, url: str, label: str) -> None:
         import subprocess
@@ -1272,7 +1484,10 @@ exec {real!r} "$@"
             return
         self._checkpoint("fleet plan")
         done = apply_plan(plan, self.store, utcnow().isoformat())
-        self.notify("Applied: " + ", ".join(done) if done else "Nothing to apply.")
+        if done:
+            self._notify_undoable("Applied: " + ", ".join(done))
+        else:
+            self.notify("Nothing to apply.")
         self.refresh_data()
 
     def action_settings(self) -> None:
@@ -1290,6 +1505,20 @@ exec {real!r} "$@"
                 apply_left_capture(bool(value))
             except Exception as error:
                 self.notify(f"Could not apply ← binding: {error}", severity="error")
+            return
+        if key == "jira_integration" and value:
+            if not jira.credentials_configured():
+                self.notify(
+                    "Jira columns are on, but no Jira credentials are set. Export "
+                    "JIRA_SITE, JIRA_EMAIL, and JIRA_API_TOKEN in your shell profile "
+                    "and restart cagents.",
+                    title="Jira not configured",
+                    severity="warning",
+                    timeout=10,
+                )
+                return
+            self.notify("Looking up linked Jira cards…")
+            self._poll_jira_prs()
 
     # -- misc -------------------------------------------------------------------
 

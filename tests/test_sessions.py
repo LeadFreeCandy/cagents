@@ -80,6 +80,42 @@ class TestDeriveState:
         assert state == SessionState.WORKING
         assert detail == "running Bash"
 
+    def test_stale_scrollback_phrase_does_not_fake_a_live_spinner(self, claude_dir: Path, now: float):
+        # Replicated live: a user literally typed "what is still running?"
+        # earlier in the conversation. That phrase sitting in scrollback
+        # must never be read as the live "· 1 shell still running"
+        # spinner — only the actual last line of the pane (the real
+        # footer) counts.
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("fix it").assistant_text("done", ts="2026-08-17T10:00:00.000Z")
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        pane = (
+            "❯ what is still running?\n\n"
+            "⏺ Nothing — just Spring preloader daemons.\n\n"
+            "─────────────────────\n"
+            "❯ \n"
+            "─────────────────────\n"
+            "  Sonnet 5 | ctx: 37%\n"
+            "  ⏵⏵ auto mode on · ← 1 agent"
+        )
+        state, _ = derive_state(parsed, _tracked(), live=True, pane_text=pane, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_shell_still_running_in_the_footer_outranks_monitoring(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha")
+        b.user("kick off the migration").assistant_text(
+            "Started.", ts="2026-08-17T10:00:00.000Z"
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 300))
+        pane = "  Sonnet 5 | ctx: 37%\n  ⏵⏵ auto mode on · 1 shell running · ← 1 agent"
+        state, detail = derive_state(parsed, _tracked(), live=True, pane_text=pane, now=now)
+        assert state == SessionState.SHELL_RUNNING
+        assert "1 shell" in detail
+
+        from cagents.sessions import ATTENTION_ORDER
+
+        assert ATTENTION_ORDER[SessionState.SHELL_RUNNING] < ATTENTION_ORDER[SessionState.MONITORING]
+
     def test_live_finished_turn_is_needs_review(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha")
         b.user("fix it").assistant_text("done", ts="2026-08-17T10:00:00.000Z")
@@ -328,6 +364,48 @@ class TestRegistry:
         counts = snap.counts()
         assert counts[SessionState.WORKING] == 1
         assert counts[SessionState.NEEDS_REVIEW] == 1
+
+    def test_rank_stable_since_freezes_while_state_is_unchanged(
+        self, claude_dir: Path, tmp_path: Path, now: float
+    ):
+        # The actual reported bug: two sessions that stay WORKING across
+        # refreshes must not keep swapping places just because
+        # last_activity ticks forward on every new token. rank_stable_since
+        # should freeze at whenever each one *entered* WORKING, not track
+        # last_activity at all.
+        TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(5)).write(
+            claude_dir, mtime=now - 5
+        )
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
+        tmux = FakeTmux()
+        tmux.sessions.append(_tmux(name="alpha", path="/proj/alpha", created=now - 60))
+        registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+
+        first = registry.refresh(now=now).by_id(SID1)
+        assert first.state == SessionState.WORKING
+        since_1 = first.rank_stable_since
+
+        # last_activity ticks forward (new token/record) but the state
+        # stays WORKING across several more refreshes.
+        for offset in (1, 2, 3):
+            view = registry.refresh(now=now + offset).by_id(SID1)
+            assert view.state == SessionState.WORKING
+            assert view.rank_stable_since == since_1  # frozen, unchanged
+
+        # A genuine state change (turn finishes, well past the fresh-write
+        # window) gets a fresh timestamp.
+        from datetime import datetime, timedelta, timezone
+
+        finished_ts = (
+            datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(seconds=3)
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(5)).assistant_text(
+            "done", ts=finished_ts
+        ).write(claude_dir, mtime=now + 3)
+        later = registry.refresh(now=now + 60).by_id(SID1)
+        assert later.state != SessionState.WORKING
+        assert later.rank_stable_since == now + 60
 
     def test_refresh_handles_missing_transcript(self, claude_dir: Path, tmp_path: Path, now: float):
         store = Store.load(tmp_path / "state.json")

@@ -36,10 +36,18 @@ def _parse_iso(value: str) -> datetime | None:
 SETTINGS_DEFAULTS: dict[str, object] = {
     # Attach opens sessions in a side pane, keeping the list as a left rail.
     "sidebar": True,
-    # Toast notifications (bottom-right). Errors always show regardless.
+    # Toast notifications (bottom-left). Errors always show regardless.
     "notifications": False,
     # Left arrow drives the layout cycle / returns to the list.
     "capture_left": True,
+    # Look up each session's linked Jira card (via its PR) and show it as
+    # extra columns: key, board status, assignee. Off by default — needs
+    # JIRA_SITE / JIRA_EMAIL / JIRA_API_TOKEN in the environment.
+    "jira_integration": False,
+    # Fuzzy full-text search across every conversation transcript on disk
+    # (the complete history, not just titles). Off by default — a full
+    # scan can be slow across many/large transcripts.
+    "conversation_search": False,
     # macOS notification when a session starts needing you; clicking it
     # selects the task in the list.
     "desktop_notifications": False,
@@ -49,8 +57,8 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Queue/list priority of the states, most-urgent first. Reorder in the
     # settings panel's Priority tab.
     "state_order": [
-        "needs input", "needs review", "monitoring", "background",
-        "working", "waiting", "stopped", "done",
+        "needs input", "external update", "needs review", "shell running", "monitoring",
+        "background", "working", "waiting", "stopped", "done",
     ],
 }
 
@@ -70,11 +78,26 @@ class TrackedSession:
     reviewed_at: str = ""  # ISO 8601, empty = not accepted ("done")
     archived: bool = False  # hidden from session views; history kept
     # Parked on the outside world (PR review). Cleared by new local
-    # activity; resolved by the PR poller (comments -> re-alert, merge -> done).
+    # activity; resolved by the PR poller (any external change -> re-alert
+    # as "external update", merge -> done).
     waiting_since: str = ""  # ISO 8601
     waiting_pr: str = ""  # PR url the wait is tied to
     pr_url: str = ""  # manually associated PR (o / w prompt when none recorded)
-    external_update: str = ""  # last poller verdict: "github comments" | "merged"
+    finished_reason: str = ""  # last poller verdict: "pr closed" | "merged" | ""
+    # Something happened on the PR while parked waiting — a comment, a
+    # review, or any other change (commits, labels, edits). Same idiom as
+    # waiting_since: a timestamp, not a flag, so it self-expires the
+    # moment real new activity happens (last_timestamp advances past it)
+    # instead of needing an explicit clear somewhere in the refresh path.
+    # finished_reason carries which kind ("github comments" / "pr updated").
+    external_update_since: str = ""  # ISO 8601
+    # Optional Jira integration (jira_integration setting): the card linked
+    # to this session's PR, and a cached snapshot of its board state.
+    # Refreshed by the same poller that watches the PR itself.
+    jira_key: str = ""  # e.g. "OWNER-721"
+    jira_status: str = ""  # board column, e.g. "In Review"
+    jira_assignee: str = ""
+    jira_checked_at: str = ""  # ISO 8601, last successful lookup
     # Lineage (spec §9's "lightweight relationships").
     parent_id: str = ""
     relation: str = ""  # "fork" | "handoff" | ""
@@ -84,6 +107,9 @@ class TrackedSession:
 
     def waiting_datetime(self) -> datetime | None:
         return _parse_iso(self.waiting_since)
+
+    def external_update_datetime(self) -> datetime | None:
+        return _parse_iso(self.external_update_since)
 
     def to_dict(self) -> dict:
         return {
@@ -95,7 +121,12 @@ class TrackedSession:
             "waiting_since": self.waiting_since,
             "waiting_pr": self.waiting_pr,
             "pr_url": self.pr_url,
-            "external_update": self.external_update,
+            "finished_reason": self.finished_reason,
+            "external_update_since": self.external_update_since,
+            "jira_key": self.jira_key,
+            "jira_status": self.jira_status,
+            "jira_assignee": self.jira_assignee,
+            "jira_checked_at": self.jira_checked_at,
             "parent_id": self.parent_id,
             "relation": self.relation,
         }
@@ -112,7 +143,14 @@ class TrackedSession:
             waiting_since=str(data.get("waiting_since", "")),
             waiting_pr=str(data.get("waiting_pr", "")),
             pr_url=str(data.get("pr_url", "")),
-            external_update=str(data.get("external_update", "")),
+            # old field names read as a fallback so existing state.json
+            # files don't silently lose an in-flight value on upgrade
+            finished_reason=str(data.get("finished_reason", data.get("external_update", ""))),
+            external_update_since=str(data.get("external_update_since", data.get("has_comments_since", ""))),
+            jira_key=str(data.get("jira_key", "")),
+            jira_status=str(data.get("jira_status", "")),
+            jira_assignee=str(data.get("jira_assignee", "")),
+            jira_checked_at=str(data.get("jira_checked_at", "")),
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
         )
@@ -240,14 +278,36 @@ class Store:
         if tracked is not None:
             tracked.waiting_since = when
             tracked.waiting_pr = pr_url
-            tracked.external_update = ""
+            tracked.finished_reason = ""
+            tracked.external_update_since = ""
             self.save()
 
-    def clear_waiting(self, session_id: str, external_update: str = "") -> None:
+    def clear_waiting(self, session_id: str, finished_reason: str = "") -> None:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
             tracked.waiting_since = ""
-            tracked.external_update = external_update
+            tracked.finished_reason = finished_reason
+            self.save()  # was missing — the poller's verdict never reached disk
+
+    def mark_external_update(self, session_id: str, when: str, reason: str) -> None:
+        """Something happened on the PR (a comment, a review, or any other
+        change) while parked waiting: reopen it into its own state rather
+        than a generic 'needs review'. `reason` ("github comments" / "pr
+        updated") is shown as the state's detail."""
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.waiting_since = ""
+            tracked.finished_reason = reason
+            tracked.external_update_since = when
+            self.save()
+
+    def set_jira_info(self, session_id: str, key: str, status: str, assignee: str, when: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.jira_key = key
+            tracked.jira_status = status
+            tracked.jira_assignee = assignee
+            tracked.jira_checked_at = when
             self.save()
 
     # -- settings -------------------------------------------------------------

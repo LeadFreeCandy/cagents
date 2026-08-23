@@ -64,9 +64,21 @@ class TestWaitingStore:
         store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
         got = Store.load(path).sessions[SID1]
         assert got.waiting_since and got.waiting_pr == "https://x/pull/1"
-        store.clear_waiting(SID1, external_update="merged")
+        store.clear_waiting(SID1, finished_reason="merged")
         got = Store.load(path).sessions[SID1]
-        assert got.waiting_since == "" and got.external_update == "merged"
+        assert got.waiting_since == "" and got.finished_reason == "merged"
+
+    def test_mark_external_update_roundtrip(self, tmp_path: Path):
+        path = tmp_path / "state.json"
+        store = Store.load(path)
+        store.track(SID1, "/proj/a", "2026-08-18T09:00:00+00:00")
+        store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
+        store.mark_external_update(SID1, "2026-08-18T11:00:00+00:00", "pr updated")
+        got = Store.load(path).sessions[SID1]
+        # reopened out of waiting, into its own state — not a generic verdict
+        assert got.waiting_since == ""
+        assert got.finished_reason == "pr updated"
+        assert got.external_update_since == "2026-08-18T11:00:00+00:00"
 
 
 # ------------------------------------------------ prompt / state hardening ---
@@ -76,6 +88,28 @@ def test_prompt_detection_requires_dialog_signature():
     assert pane_shows_prompt("Do you want me to also refactor the parser?") is False
     assert pane_shows_prompt("Steps:\n 1. build\n 2. deploy") is False
     assert pane_shows_prompt("Do you want to proceed?\n❯ 1. Yes\n  2. No") is True
+
+
+def test_ask_user_question_dialog_is_a_prompt():
+    # Replicated live: AskUserQuestion's question text is model-composed,
+    # not a fixed phrase ("Do you prefer tabs or spaces?") — it never
+    # matches the human-phrase markers. Only its menu footer is constant.
+    pane = (
+        "Do you prefer tabs or spaces for indentation?\n\n"
+        "❯ 1. Tabs\n"
+        "     Use tab characters for indentation\n"
+        "  2. Spaces\n"
+        "     Use space characters for indentation\n\n"
+        "Enter to select · ↑/↓ to navigate · Esc to cancel"
+    )
+    assert pane_shows_prompt(pane) is True
+
+
+def test_arbitrary_question_text_alone_is_still_not_a_prompt():
+    # The footer marker must still require the numbered-choice cursor —
+    # conversational text that happens to ask a free-form question isn't
+    # enough on its own.
+    assert pane_shows_prompt("Do you prefer tabs or spaces? Esc to cancel if unsure.") is False
 
 
 def test_extract_prompt_question():
@@ -140,6 +174,44 @@ class TestNewStates:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
+    def test_monitor_normal_completion_ends_it_before_the_timeout_deadline(self, claude_dir, now):
+        # Real bug, confirmed live: a Monitor that finishes on its own
+        # (target command completed, not a timeout) sends a
+        # task-notification with the exact same "<status>completed</status>"
+        # shape as a background command's — but _scan_lifecycle only used
+        # to clear active_background on that shape, never active_monitors.
+        # Left unfixed, monitor_running() stays True until the *original*
+        # timeout deadline (here 60s), long after the monitor actually
+        # ended — this asserts it's cleared immediately instead.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("watch it")
+        b.assistant_tool_use("t1", "Monitor", {"description": "wait for target-done"})
+        # a long timeout, well beyond "now" — so this test actually
+        # distinguishes "cleared by the completion notification" from
+        # "just happened to naturally expire" (a short timeout coinciding
+        # with `now` would pass either way and prove nothing)
+        b.raw_tool_result(
+            "t1", "Monitor started (task bw0tx7k9t, timeout 600000ms).", ts=ts_ago(60)
+        )
+        b.assistant_text("Monitor is running.", ts=ts_ago(55))
+        # the real, exact notification shape a normal completion sends
+        # (verified against a live haiku session — not a timeout message)
+        b.raw(
+            {"type": "queue-operation", "operation": "enqueue",
+             "timestamp": ts_ago(50), "sessionId": SID1,
+             "content": "<task-notification>\n<task-id>bw0tx7k9t</task-id>\n"
+                        "<tool-use-id>toolu_01SZpBPe3sPDrB8utqewPCHp</tool-use-id>\n"
+                        "<output-file>/tmp/x/tasks/bw0tx7k9t.output</output-file>\n"
+                        "<status>completed</status>\n"
+                        "<summary>Monitor \"wait for target-done\" stream ended</summary>\n"
+                        "</task-notification>"}
+        )
+        b.assistant_text("Monitor completed successfully.", ts=ts_ago(45))
+        parsed = self._parse(claude_dir, b)
+        assert parsed.monitor_running(now) is False
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
     def test_background_ack_yields_background(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("run the long build")
@@ -201,15 +273,60 @@ class TestNewStates:
         state, _ = derive_state(parsed, tracked, live=False, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
-    def test_external_update_shows_in_detail(self, claude_dir, now):
+    def test_finished_reason_shows_in_detail(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("ship it").assistant_text("PR is up.", ts="2026-08-18T10:00:00.000Z")
         parsed = self._parse(claude_dir, b)
         state, detail = derive_state(
-            parsed, _tracked(external_update="github comments"), live=False, now=now
+            parsed, _tracked(finished_reason="pr closed"), live=False, now=now
         )
         assert state == SessionState.NEEDS_REVIEW
+        assert detail == "pr closed"
+
+    def test_external_update_derivation(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("ship it").assistant_text("PR is up.", ts="2026-08-18T10:00:00.000Z")
+        parsed = self._parse(claude_dir, b)
+        tracked = _tracked(
+            external_update_since="2026-08-18T11:00:00+00:00", finished_reason="github comments"
+        )
+        state, detail = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.EXTERNAL_UPDATE
         assert detail == "github comments"
+
+    def test_external_update_folds_in_non_comment_pr_changes(self, claude_dir, now):
+        # e.g. someone pushed a commit or edited the PR with no new
+        # comment/review — folded into the same bucket as comments, not a
+        # generic needs-review.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("ship it").assistant_text("PR is up.", ts="2026-08-18T10:00:00.000Z")
+        parsed = self._parse(claude_dir, b)
+        tracked = _tracked(
+            external_update_since="2026-08-18T11:00:00+00:00", finished_reason="pr updated"
+        )
+        state, detail = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.EXTERNAL_UPDATE
+        assert detail == "pr updated"
+
+    def test_external_update_self_expires_on_new_activity(self, claude_dir, now):
+        # the PR changed, then the human typed something new (last_timestamp
+        # advances past external_update_since) -> back to a normal review,
+        # no explicit clearing needed anywhere
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("ship it").assistant_text(
+            "Addressed the feedback.", ts="2026-08-18T12:00:00.000Z"
+        )
+        parsed = self._parse(claude_dir, b)
+        tracked = _tracked(external_update_since="2026-08-18T11:00:00+00:00")
+        state, _ = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_external_update_outranks_plain_review(self):
+        from cagents.sessions import ATTENTION_ORDER
+
+        order = ATTENTION_ORDER
+        assert order[SessionState.NEEDS_INPUT] < order[SessionState.EXTERNAL_UPDATE]
+        assert order[SessionState.EXTERNAL_UPDATE] < order[SessionState.NEEDS_REVIEW]
 
 
 class TestDebounce:
@@ -317,9 +434,9 @@ async def test_pr_poll_reopens_on_comments_and_closes_on_merge(world):
         await pilot.pause(0.3)
         tracked = store.sessions[SID1]
         assert tracked.waiting_since == ""
-        assert tracked.external_update == "github comments"
+        assert tracked.external_update_since != ""
         view = app.snapshot.by_id(SID1)
-        assert view.state == SessionState.NEEDS_REVIEW
+        assert view.state == SessionState.EXTERNAL_UPDATE
         assert view.state_detail == "github comments"
 
         # Park again; now the PR merges -> auto done
@@ -332,7 +449,7 @@ async def test_pr_poll_reopens_on_comments_and_closes_on_merge(world):
         await pilot.pause(0.3)
         tracked = store.sessions[SID1]
         assert tracked.reviewed_at != ""
-        assert tracked.external_update == "merged"
+        assert tracked.finished_reason == "merged"
         view = app.snapshot.by_id(SID1)
         assert view.state == SessionState.DONE
         assert view.state_detail == "merged"
@@ -362,6 +479,21 @@ async def test_notifications_gated_by_setting(world):
             assert captured[-1] == ("information", "routine info")
     finally:
         textual_app.App.notify = original
+
+
+async def test_toasts_render_bottom_left(world):
+    from textual.widgets._toast import Toast
+
+    app, store, _ = world
+    store.set_setting("notifications", True)
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause()
+        app.notify("test toast")
+        await pilot.pause(0.2)
+        toasts = list(app.query(Toast))
+        assert toasts
+        # bottom-left: hugs x=0, not the far right edge
+        assert toasts[0].region.x == 0
 
 
 async def test_desktop_notification_on_transition(world, monkeypatch):
@@ -459,7 +591,8 @@ class TestStatePriority:
         assert rank[SessionState.NEEDS_INPUT] == 1
         # everything else appended in default order — nothing missing
         assert len(rank) == len(SessionState)
-        assert rank[SessionState.NEEDS_REVIEW] == 2
+        assert rank[SessionState.EXTERNAL_UPDATE] == 2
+        assert rank[SessionState.NEEDS_REVIEW] == 3
 
     def test_registry_applies_custom_order(self, claude_dir, tmp_path, now):
         # one working (via recent record), one needs-review
@@ -510,8 +643,8 @@ async def test_priority_tab_reorders_and_persists(claude_dir, tmp_path):
         await pilot.press("J")  # move it down one
         await pilot.pause(0.1)
         saved = store.get_setting("state_order")
-        assert saved[0] == "needs review" and saved[1] == "needs input"
-        assert Store.load(store.path).get_setting("state_order")[0] == "needs review"
+        assert saved[0] == "external update" and saved[1] == "needs input"
+        assert Store.load(store.path).get_setting("state_order")[0] == "external update"
         await pilot.press("0")  # reset to default
         await pilot.pause(0.1)
         assert store.get_setting("state_order")[0] == "needs input"
@@ -577,6 +710,70 @@ class TestEventDerivation:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
         assert state == SessionState.WORKING  # back to the turn
 
+    def test_generic_idle_notification_after_stop_stays_needs_review(self, claude_dir, now):
+        # Replicated live: Claude Code fires the exact same Notification
+        # hook, with the exact same generic "Claude is waiting for your
+        # input" message, purely as an idle "still waiting, come look"
+        # nudge 60s after a turn already ended cleanly — there is no
+        # tool call behind it. Must not read as a live blocking dialog.
+        b = TranscriptBuilder(SID1, "/proj/a").user("summarize", ts=ts_ago(80))
+        b.assistant_text("Summary: …", ts=ts_ago(66))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 66))
+        events = {
+            "UserPromptSubmit": now - 80,
+            "Stop": now - 66,
+            "Notification": now - 6,
+            "message": "Claude is waiting for your input",
+        }
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state == SessionState.NEEDS_REVIEW
+        assert detail == "finished, unreviewed"
+
+    def test_idle_prompt_notification_type_is_never_blocking(self, claude_dir, now):
+        # The authoritative fix: Claude Code's own notification_type field
+        # says this is idle_prompt (its documented "just idle, nothing to
+        # do" type) — never NEEDS_INPUT, no matter what pending_tool_use
+        # says, and even with no Stop event recorded at all.
+        parsed = self._parsed(claude_dir, now, pending=True)
+        events = {
+            "UserPromptSubmit": now - 29, "Notification": now - 5,
+            "notification_type": "idle_prompt",
+            "message": "Claude is waiting for your input",
+        }
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state != SessionState.NEEDS_INPUT
+
+    def test_permission_prompt_notification_type_is_blocking(self, claude_dir, now):
+        parsed = self._parsed(claude_dir, now, pending=False)  # no pending tool in transcript
+        events = {
+            "UserPromptSubmit": now - 29, "Notification": now - 5,
+            "notification_type": "permission_prompt",
+            "message": "Claude needs your permission to use Bash",
+        }
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state == SessionState.NEEDS_INPUT
+        assert "permission" in detail
+
+    def test_unknown_notification_type_falls_back_to_pending_tool_heuristic(self, claude_dir, now):
+        # A future Claude Code notification_type this build doesn't know
+        # about yet must not silently become blocking by default.
+        parsed = self._parsed(claude_dir, now, pending=False)
+        events = {
+            "UserPromptSubmit": now - 29, "Notification": now - 5,
+            "notification_type": "some_new_type_from_a_future_release",
+        }
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state != SessionState.NEEDS_INPUT
+
+    def test_missing_notification_type_falls_back_to_pending_tool_heuristic(self, claude_dir, now):
+        # Older Claude Code build without the field at all: same
+        # behavior as before this fix (pending_tool_use decides).
+        parsed = self._parsed(claude_dir, now, pending=True)
+        events = {"UserPromptSubmit": now - 29, "Notification": now - 5,
+                  "message": "Claude needs your permission to use Bash"}
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now, events=events)
+        assert state == SessionState.NEEDS_INPUT
+
     def test_stop_event_finishes_immediately(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(10))
         b.assistant_text("done", ts=ts_ago(5))
@@ -600,13 +797,31 @@ class TestCtxEvent:
         path = tmp_path / "events" / "sid.json"
         assert do_event("UserPromptSubmit", path) == 0
         monkeypatch.setattr(
-            "sys.stdin", io.StringIO('{"message": "Claude needs your permission"}')
+            "sys.stdin",
+            io.StringIO('{"message": "Claude needs your permission", "notification_type": "permission_prompt"}'),
         )
         assert do_event("Notification", path) == 0
         events = read_context(path)
         assert events["UserPromptSubmit"] > 0
         assert events["Notification"] >= events["UserPromptSubmit"]
         assert events["message"] == "Claude needs your permission"
+        assert events["notification_type"] == "permission_prompt"
+
+    def test_event_without_notification_type_does_not_stick_from_before(self, tmp_path, monkeypatch):
+        import io
+
+        from cagents.ctx import do_event, read_context
+
+        path = tmp_path / "events" / "sid.json"
+        monkeypatch.setattr(
+            "sys.stdin",
+            io.StringIO('{"message": "first", "notification_type": "permission_prompt"}'),
+        )
+        do_event("Notification", path)
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"message": "second"}'))
+        do_event("Notification", path)
+        events = read_context(path)
+        assert "notification_type" not in events
 
 
 class TestDiffMode:
@@ -621,7 +836,7 @@ class TestDiffMode:
         from cagents.ctx import diff_popup_command
 
         command = diff_popup_command("/proj/x", mode="uncommitted")
-        assert "git diff --color HEAD" in command
+        assert "git diff --color=always HEAD" in command
         assert "merge-base" not in command
 
     def test_setting_cycles_and_reaches_context(self, tmp_path):
@@ -646,9 +861,12 @@ async def test_pr_poll_reacts_to_close_and_any_update(world):
         app._poll_waiting_prs()
         await pilot.pause(0.3)
         tracked = store.sessions[SID1]
-        assert tracked.waiting_since == "" and tracked.external_update == "pr closed"
+        assert tracked.waiting_since == "" and tracked.finished_reason == "pr closed"
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
 
-        # any other change (e.g. pushed commits): updatedAt newer -> "pr updated"
+        # any other change (e.g. pushed commits): updatedAt newer -> folded
+        # into the same "external update" bucket as comments, not a plain
+        # needs-review
         store.set_waiting(SID1, "2026-08-19T11:00:00+00:00", "https://x/pull/1")
         app.gh_runner = lambda args, cwd=None: (
             '{"state": "OPEN", "mergedAt": null, "comments": [], "reviews": [],'
@@ -657,7 +875,9 @@ async def test_pr_poll_reacts_to_close_and_any_update(world):
         app._poll_waiting_prs()
         await pilot.pause(0.3)
         tracked = store.sessions[SID1]
-        assert tracked.waiting_since == "" and tracked.external_update == "pr updated"
+        assert tracked.waiting_since == "" and tracked.finished_reason == "pr updated"
+        assert tracked.external_update_since != ""
+        assert app.snapshot.by_id(SID1).state == SessionState.EXTERNAL_UPDATE
         assert app.snapshot.by_id(SID1).state_detail == "pr updated"
 
         # no change at all -> stays parked
@@ -669,3 +889,57 @@ async def test_pr_poll_reacts_to_close_and_any_update(world):
         app._poll_waiting_prs()
         await pilot.pause(0.3)
         assert store.sessions[SID1].waiting_since != ""
+
+
+# ------------------------------------------------------- conversation search ---
+
+
+async def test_search_action_gated_by_setting(world):
+    app, store, _ = world
+    assert store.get_setting("conversation_search") is False
+    captured = []
+    import textual.app as textual_app
+
+    original = textual_app.App.notify
+
+    def spy(self, message, **kwargs):
+        captured.append(kwargs.get("severity", "information"))
+
+    textual_app.App.notify = spy
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause(0.1)
+            from cagents.modals import SearchModal
+
+            assert not isinstance(app.screen, SearchModal)
+            assert "warning" in captured
+    finally:
+        textual_app.App.notify = original
+
+
+async def test_search_flow_tracks_and_selects_the_chosen_result(world, claude_dir, now):
+    app, store, tmux = world
+    store.set_setting("conversation_search", True)
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/proj/found-me").ai_title("Found session").user(
+        "go"
+    ).assistant_text("the unobtainium widget needs recalibration").write(
+        claude_dir, mtime=now - 10
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause(0.1)
+        from cagents.modals import SearchModal
+
+        assert isinstance(app.screen, SearchModal)
+        await pilot.press(*"unobtainium")
+        await pilot.press("enter")
+        await pilot.pause(0.5)  # background search worker
+        await pilot.press("enter")  # select the (only) result
+        await pilot.pause(0.2)
+        assert sid in store.sessions
+        assert store.sessions[sid].project_dir == "/proj/found-me"
+        assert app.selected_session_id == sid

@@ -18,10 +18,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import OptionList
+from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from .format import group_header, kanban_card, session_row
+from .format import group_header, jira_header, kanban_card, session_row
 from .sessions import SessionState, Snapshot, SessionView
 
 
@@ -117,9 +117,12 @@ class GroupedView(BaseSessionView):
     DEFAULT_CSS = """
     GroupedView { height: 1fr; }
     GroupedView > SessionList { height: 1fr; }
+    GroupedView > .jira-header { height: 1; display: none; }
+    GroupedView > .jira-header.shown { display: block; }
     """
 
     def compose(self):
+        yield Static(id="grouped-jira-header", classes="jira-header")
         yield SessionList(id="grouped-list")
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
@@ -130,20 +133,26 @@ class GroupedView(BaseSessionView):
         for view in snapshot.views:
             groups.setdefault(view.project_dir, []).append(view)
         compact = bool(getattr(self.app, "compact", False))
+        show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
+        header = self.query_one("#grouped-jira-header", Static)
+        header.set_class(show_jira, "shown")
+        if show_jira:
+            header.update(jira_header())
         for project_dir in sorted(groups):
             views = groups[project_dir]
             options.append(
                 Option(group_header(project_dir, len(views), compact=compact), disabled=True)
             )
-            # Inside a group: most urgent first, then newest.
-            views.sort(
-                key=lambda v: (
-                    v.attention_rank,
-                    -(v.last_activity.timestamp() if v.last_activity else 0),
-                )
-            )
+            # Inside a group: most urgent first, then by rank_stable_since
+            # (when the session last actually changed state) — NOT
+            # last_activity, which ticks forward on every token while
+            # genuinely WORKING and would otherwise reorder the list on
+            # every refresh even though nothing meaningful changed.
+            views.sort(key=lambda v: (v.attention_rank, -v.rank_stable_since))
             for view in views:
-                options.append(Option(session_row(view, now, compact=compact), id=view.session_id))
+                options.append(
+                    Option(session_row(view, now, compact=compact, show_jira=show_jira), id=view.session_id)
+                )
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#grouped-list", SessionList)
@@ -160,25 +169,30 @@ class QueueView(BaseSessionView):
     DEFAULT_CSS = """
     QueueView { height: 1fr; }
     QueueView > SessionList { height: 1fr; }
+    QueueView > .jira-header { height: 1; display: none; }
+    QueueView > .jira-header.shown { display: block; }
     """
 
     def compose(self):
+        yield Static(id="queue-jira-header", classes="jira-header")
         yield SessionList(id="queue-list")
 
     def update_snapshot(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
         now = datetime.now(timezone.utc)
+        # Stable within a rank — see the comment in GroupedView above.
         ordered = sorted(
-            snapshot.views,
-            key=lambda v: (
-                v.attention_rank,
-                -(v.last_activity.timestamp() if v.last_activity else 0),
-            ),
+            snapshot.views, key=lambda v: (v.attention_rank, -v.rank_stable_since)
         )
         compact = bool(getattr(self.app, "compact", False))
+        show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
+        header = self.query_one("#queue-jira-header", Static)
+        header.set_class(show_jira, "shown")
+        if show_jira:
+            header.update(jira_header())
         options = [
             Option(
-                session_row(view, now, show_project=not compact, compact=compact),
+                session_row(view, now, show_project=not compact, compact=compact, show_jira=show_jira),
                 id=view.session_id,
             )
             for view in ordered
@@ -198,10 +212,14 @@ KANBAN_COLUMNS: list[tuple[str, tuple[SessionState, ...], str]] = [
     ("◉ Needs you", (SessionState.NEEDS_INPUT,), "kb-needs-you"),
     (
         "● Working",
-        (SessionState.WORKING, SessionState.MONITORING, SessionState.BACKGROUND),
+        (SessionState.WORKING, SessionState.SHELL_RUNNING, SessionState.MONITORING, SessionState.BACKGROUND),
         "kb-working",
     ),
-    ("◆ To review", (SessionState.NEEDS_REVIEW, SessionState.WAITING_EXTERNAL), "kb-review"),
+    (
+        "◆ To review",
+        (SessionState.NEEDS_REVIEW, SessionState.EXTERNAL_UPDATE, SessionState.WAITING_EXTERNAL),
+        "kb-review",
+    ),
     ("✓ Done / stopped", (SessionState.DONE, SessionState.STOPPED), "kb-done"),
 ]
 
@@ -256,7 +274,7 @@ class KanbanView(BaseSessionView):
         now = datetime.now(timezone.utc)
         for column in self.query(KanbanColumn):
             views = [v for v in snapshot.views if v.state in column.states]
-            views.sort(key=lambda v: -(v.last_activity.timestamp() if v.last_activity else 0))
+            views.sort(key=lambda v: -v.rank_stable_since)  # stable — see GroupedView
             options = [Option(kanban_card(view, now), id=view.session_id) for view in views]
             session_list = column.query_one(SessionList)
             keep = self.selected_id if self.selected_id in {v.session_id for v in views} else None

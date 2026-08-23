@@ -208,7 +208,15 @@ def _scan_lifecycle(text: str, ts, active_background: dict, active_monitors: dic
     if match:
         task_id = match.group(1)
         if _TASK_TERMINAL.search(text):
+            # A normal Monitor completion notification carries the exact
+            # same <status>completed</status> shape as a background
+            # command's (confirmed live: task-notification for a Monitor
+            # that finished on its own, not via timeout, reads
+            # "<status>completed</status>" same as background). Popping
+            # both dicts unconditionally is a harmless no-op for whichever
+            # one this task_id doesn't belong to.
             active_background.pop(task_id, None)
+            active_monitors.pop(task_id, None)
         if _MONITOR_TIMED_OUT.search(text):
             active_monitors.pop(task_id, None)
 

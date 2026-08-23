@@ -4,12 +4,25 @@ shape Claude Code writes them (verified against real ~/.claude data)."""
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 from cagents.claude_data import encode_project_dir
+
+
+def init_git_repo(path: Path) -> None:
+    """A minimal real git repo at `path` — for tests exercising the
+    worktree-detection that gates terminal-tab access."""
+    for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        subprocess.run(["git", *args], cwd=path, capture_output=True, check=True)
+    (path / "README.md").write_text("# repo\n", "utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "initial"], cwd=path, capture_output=True, check=True
+    )
 
 
 class TranscriptBuilder:
@@ -172,6 +185,19 @@ def now() -> float:
     return time.time()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_agent_status(monkeypatch):
+    """`claude agents --json` is a real subprocess call (agent_status.py)
+    — never let SessionRegistry.refresh() actually spawn it in tests: it's
+    slow (real process spawn) and depends on whatever's genuinely running
+    on the machine, and every refresh() in the whole suite calls it once.
+    Stubbing the module's _default_runner (not fetch_agent_states itself)
+    means a test that explicitly passes SessionRegistry(agents_runner=...)
+    still gets its own runner used, since fetch_agent_states only falls
+    back to _default_runner when no runner was given."""
+    monkeypatch.setattr("cagents.agent_status._default_runner", lambda args: "[]")
+
+
 SID1 = "11111111-1111-1111-1111-111111111111"
 SID2 = "22222222-2222-2222-2222-222222222222"
 SID3 = "33333333-3333-3333-3333-333333333333"
@@ -249,6 +275,16 @@ class FakeTmux:
 
     def unbind_left_detach(self, socket=None):
         self.log.append("unbind-left")
+
+    def ensure_session_window(self, session_name, window_name, directory, socket=None):
+        self.log.append(f"ensure-window:{session_name}:{window_name}:{directory}")
+
+    def ensure_window_view(self, session_name, window_name, socket=None):
+        self.log.append(f"ensure-view:{session_name}:{window_name}")
+        return f"{session_name}--{window_name}"
+
+    def has_session(self, session_name, socket=None):
+        return any(s.name == session_name for s in self.sessions)
 
 
 class FakeOuterTmux:

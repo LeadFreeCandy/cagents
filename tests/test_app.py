@@ -402,6 +402,27 @@ async def test_open_link_prompts_to_associate_pr(world):
 
 
 class TestUndo:
+    async def test_clicking_the_toast_undoes_the_action(self, world):
+        from textual.widgets._toast import Toast
+
+        app, store, tmux, _ = world
+        async with app.run_test(size=(120, 40), notifications=True) as pilot:
+            await pilot.pause()
+            store.set_setting("notifications", True)
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("d")  # mark done -> shows an undoable toast
+            await pilot.pause(0.2)
+            assert store.sessions[SID1].reviewed_at != ""
+            toasts = list(app.query(Toast))
+            assert toasts, "expected an undoable toast after 'd'"
+            plain = toasts[0].render().plain
+            click_col = plain.index("click to undo") + 2  # inside the link text
+            # row 1: Toast has 1 cell of padding above the text (DEFAULT_CSS)
+            await pilot.click(Toast, offset=(click_col, 1))
+            await pilot.pause(0.2)
+            assert store.sessions[SID1].reviewed_at == ""
+
     async def test_undo_done_and_untrack_in_order(self, world):
         app, store, tmux, _ = world
         async with app.run_test(size=(120, 40)) as pilot:

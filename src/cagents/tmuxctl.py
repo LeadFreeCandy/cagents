@@ -134,14 +134,24 @@ class TmuxClient:
         return ""
 
     def capture_pane(self, session_name: str, lines: int = 40, socket: str | None = None) -> str:
-        """The visible tail of a session's active pane, for prompt detection."""
+        """The visible tail of a session's active pane, for prompt detection.
+
+        -J rejoins any soft-wrapped lines back into one logical line
+        first — without it, a resized terminal (or just a narrower one)
+        can split a single status/spinner line ("Baking… (45s · stats)")
+        across two physical lines at an arbitrary point, and every
+        pane-text pattern in tmuxctl.py assumes its markers sit on one
+        line. This makes the whole detection layer width-agnostic instead
+        of quietly depending on whatever width the pane happened to be
+        at capture time (confirmed live: without -J, a narrow pane splits
+        exactly this way)."""
         socket = socket or self.create_socket
         try:
             # "=name:" — exact session match, default window/pane. A bare
             # "=name" resolves for attach/has-session but NOT for pane
             # targets (verified against tmux 3.6a).
             proc = self._run(
-                socket, "capture-pane", "-p", "-t", f"={session_name}:", "-S", f"-{lines}"
+                socket, "capture-pane", "-p", "-J", "-t", f"={session_name}:", "-S", f"-{lines}"
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""
@@ -230,6 +240,53 @@ class TmuxClient:
             self._mouse_enabled.add(self.create_socket)
         return name
 
+    def ensure_session_window(
+        self, session_name: str, window_name: str, directory: str, socket: str | None = None
+    ) -> None:
+        """Add `window_name` to an already-running session if it doesn't
+        have one yet — gives a live claude session its own persistent
+        terminal window, without disturbing window 0 (the claude pane
+        itself). Raises rather than silently no-op'ing when the session
+        itself has vanished, so a caller never mistakes "nothing to
+        attach to anymore" for "already set up"."""
+        socket = socket or self.create_socket
+        try:
+            proc = self._run(socket, "list-windows", "-t", f"={session_name}", "-F", "#{window_name}")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"tmux list-windows failed: {error}")
+        if proc.returncode != 0:
+            raise RuntimeError(f"tmux session '{session_name}' not found")
+        if window_name in proc.stdout.split():
+            return
+        result = self._run(
+            socket, "new-window", "-d", "-t", f"={session_name}:", "-n", window_name, "-c", directory
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"tmux new-window failed: {result.stderr.strip()}")
+
+    def ensure_window_view(
+        self, session_name: str, window_name: str, socket: str | None = None
+    ) -> str:
+        """A grouped session pinned to `window_name` of `session_name`.
+
+        tmux's "current window" is a per-*session* attribute shared by
+        every client attached to it — without this, a second client
+        attaching to view `window_name` would drag the first client's
+        view (e.g. the live claude pane) to whatever window it last
+        selected. A session group shares the same windows/panes but
+        tracks its own current window per grouped session, so the two
+        views stay independent. Returns the grouped session's name."""
+        socket = socket or self.create_socket
+        group_name = f"{session_name}--{window_name}"
+        if not self.has_session(group_name, socket=socket):
+            proc = self._run(
+                socket, "new-session", "-d", "-s", group_name, "-t", f"={session_name}"
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"tmux new-session (group) failed: {proc.stderr.strip()}")
+        self._run(socket, "select-window", "-t", f"={group_name}:{window_name}")
+        return group_name
+
     def has_session(self, session_name: str, socket: str | None = None) -> bool:
         socket = socket or self.create_socket
         try:
@@ -309,6 +366,13 @@ _PROMPT_MARKERS = (
     "Waiting for your response",
     "Do you trust the files",
     "trust this folder",  # workspace trust dialog (observed live, v2.1.235)
+    # AskUserQuestion's own question text is model-composed, not from a
+    # fixed phrase list ("Do you prefer tabs or spaces?" etc.) — it will
+    # never match any marker above. Its menu footer is the one constant
+    # (confirmed live, v2.1.236), and it's also present on the plain
+    # permission-dialog footer ("Esc to cancel · Tab to amend · ..."), so
+    # this one marker covers both without needing a separate check.
+    "Esc to cancel",
 )
 
 # The selection cursor on a numbered option — the signature of an actual
@@ -318,12 +382,47 @@ _CHOICE_ROW = re.compile(r"❯\s*\d+\.")
 
 # Patterns that mean Claude is actively running a turn. The spinner hint
 # text varies by UI state ("esc to interrupt", "· 1 shell still running",
-# …) — observed live against v2.1.235.
+# …) — observed live against v2.1.235. Kept as exact-phrase markers, so
+# they're only ever checked against the single actual last line (see
+# pane_shows_working) — matching them anywhere wider risks the same
+# false-positive class this whole tail-restriction exists to prevent.
 _WORKING_MARKERS = (
     "esc to interrupt",
     "ctrl+b to run in background",
     "still running",
 )
+
+# Newer Claude Code builds (v2.1.236+, observed live) replaced the spinner
+# line's "(esc to interrupt)" suffix with elapsed time / token stats, e.g.
+# "· Baking… (2m 34s · ↓ 10.0k tokens)" — no _WORKING_MARKERS text at all.
+# The one constant is grammatical: an in-progress verb always ends in the
+# single ellipsis char "…" right before the parenthetical; the *finished*
+# form sitting in scrollback afterwards is past tense with no ellipsis
+# ("Baked for 12m 53s"). This line can sit several rows above the actual
+# last line (an idle input box + footer render below it while streaming),
+# so it needs a wider tail than the exact-phrase markers above — still far
+# too structurally specific to a real spinner to be faked by ordinary
+# conversation text.
+_SPINNER_IN_PROGRESS_RE = re.compile(r"\w+…\s*\(")
+_SPINNER_TAIL_LINES = 10
+
+# Live shell-count indicator in the idle footer, e.g. "· 1 shell running"
+# — deliberately does NOT match "still running" (that phrasing is the
+# mid-turn spinner's own _WORKING_MARKERS entry above, and always wins
+# first; by the time this is checked the turn has already ended).
+_SHELL_COUNT_RE = re.compile(r"(\d+)\s+shells?(?:\s+running)?\b")
+
+
+def _tail_lines(pane_text: str, count: int) -> str:
+    """The last `count` non-blank lines — the live status/footer area.
+
+    Never search the *whole* pane for a live-status phrase: ordinary
+    conversation scrollback can innocently contain the exact same words
+    (a user literally asking "what is still running?"), which reads as a
+    false live spinner if matched anywhere in the capture. Only the tail
+    is ever actually live status text."""
+    lines = [line for line in pane_text.splitlines() if line.strip()]
+    return "\n".join(lines[-count:])
 
 
 def pane_shows_prompt(pane_text: str) -> bool:
@@ -336,7 +435,27 @@ def pane_shows_prompt(pane_text: str) -> bool:
 
 
 def pane_shows_working(pane_text: str) -> bool:
-    return any(marker in pane_text for marker in _WORKING_MARKERS)
+    """True when the live status line shows an in-progress spinner.
+
+    Two checks, deliberately different widths: the exact-phrase markers
+    only count on the single actual last line (an idle footer can trail
+    below the spinner while streaming, so "last line" isn't always the
+    spinner itself — but widening this check re-admits the false positive
+    it exists to prevent, e.g. old scrollback literally asking "what is
+    still running?"). The structural "Verb…  (" pattern is specific enough
+    to safely check a wider tail, which is what actually catches it once
+    a footer pushes the spinner line up."""
+    if any(marker in _tail_lines(pane_text, 1) for marker in _WORKING_MARKERS):
+        return True
+    return bool(_SPINNER_IN_PROGRESS_RE.search(_tail_lines(pane_text, _SPINNER_TAIL_LINES)))
+
+
+def pane_shell_count(pane_text: str) -> int:
+    """How many shells the live status/footer says are still running right
+    now (0 if none) — checked in the same narrow tail window as
+    pane_shows_working, for the same reason."""
+    match = _SHELL_COUNT_RE.search(_tail_lines(pane_text, 2))
+    return int(match.group(1)) if match else 0
 
 
 def extract_prompt_question(pane_text: str) -> str:

@@ -1,19 +1,46 @@
 """Desktop notifications (macOS) for sessions that start needing you.
 
-With terminal-notifier installed, clicking the notification writes the
-session id to a small request file; cagents polls it each refresh and
-selects that task in the list. Without terminal-notifier we fall back to
-osascript's display notification (no click action — macOS gives scripts
-no way to observe the click).
+With terminal-notifier installed, the notification is branded as the
+terminal app hosting cagents (its icon and name, via terminal-notifier's
+-sender) instead of showing up as "Script Editor" — which is genuinely
+unavoidable with plain osascript: `display notification` has no sender
+override at all, it's always attributed to whatever runs the script.
+Clicking the notification both (a) activates that same terminal app — via
+-activate — and (b) writes the session id to a small request file;
+cagents polls it each refresh and selects that task in the list. Both use
+the bundle id read straight off $TERM_PROGRAM at notify time, since
+notify_desktop always runs inside the same process that inherited the
+launching terminal's environment. Without terminal-notifier we fall back
+to osascript's display notification (no branding, no click action —
+macOS gives scripts no way to observe the click either).
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 SELECT_REQUEST_FILE = "select-request"
+
+# $TERM_PROGRAM -> the app's bundle id, for terminal-notifier's -activate.
+# Unrecognized/unset values just skip activation (falls back to today's
+# "select only if you're already looking at it" behavior).
+_TERM_PROGRAM_BUNDLE_IDS = {
+    "Apple_Terminal": "com.apple.Terminal",
+    "iTerm.app": "com.googlecode.iterm2",
+    "ghostty": "com.mitchellh.ghostty",
+    "WezTerm": "com.github.wez.wezterm",
+    "vscode": "com.microsoft.VSCode",
+    "Hyper": "co.zeit.hyper",
+    "Tabby": "org.tabby",
+    "Warp": "dev.warp.Warp-Stable",
+}
+
+
+def _terminal_bundle_id() -> str | None:
+    return _TERM_PROGRAM_BUNDLE_IDS.get(os.environ.get("TERM_PROGRAM", ""))
 
 
 def notify_desktop(
@@ -29,17 +56,17 @@ def notify_desktop(
     try:
         if tn:
             request = state_dir / SELECT_REQUEST_FILE
-            subprocess.run(
-                [
-                    tn,
-                    "-title", title,
-                    "-message", message,
-                    "-group", f"cagents-{session_id[:8]}",
-                    "-execute", f"/bin/sh -c \"echo {session_id} > '{request}'\"",
-                ],
-                capture_output=True,
-                timeout=10,
-            )
+            args = [
+                tn,
+                "-title", title,
+                "-message", message,
+                "-group", f"cagents-{session_id[:8]}",
+                "-execute", f"/bin/sh -c \"echo {session_id} > '{request}'\"",
+            ]
+            bundle_id = _terminal_bundle_id()
+            if bundle_id:
+                args += ["-activate", bundle_id, "-sender", bundle_id]
+            subprocess.run(args, capture_output=True, timeout=10)
         else:
             script = (
                 f'display notification "{_esc(message)}" '

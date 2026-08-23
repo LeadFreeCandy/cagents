@@ -49,6 +49,34 @@ def current_branch(directory: str) -> str:
         return ""
 
 
+def worktree_status(directory: str) -> tuple[str, str]:
+    """Where `directory` sits relative to git, distinguishing a genuine
+    *linked* worktree (`git worktree add`) from the repo's main checkout —
+    both are "a git working tree" as far as `is_git_repo` is concerned,
+    but only the former is a dedicated space for one session to work in
+    without colliding with anyone else using the same repo.
+
+    A linked worktree's private git-dir lives under the main repo's
+    `.git/worktrees/<name>`, so it differs from the shared "common" git
+    dir; the main checkout's git-dir and common-dir are the same path.
+    That comparison is the standard, reliable way to tell them apart.
+
+    Returns ("linked", worktree_root), ("main", repo_root), or ("", "")
+    if `directory` isn't inside a git working tree at all."""
+    try:
+        git_dir = _run(["git", "rev-parse", "--git-dir"], directory).strip()
+        common_dir = _run(["git", "rev-parse", "--git-common-dir"], directory).strip()
+        toplevel = _run(["git", "rev-parse", "--show-toplevel"], directory).strip()
+    except GitError:
+        return "", ""
+    # git prints paths relative to the queried directory, not to this
+    # process's own cwd — resolve against `directory`, not bare Path().
+    git_dir_abs = Path(directory, git_dir).resolve()
+    common_dir_abs = Path(directory, common_dir).resolve()
+    kind = "linked" if git_dir_abs != common_dir_abs else "main"
+    return kind, toplevel
+
+
 def default_branch(directory: str) -> str:
     """The repo's main line — the thing a worktree diff compares against.
 
@@ -290,6 +318,27 @@ def find_pr_url(directory: str, runner=None) -> str:
         return ""
     url = out.strip()
     return url if url.startswith("http") else ""
+
+
+def pr_jira_sources(pr_url: str, runner=None) -> tuple[str, str, str]:
+    """(title, body, branch) of a specific PR, by URL — the text a Jira key
+    search checks in order. Takes the URL directly (like pr_status), not a
+    directory, so it can't pick up whatever branch happens to be checked
+    out in a shared worktree right now."""
+    run = runner or _gh_runner_default
+    try:
+        out = run(["gh", "pr", "view", pr_url, "--json", "title,body,headRefName"], None)
+    except Exception:
+        return "", "", ""
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return "", "", ""
+    return (
+        str(data.get("title", "") or ""),
+        str(data.get("body", "") or ""),
+        str(data.get("headRefName", "") or ""),
+    )
 
 
 def pr_status(pr_url: str, runner=None) -> PRStatus:

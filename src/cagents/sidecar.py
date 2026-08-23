@@ -1,11 +1,17 @@
 """Sidecar: cagents as a rail beside one persistent viewer pane.
 
 The design invariant that makes everything fall out: **the right pane is
-always just a tmux client (or a static transcript render) — never a
-re-implementation.** Browsing shows the highlighted session there (a real
-attach, pixel-identical because it IS Claude Code); Enter merely moves
-focus into it; ← moves focus back. Preview and attach cannot disagree
-because they are the same thing.
+always just a tmux client — never a re-implementation.** Browsing shows
+the highlighted session there; if it isn't already live, browsing to it
+resumes the real `claude --resume` CLI right then (lazily — only the one
+session you're actually looking at, not every one you scroll past) and
+shows THAT, pixel-identical, because it IS Claude Code. There is no
+separate "preview" renderer for dead sessions — an earlier version had
+one (a static, non-interactive dump of the transcript text), which
+violated this exact invariant and looked nothing like the real thing;
+it's gone. Enter merely moves focus into the (already-live) pane; ←
+moves focus back. Preview and attach cannot disagree because they are
+the same thing.
 
 Layout is a 3-state cycle on ←:
 
@@ -26,7 +32,13 @@ import subprocess
 
 COLLAPSED_WIDTH = 34
 WORK_SOCKET = "cagents-work"  # the tabbed workspace behind the right pane
-TABS = ("session", "diff", "term-1")  # left-to-right
+TABS = ("session", "diff", "term-1", "+term")  # left-to-right (display names)
+# Real window name for the "+term" tab. Not "+term" itself: tmux's target
+# parser can't reliably select a window whose name starts with "+" (see
+# _ensure_new_term_tab) — this is the name actually used for -t targeting
+# and hook matching; "+term" is only ever the displayed label.
+NEW_TERM_WINDOW = "newterm"
+NEW_TERM_INDEX = 99  # pinned far right — new term-N windows insert before it
 
 
 class Sidecar:
@@ -39,6 +51,7 @@ class Sidecar:
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
         self.pane_id: str = ""  # the viewer pane on the right
         self.current_command: str = ""  # what the session tab currently runs
+        self.current_terminal_command: str = ""  # what the term-1 tab currently runs
 
     @staticmethod
     def enabled() -> bool:
@@ -63,51 +76,100 @@ class Sidecar:
     ) -> None:
         """Create the work session + default tabs (idempotent), and make
         sure the right pane is attached to it. With ctx_prog given, clicking
-        the diff tab rebuilds the diff (an after-select-window hook)."""
+        the diff tab rebuilds the diff, and clicking the "+term" tab (real
+        window name "newterm" — see NEW_TERM_WINDOW) opens a fresh terminal
+        tab (both after-select-window hooks).
+
+        Options/hooks/structural tabs are (re-)applied every call, not just
+        on first creation — the work session deliberately survives a
+        cagents restart (terminal tabs persist), so a version upgrade that
+        adds a tab or a hook must still reach a workspace that already
+        existed before that upgrade shipped."""
         if shim_env is not None:
             self.term_env = shim_env
+        created = False
         try:
             self._work(["has-session", "-t", "=work"])
         except RuntimeError:
+            created = True
             self._work(["new-session", "-d", "-s", "work", "-n", "session",
                         _placeholder("select a session in the list")])
-            self._work(["new-window", "-d", "-t", "=work:", "-n", "diff",
-                        _placeholder("C-d builds the diff for the selected session")])
-            term_args = ["new-window", "-d", "-t", "=work:", "-n", "term-1"]
-            term_args += self.term_env
-            if terminal_dir:
-                term_args += ["-c", terminal_dir]
-            self._work(term_args)
-            # This server exists solely for the workspace, so every option
-            # is global (-g). (Window options like window-status-format only
-            # hit the active window when given a session target.)
-            for option in (
-                ["set", "-g", "mouse", "on"],
-                ["set", "-g", "escape-time", "10"],
-                ["set", "-g", "status", "on"],
-                ["set", "-g", "status-position", "top"],
-                ["set", "-g", "status-style", "bg=colour236,fg=colour248"],
-                ["set", "-g", "status-left", ""],
-                ["set", "-g", "status-right", ""],
-                ["set", "-g", "window-status-format", "  #W  "],
-                ["set", "-g", "window-status-current-format",
-                 "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
-                ["set", "-g", "window-status-separator", ""],
-            ):
-                self._work(option)
-            if ctx_prog and context_path:
-                import shlex
 
-                rebuild = (
-                    f"run-shell -b \"{ctx_prog} diff --context "
-                    f"{shlex.quote(context_path)} --no-select\""
-                )
-                self._work([
-                    "set-hook", "-g", "after-select-window",
-                    f"if -F '#{{==:#{{window_name}},diff}}' '{rebuild}' ''",
-                ])
+        self._ensure_window(
+            "diff", command=_placeholder("C-d builds the diff for the selected session")
+        )
+        self._ensure_window("term-1", cwd=terminal_dir if created else "")
+        self._ensure_new_term_tab()
+
+        # This server exists solely for the workspace, so every option is
+        # global (-g). (Window options like window-status-format only hit
+        # the active window when given a session target.) set/set-hook are
+        # idempotent — safe to repeat every call.
+        for option in (
+            ["set", "-g", "mouse", "on"],
+            ["set", "-g", "escape-time", "10"],
+            ["set", "-g", "status", "on"],
+            ["set", "-g", "status-position", "top"],
+            ["set", "-g", "status-style", "bg=colour236,fg=colour248"],
+            ["set", "-g", "status-left", ""],
+            ["set", "-g", "status-right", ""],
+            ["set", "-g", "window-status-format", "  #W  "],
+            ["set", "-g", "window-status-current-format",
+             "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
+            ["set", "-g", "window-status-separator", ""],
+        ):
+            self._work(option)
+        if ctx_prog and context_path:
+            import shlex
+
+            q_context = shlex.quote(context_path)
+            rebuild_diff = f"run-shell -b \"{ctx_prog} diff --context {q_context} --no-select\""
+            new_term = f"run-shell -b \"{ctx_prog} newterm --context {q_context}\""
+            # Clicking the term-1 tab is pure tmux — it never touches the
+            # Python app — so this hook is what actually re-scopes the
+            # terminal to the selected session on a click, same as "N"
+            # (action_open_terminal) does for a keypress. --no-select:
+            # the click already selected the window.
+            open_term = f"run-shell -b \"{ctx_prog} shell --context {q_context} --no-select\""
+            self._work([
+                "set-hook", "-g", "after-select-window",
+                f"if -F '#{{==:#{{window_name}},diff}}' '{rebuild_diff}' ''",
+            ])
+            self._work([
+                "set-hook", "-g", "-a", "after-select-window",
+                f"if -F '#{{==:#{{window_name}},{NEW_TERM_WINDOW}}}' '{new_term}' ''",
+            ])
+            self._work([
+                "set-hook", "-g", "-a", "after-select-window",
+                f"if -F '#{{==:#{{window_name}},term-1}}' '{open_term}' ''",
+            ])
+        if created:
             self._work(["select-window", "-t", "=work:session"])
         self._ensure_viewer_pane()
+
+    def _ensure_new_term_tab(self) -> None:
+        """The "new terminal" tab, pinned at the far right (a fixed high
+        index) so freshly created term-N windows always insert before it.
+
+        Named "newterm", NOT "+term": confirmed live that tmux's target
+        parser (`-t work:+term`) silently fails to select a window whose
+        name starts with "+" — select-window returns success but the
+        current window never actually changes, so the after-select-window
+        hook this tab depends on never fires. The window is real-named
+        "newterm" and DISPLAYS as "+term" via a per-window
+        window-status-format override instead."""
+        try:
+            windows = self._work(["list-windows", "-t", "=work", "-F", "#W"]).split()
+        except RuntimeError:
+            windows = []
+        if NEW_TERM_WINDOW in windows:
+            return
+        self._work([
+            "new-window", "-d", "-t", f"=work:{NEW_TERM_INDEX}", "-n", NEW_TERM_WINDOW,
+            _placeholder("select this tab to open a new terminal"),
+        ])
+        for fmt in ("window-status-format", "window-status-current-format"):
+            self._work(["set-window-option", "-t", f"=work:{NEW_TERM_WINDOW}", fmt, "  +term  "])
 
     def _ensure_viewer_pane(self) -> None:
         """The container's right pane runs one thing, forever: a client
@@ -159,10 +221,27 @@ class Sidecar:
         self._work(["respawn-pane", "-k", "-t", "=work:diff", pager_command])
         self.select_tab("diff")
 
-    def open_terminal_tab(self, directory: str) -> None:
-        """Switch to the persistent terminal tab (recreating it in
-        `directory` only if it died)."""
-        self._ensure_window("term-1", cwd=directory)
+    def sync_terminal_tab(self, shell_command: str) -> None:
+        """Keep the term-1 PANE pointed at `shell_command` — normally a
+        nested attach into the currently selected session's OWN terminal
+        window (see app.py's _sync_terminal) — without switching tabs or
+        stealing focus. Mirrors show_viewer for the session tab: this
+        runs on every selection change (not just when you explicitly open
+        the tab), so browsing the list while sitting on the terminal tab
+        actually follows the highlight instead of showing one shell
+        shared by every session. Only respawns when the target actually
+        changed, so revisiting the same session's terminal doesn't kill
+        work already running in it."""
+        self._ensure_window("term-1")
+        if shell_command != self.current_terminal_command:
+            self._work(["respawn-pane", "-k", "-t", "=work:term-1", shell_command])
+            self.current_terminal_command = shell_command
+
+    def open_terminal_tab(self, shell_command: str) -> None:
+        """Point the terminal tab at `shell_command` and switch to it —
+        the explicit "N"/click entry point. See sync_terminal_tab for the
+        passive, browsing-follows-selection half of this."""
+        self.sync_terminal_tab(shell_command)
         self.select_tab("term-1")
 
     def focus_session(self) -> None:
@@ -241,18 +320,6 @@ def program_invocation(extra_args: list[str]) -> list[str]:
     if prog.endswith("__main__.py"):
         return [sys.executable, "-m", "cagents", *extra_args]
     return [prog, *extra_args]
-
-
-def preview_command(session_id: str, store_path: str, claude_dir: str = "") -> str:
-    """The viewer command for a dead session: print its transcript (real
-    parse, ANSI colors) and hold the pane. Scrolling comes free from the
-    outer tmux (wheel enters copy-mode over a quiet pane)."""
-    import shlex
-
-    args = ["--preview-session", session_id, "--store", store_path]
-    if claude_dir:
-        args += ["--claude-dir", claude_dir]
-    return " ".join(shlex.quote(p) for p in program_invocation(args))
 
 
 # ------------------------------------------------------- the container --

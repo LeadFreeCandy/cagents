@@ -18,6 +18,7 @@ from cagents.gitops import (
     parse_unified_diff,
     pr_status,
     worktree_diff,
+    worktree_status,
 )
 
 
@@ -88,6 +89,28 @@ class TestWorktreeDiff:
         plain.mkdir()
         with pytest.raises(GitError):
             worktree_diff(str(plain))
+
+
+class TestWorktreeStatus:
+    def test_linked_worktree_is_told_apart_from_the_main_checkout(self, repo: Path):
+        wt = repo.parent / "wt-feature"
+        _git(repo, "worktree", "add", "-b", "feature-work", str(wt))
+        kind, root = worktree_status(str(wt))
+        assert kind == "linked"
+        assert Path(root).resolve() == wt.resolve()
+
+    def test_main_checkout_is_not_a_linked_worktree(self, repo: Path):
+        kind, root = worktree_status(str(repo))
+        assert kind == "main"
+        assert Path(root).resolve() == repo.resolve()
+
+    def test_non_repo_has_no_worktree_status(self, tmp_path: Path):
+        plain = tmp_path / "nope"
+        plain.mkdir()
+        assert worktree_status(str(plain)) == ("", "")
+
+    def test_missing_directory_has_no_worktree_status(self, tmp_path: Path):
+        assert worktree_status(str(tmp_path / "does-not-exist")) == ("", "")
 
 
 class TestParseUnifiedDiff:

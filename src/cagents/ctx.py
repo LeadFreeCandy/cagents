@@ -1,13 +1,23 @@
-"""cagents-ctx — tmux-side helper for the global C-s / C-d keys.
+"""cagents-ctx — tmux-side helper for the global C-s / C-d keys, and for
+tab-click hooks on the workspace (clicking a tab is pure tmux and never
+touches the Python app process, so anything a click needs to do lives
+here, not in app.py).
 
-The app continuously writes the current session's directory to a small
-context file; tmux root bindings invoke this script, which reads it and
+The app continuously writes the current session's directory (and, for
+`shell`, which live tmux session it's scoped to) to a small context
+file; tmux root bindings / hooks invoke this script, which reads it and
 acts *inside the same tmux server* (run-shell provides $TMUX):
 
-    cagents-ctx shell --context <file>   the terminal tab (or a split)
-    cagents-ctx diff  --context <file>   the diff tab (or a popup)
-    cagents-ctx event <Kind> --file <f>  Claude Code hook target: stamp a
-                                         state event for the session
+    cagents-ctx shell   --context <file>   the terminal tab (or a split) —
+                                           THIS session's own worktree and
+                                           its own persistent terminal
+                                           window, never one shared with
+                                           whichever session opened one
+                                           last (see do_shell)
+    cagents-ctx diff    --context <file>   the diff tab (or a popup)
+    cagents-ctx newterm --context <file>   +term tab: open a fresh terminal
+    cagents-ctx event <Kind> --file <f>    Claude Code hook target: stamp a
+                                           state event for the session
 
 Kept dependency-free and instant — it runs on a keypress / hook.
 """
@@ -16,13 +26,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CONTEXT_FILE = "context.json"
-WORK_SOCKET = "cagents-work"  # the tabbed workspace (see sidecar.py)
+# Override for verifying this actual binary against an isolated tmux
+# server instead of the real workspace — never set by cagents itself.
+WORK_SOCKET = os.environ.get("CAGENTS_WORK_SOCKET_OVERRIDE") or "cagents-work"
 
 
 def read_context(path: Path) -> dict:
@@ -36,10 +51,11 @@ def read_context(path: Path) -> dict:
 def write_context(
     path: Path, directory: str, session_id: str,
     diff_mode: str = "branch", shim_dir: str = "",
+    tmux_name: str = "", tmux_socket: str = "",
 ) -> None:
     payload = json.dumps(
         {"dir": directory, "session_id": session_id, "diff_mode": diff_mode,
-         "shim_dir": shim_dir}
+         "shim_dir": shim_dir, "tmux_name": tmux_name, "tmux_socket": tmux_socket}
     )
     try:
         path.write_text(payload, "utf-8")
@@ -55,6 +71,13 @@ def _work(*args: str) -> int:
     return subprocess.run(
         ["tmux", "-L", WORK_SOCKET, *args], capture_output=True, timeout=15
     ).returncode
+
+
+def _work_output(*args: str) -> str:
+    proc = subprocess.run(
+        ["tmux", "-L", WORK_SOCKET, *args], capture_output=True, text=True, timeout=15
+    )
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _workspace_alive() -> bool:
@@ -116,20 +139,162 @@ def shim_path_env(shim_dir: str) -> list[str]:
     ]
 
 
-def do_shell(directory: str, shim_dir: str = "") -> int:
+def resolve_terminal_directory(directory: str) -> tuple[str, str, str]:
+    """Where a terminal for `directory` should actually open.
+
+    Claude Code's own EnterWorktree/ExitWorktree tools change its process
+    cwd; every transcript record after that carries the new cwd (see
+    claude_data.py's `last_cwd` / SessionView.work_dir), which is exactly
+    what `directory` is here. That tells us where Claude is working NOW,
+    but not whether it's a dedicated git worktree or the shared repo
+    checkout — `gitops.worktree_status` resolves that with git itself.
+
+    Returns (effective_dir, kind, warning):
+      - ("linked", dir, "")            a real, dedicated worktree.
+      - ("main", repo_root, "warning") no dedicated worktree — this
+        session shares the plain repo checkout with anyone else working
+        in it; still usable, but worth flagging loudly.
+      - ("", "", "")                   nothing usable: not a real
+        directory, or not a git working tree at all.
+    """
+    from . import gitops
+
     if not directory or not Path(directory).is_dir():
-        _display("cagents: no directory for the selected session")
+        return "", "", ""
+    kind, root = gitops.worktree_status(directory)
+    if kind == "linked":
+        return directory, "linked", ""
+    if kind == "main":
+        effective = root or directory
+        return effective, "main", (
+            f"cagents: no dedicated worktree for this session — terminal opened "
+            f"in the shared repo checkout ({effective})"
+        )
+    return "", "", ""
+
+
+def _error_placeholder(message: str) -> list[str]:
+    inner = f'printf "\\n  %s\\n" {shlex.quote("cagents: " + message)}; exec sleep 2147483647'
+    return ["sh", "-c", inner]
+
+
+def _last_term_target() -> str:
+    """The command last respawned into the term-1 pane — a marker kept in
+    the work server's own global env (not this short-lived process), so
+    repeat clicks/keypresses on the SAME session's terminal don't kill a
+    shell that's already there, whether they arrive via a mouse click on
+    the tab or the "N" key."""
+    out = _work_output("show-environment", "-g", "CAGENTS_TERM_TARGET")
+    if "=" not in out:
+        return ""
+    return out.strip().split("=", 1)[1]
+
+
+def _set_last_term_target(value: str) -> None:
+    _work("set-environment", "-g", "CAGENTS_TERM_TARGET", value)
+
+
+def do_shell(
+    directory: str, session_id: str = "", tmux_name: str = "", tmux_socket: str = "",
+    shim_dir: str = "", select: bool = True,
+) -> int:
+    """Point the terminal tab (or, outside tab mode, a fresh split) at
+    THIS session's own worktree and its own persistent terminal window —
+    never a shell shared with whichever session opened one last. Same
+    entry point whether it's reached by clicking the tab (the
+    after-select-window hook, --no-select) or by the global C-s / "N"
+    key (select=True)."""
+    effective_dir, kind, warning = resolve_terminal_directory(directory)
+    if not _workspace_alive():
+        if kind == "":
+            _display("cagents: no git worktree found for this session")
+            return 1
+        if warning:
+            _display(warning)
+        return _tmux("split-window", "-v", "-l", "12", *shim_path_env(shim_dir),
+                     "-c", effective_dir)
+    if kind == "":
+        _work("respawn-pane", "-k", "-t", "=work:term-1",
+              *_error_placeholder("no git worktree found for this session"))
+        _set_last_term_target("")
+        _display("cagents: no git worktree found for this session")
+        if select:
+            _work("select-window", "-t", "=work:term-1")
+            _tmux("select-pane", "-t", ":.1")
         return 1
-    env = shim_path_env(shim_dir)
-    if _workspace_alive():
-        # Tab mode: the persistent terminal tab (recreate only if it died).
+    if warning:
+        _display(warning)
+    if tmux_name:
+        from .tmuxctl import CREATE_SOCKET, TmuxClient
+
+        socket = tmux_socket or CREATE_SOCKET
+        client = TmuxClient()
+        try:
+            client.ensure_session_window(tmux_name, "term", effective_dir, socket=socket)
+            group = client.ensure_window_view(tmux_name, "term", socket=socket)
+        except RuntimeError as error:
+            _display(f"cagents: terminal setup failed: {error}")
+            return 1
+        command = f"env -u TMUX tmux -L {socket} attach-session -t '={group}'"
+    else:
+        # No live claude session to scope the terminal to — a plain
+        # shell directly in the resolved directory.
+        env_prefix = ""
+        if shim_dir:
+            zdot = str(Path(shim_dir).parent / "zdot")
+            env_prefix = f"PATH={shlex.quote(shim_dir)}:$PATH ZDOTDIR={shlex.quote(zdot)} "
+        command = "sh -c " + shlex.quote(
+            f"cd {shlex.quote(effective_dir)} && exec {env_prefix}${{SHELL:-sh}}"
+        )
+    if command != _last_term_target():
         if "term-1" not in _work_windows():
-            _work("new-window", "-d", "-t", "=work:", "-n", "term-1",
-                  *env, "-c", directory)
+            _work("new-window", "-d", "-t", "=work:", "-n", "term-1", command)
+        else:
+            _work("respawn-pane", "-k", "-t", "=work:term-1", command)
+        _set_last_term_target(command)
+    if select:
         _work("select-window", "-t", "=work:term-1")
         _tmux("select-pane", "-t", ":.1")  # focus the workspace pane
-        return 0
-    return _tmux("split-window", "-v", "-l", "12", *env, "-c", directory)
+    return 0
+
+
+def _next_term_name(existing: list[str]) -> str:
+    """term-1, term-2, … — the next unused number, not just len+1 (closed
+    tabs leave gaps; two tabs closed then one opened must not collide with
+    a still-open higher-numbered one)."""
+    nums = []
+    for name in existing:
+        if name.startswith("term-"):
+            try:
+                nums.append(int(name[len("term-") :]))
+            except ValueError:
+                pass
+    return f"term-{(max(nums) + 1) if nums else 1}"
+
+
+def do_new_term(directory: str, shim_dir: str = "") -> int:
+    """The +term tab was selected: open a genuinely new terminal tab (not
+    the shared term-1) and switch to it. Tab mode only — +term doesn't
+    exist outside it."""
+    if not _workspace_alive():
+        return 1
+    env = shim_path_env(shim_dir)
+    name = _next_term_name(_work_windows())
+    args = ["new-window", "-d", "-t", "=work:", "-n", name, *env]
+    if directory and Path(directory).is_dir():
+        args += ["-c", directory]
+    _work(*args)
+    _work("select-window", "-t", f"=work:{name}")
+    _tmux("select-pane", "-t", ":.1")
+    return 0
+
+
+# Piped through delta when installed (syntax highlighting, line numbers —
+# genuinely legible instead of bare +/- red-green) falling back to the
+# plain colored diff untouched otherwise. Only the actual `git diff`
+# output goes through it — the header/status lines above it are plain
+# text delta has no business reformatting.
+_DELTA_OR_CAT = "(command -v delta >/dev/null 2>&1 && delta --line-numbers --paging=never || cat)"
 
 
 def diff_popup_command(directory: str, mode: str = "branch") -> str:
@@ -148,7 +313,8 @@ def diff_popup_command(directory: str, mode: str = "branch") -> str:
         return (
             f"cd {q} && "
             '{ echo "# ${PWD##*/} $(git branch --show-current) — uncommitted changes"; '
-            "git status --short; echo; git diff --color HEAD; } | less -R"
+            "git status --short; echo; "
+            f'git diff --color=always HEAD | {_DELTA_OR_CAT}; }} | less -R'
         )
     return (
         f"cd {q} && "
@@ -164,8 +330,72 @@ def diff_popup_command(directory: str, mode: str = "branch") -> str:
         'elif [ -n "$base" ]; then base=""; vs=uncommitted; else vs=uncommitted; fi; '
         '{ echo "# ${PWD##*/} $(git branch --show-current) vs $vs"; '
         "git status --short; echo; "
-        'git diff --color ${base:+"$base"}; } | less -R'
+        f'git diff --color=always ${{base:+"$base"}} | {_DELTA_OR_CAT}; }} | less -R'
     )
+
+
+LAZYGIT_CONFIG_DIR = Path.home() / ".local" / "share" / "cagents"
+
+
+def _lazygit_config_path() -> Path:
+    """disableStartupPopups: true — the automated diffing-mode keystrokes
+    in _enter_lazygit_diffing_mode assume no onboarding popup is stealing
+    them (confirmed live: without this, lazygit's one-time "thanks for
+    using lazygit" popup eats the first keystroke)."""
+    path = LAZYGIT_CONFIG_DIR / "lazygit.yml"
+    if not path.exists():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("disableStartupPopups: true\n", "utf-8")
+        except OSError:
+            pass
+    return path
+
+
+def _merge_base_ref(directory: str) -> str:
+    """The merge-base with the repo's default branch — not the branch tip
+    itself: if main has moved on independently, diffing straight against
+    its tip would show main's own commits as if they were being
+    "reverted", which merge-base avoids. '' if there's no resolvable
+    default branch."""
+    from . import gitops
+
+    branch = gitops.default_branch(directory)
+    if not branch:
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", directory, "merge-base", branch, "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def lazygit_command(directory: str) -> str:
+    q = shlex.quote(directory)
+    config = shlex.quote(str(_lazygit_config_path()))
+    return f"cd {q} && lazygit --use-config-file={config}"
+
+
+def _enter_lazygit_diffing_mode(window: str, ref: str) -> None:
+    """Confirmed live: lazygit's diffing mode (W -> "Enter ref to diff" ->
+    type a ref -> enter) accepts an arbitrary ref/SHA as free text and
+    immediately shows the Files panel diffed against it, uncommitted
+    changes included — a full "branch vs merge-base" view with zero
+    manual steps. Needs a beat after launch for lazygit to finish its own
+    startup render before it can receive keys; each step gets its own
+    short pause rather than one long one, to keep each keystroke landing
+    on the screen it was scripted for."""
+    time.sleep(1.2)
+    _work("send-keys", "-t", f"=work:{window}", "W")
+    time.sleep(0.4)
+    _work("send-keys", "-t", f"=work:{window}", "Enter")
+    time.sleep(0.4)
+    _work("send-keys", "-t", f"=work:{window}", "-l", ref)
+    time.sleep(0.2)
+    _work("send-keys", "-t", f"=work:{window}", "Enter")
 
 
 def do_diff(directory: str, select: bool = True, mode: str = "branch") -> int:
@@ -179,20 +409,39 @@ def do_diff(directory: str, select: bool = True, mode: str = "branch") -> int:
     if inside.returncode != 0:
         _display("cagents: not a git repository")
         return 1
+    # Real mouse-interactive file-list + diff-panel app when available
+    # (click files, scroll with the mouse, stage/unstage) — falling back
+    # to the plain pager pipeline untouched otherwise, same as delta.
+    use_lazygit = shutil.which("lazygit") is not None
     if _workspace_alive():
         # Tab mode: fresh diff in the diff tab; switch to it unless this run
         # IS the tab-click hook (which is already there).
         if not _recently_built():
-            command = "sh -c " + shlex.quote(diff_popup_command(directory, mode))
+            if use_lazygit:
+                command = lazygit_command(directory)
+            else:
+                command = "sh -c " + shlex.quote(diff_popup_command(directory, mode))
             if "diff" not in _work_windows():
                 _work("new-window", "-d", "-t", "=work:", "-n", "diff", command)
             else:
                 _work("respawn-pane", "-k", "-t", "=work:diff", command)
+            if use_lazygit and mode == "branch":
+                ref = _merge_base_ref(directory)
+                if ref:
+                    _enter_lazygit_diffing_mode("diff", ref)
             _mark_built()
         if select:
             _work("select-window", "-t", "=work:diff")
             _tmux("select-pane", "-t", ":.1")
         return 0
+    if use_lazygit:
+        # A popup can't safely run the scripted-keystroke automation
+        # (racy against the popup's own creation) — branch-mode diffing
+        # here is a manual W + type-the-ref, same as plain lazygit usage.
+        return _tmux(
+            "display-popup", "-E", "-w", "92%", "-h", "88%",
+            "sh", "-c", lazygit_command(directory),
+        )
     return _tmux(
         "display-popup", "-E", "-w", "92%", "-h", "88%",
         "sh", "-c", diff_popup_command(directory, mode),
@@ -202,9 +451,17 @@ def do_diff(directory: str, select: bool = True, mode: str = "branch") -> int:
 def do_event(kind: str, path: Path) -> int:
     """Called by Claude Code hooks (Notification / Stop / UserPromptSubmit)
     on sessions cagents spawned. Merges {kind: now} into the session's
-    events file; Notification also records its message from the hook's
-    stdin JSON. This is the authoritative 'what state is Claude in' signal
-    that replaces pane heuristics for spawned sessions."""
+    events file; Notification also records its message and notification_type
+    from the hook's stdin JSON. This is the authoritative 'what state is
+    Claude in' signal that replaces pane heuristics for spawned sessions.
+
+    notification_type matters: Claude Code fires this same hook for a real
+    blocking dialog (permission_prompt, elicitation_dialog,
+    elicitation_url_dialog, agent_needs_input) AND for a plain idle nudge
+    (idle_prompt) once Claude's been waiting ~60s with nothing to do — the
+    message text alone ("Claude is waiting for your input") is identical
+    either way, so the type field is the only reliable way to tell them
+    apart (see sessions.BLOCKING_NOTIFICATION_TYPES)."""
     import time
 
     events = read_context(path)  # same tolerant reader: dict or {}
@@ -215,6 +472,11 @@ def do_event(kind: str, path: Path) -> int:
             message = str(payload.get("message", "")).strip()
             if message:
                 events["message"] = message[:200]
+            notification_type = str(payload.get("notification_type", "")).strip()
+            if notification_type:
+                events["notification_type"] = notification_type
+            else:
+                events.pop("notification_type", None)
         except (json.JSONDecodeError, OSError):
             pass
     try:
@@ -228,7 +490,7 @@ def do_event(kind: str, path: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
     parser.add_argument(
-        "command", choices=["shell", "diff", "event"], nargs="?", default="shell"
+        "command", choices=["shell", "diff", "newterm", "event"], nargs="?", default="shell"
     )
     parser.add_argument("kind", nargs="?", default="")
     parser.add_argument("--file", type=Path, default=None)
@@ -246,7 +508,16 @@ def main(argv: list[str] | None = None) -> int:
     context = read_context(args.context)
     directory = str(context.get("dir", ""))
     if args.command == "shell":
-        return do_shell(directory, shim_dir=str(context.get("shim_dir", "")))
+        return do_shell(
+            directory,
+            session_id=str(context.get("session_id", "")),
+            tmux_name=str(context.get("tmux_name", "")),
+            tmux_socket=str(context.get("tmux_socket", "")),
+            shim_dir=str(context.get("shim_dir", "")),
+            select=not args.no_select,
+        )
+    if args.command == "newterm":
+        return do_new_term(directory, shim_dir=str(context.get("shim_dir", "")))
     return do_diff(
         directory, select=not args.no_select,
         mode=str(context.get("diff_mode", "branch")),

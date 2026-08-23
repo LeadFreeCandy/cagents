@@ -12,6 +12,7 @@ from conftest import (
     FakeTmux,
     FakeWorkTmux,
     TranscriptBuilder,
+    init_git_repo,
     select_session,
     ts_ago,
 )
@@ -24,7 +25,6 @@ from cagents.sidecar import (
     ctx_bind_commands,
     left_capture_commands,
     nested_attach_command,
-    preview_command,
     self_command,
     should_bootstrap,
 )
@@ -47,24 +47,69 @@ class TestSidecarPane:
         monkeypatch.setenv("CAGENTS_SIDECAR", "0")
         assert Sidecar.enabled() is False
 
-    def test_ensure_workspace_creates_three_tabs_in_order(self):
+    def test_ensure_workspace_creates_four_tabs_in_order(self):
         sidecar, outer, work = self._sidecar()
         sidecar.ensure_workspace(terminal_dir="/launch/here")
-        assert work.windows == ["session", "diff", "term-1"]  # l -> r
+        # "newterm" is the real window name behind the "+term" tab — see
+        # _ensure_new_term_tab: tmux can't reliably target "-t work:+term".
+        assert work.windows == ["session", "diff", "term-1", "newterm"]  # l -> r
         term = next(c for c in work.calls if c[0] == "new-window" and "term-1" in c)
         assert "-c" in term and "/launch/here" in term
-        # tab bar on top of the workspace
+        new_term = next(c for c in work.calls if c[0] == "new-window" and "newterm" in c)
+        assert "work:99" in " ".join(new_term)  # pinned far right
+        # displayed as "+term" via a per-window format override
         flat = [" ".join(c) for c in work.calls]
+        assert any("window-status-format" in c and "+term" in c for c in flat)
+        # tab bar on top of the workspace
         assert any("status-position top" in c for c in flat)
         # the container's right pane attaches the workspace
         split = next(c for c in outer.calls if c[0] == "split-window")
         assert f"-L {Sidecar.__init__.__defaults__ or ''}" or True
         assert "cagents-work" in split[-1] and "attach-session" in split[-1]
-        # idempotent
-        calls = len(work.calls)
+        # idempotent: a second call creates no duplicate tabs, even though
+        # it re-applies options/hooks every time on purpose (see the
+        # persists-across-restart tests below)
+        calls_before = len(work.calls)
         sidecar.ensure_workspace()
-        assert work.windows == ["session", "diff", "term-1"]
-        assert len(work.calls) == calls + 1  # just the has-session probe
+        assert work.windows == ["session", "diff", "term-1", "newterm"]
+        assert not any(c[0] == "new-window" for c in work.calls[calls_before:])
+
+    def test_hooks_apply_even_to_a_workspace_that_already_existed(self):
+        # Real bug this fixes: hooks/options used to be set only inside the
+        # "session doesn't exist yet" branch, so a work session that
+        # survived a cagents restart (or predates a version that added a
+        # hook) never got it applied. Must reach an already-existing
+        # session too, not just a freshly created one.
+        sidecar, outer, work = self._sidecar()
+        work.exists = True
+        work.windows = ["session", "diff", "term-1", "newterm"]
+        sidecar.ensure_workspace(ctx_prog="/bin/cagents-ctx", context_path="/tmp/ctx.json")
+        flat = [" ".join(c) for c in work.calls]
+        assert any("after-select-window" in c and "diff" in c for c in flat)
+        assert any("after-select-window" in c and "newterm" in c for c in flat)
+        assert any("mouse on" in c for c in flat)
+
+    def test_new_term_window_is_never_named_literally_plus_term(self):
+        # Confirmed live: tmux's target parser silently fails to select a
+        # window named "+term" (-t work:+term never actually changes the
+        # current window, so the after-select-window hook this tab
+        # depends on never fires). Never regress the real window name
+        # back to the literal "+term" string.
+        from cagents.sidecar import NEW_TERM_WINDOW
+
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
+        assert "+term" not in work.windows
+        assert NEW_TERM_WINDOW in work.windows
+
+    def test_new_term_tab_not_recreated_if_present(self):
+        sidecar, outer, work = self._sidecar()
+        sidecar.ensure_workspace()
+        calls_before = len(work.calls)
+        sidecar.ensure_workspace()
+        assert not any(
+            c[0] == "new-window" and "newterm" in c for c in work.calls[calls_before:]
+        )
 
     def test_show_viewer_respawns_session_tab_only(self):
         sidecar, outer, work = self._sidecar()
@@ -88,20 +133,26 @@ class TestSidecarPane:
         assert "=work:diff" in respawn and respawn[-1] == "pager-cmd"
         assert ["select-window", "-t", "=work:diff"] in work.calls
 
-    def test_terminal_tab_persists_and_recreates_when_dead(self):
+    def test_open_terminal_tab_respawns_only_when_the_target_changes(self):
+        # Each session passes its OWN command (a nested attach into that
+        # session's terminal window, or a plain shell) — the tab must
+        # actually switch content when the target session changes, not
+        # just re-select an unrelated shell that happened to be there.
         sidecar, outer, work = self._sidecar()
         sidecar.ensure_workspace(terminal_dir="/a")
         work.calls.clear()
-        sidecar.open_terminal_tab("/b")
-        # already alive: no new window, just the tab switch
-        assert not any(c[0] == "new-window" for c in work.calls)
+        sidecar.open_terminal_tab("attach-session-a")
+        respawn = next(c for c in work.calls if c[0] == "respawn-pane")
+        assert "=work:term-1" in respawn and respawn[-1] == "attach-session-a"
         assert ["select-window", "-t", "=work:term-1"] in work.calls
-        # shell died (window gone) -> recreated in the new directory
-        work.windows.remove("term-1")
-        work.calls.clear()
-        sidecar.open_terminal_tab("/b")
-        created = next(c for c in work.calls if c[0] == "new-window")
-        assert "/b" in created
+        # same target again -> no respawn (don't kill work already running)
+        count = len([c for c in work.calls if c[0] == "respawn-pane"])
+        sidecar.open_terminal_tab("attach-session-a")
+        assert len([c for c in work.calls if c[0] == "respawn-pane"]) == count
+        # a different session's terminal -> respawns to the new target
+        sidecar.open_terminal_tab("attach-session-b")
+        respawn = [c for c in work.calls if c[0] == "respawn-pane"][-1]
+        assert respawn[-1] == "attach-session-b"
 
     def test_enter_selects_session_tab_and_focuses(self):
         sidecar, outer, work = self._sidecar()
@@ -125,14 +176,6 @@ class TestCommands:
         assert cmd == "env -u TMUX tmux -L claude attach-session -t '=my-repo'"
         assert "-L cagents-sessions" in nested_attach_command("cagents-sessions", "x")
         assert "'\\''" in nested_attach_command("claude", "we'ird")
-
-    def test_preview_command_carries_store_and_dir(self, monkeypatch):
-        import sys
-
-        monkeypatch.setattr(sys, "argv", ["/opt/venv/bin/cagents"])
-        cmd = preview_command(SID1, "/data/state.json", "/claude/dir")
-        assert cmd.startswith("/opt/venv/bin/cagents --preview-session")
-        assert SID1 in cmd and "/data/state.json" in cmd and "/claude/dir" in cmd
 
     def test_self_command_preserves_launch_cwd(self, monkeypatch):
         import sys
@@ -266,13 +309,21 @@ async def test_enter_focuses_the_same_pane(world):
         assert tmux.attached_to == []  # no fullscreen handoff happened
 
 
-async def test_dead_session_gets_transcript_preview(world, claude_dir, now, tmp_path):
+async def test_browsing_to_a_dead_session_resumes_the_real_cli(world, claude_dir, now):
+    # There is no static/fake transcript rendering for a dead session —
+    # settling on one while browsing resumes the real `claude --resume`
+    # CLI right then (lazily: only this one, not every session in the
+    # list) and shows THAT in the viewer.
     store, tmux, registry, _ = world
     sid_dead = "99999999-9999-9999-9999-999999999999"
-    TranscriptBuilder(sid_dead, "/proj/beta").ai_title("Old work").user("x").assistant_text(
+    # cwd is a real, existing directory from the start — the transcript's
+    # own recorded cwd (not tracked.project_dir) is what work_dir actually
+    # resolves to, and mutating it on a live snapshot mid-test is racy
+    # against the app's own background refresh.
+    TranscriptBuilder(sid_dead, "/tmp").ai_title("Old work").user("x").assistant_text(
         "finished"
     ).write(claude_dir, mtime=now - 5000)
-    store.track(sid_dead, "/proj/beta", "2026-08-18T07:00:00+00:00")
+    store.track(sid_dead, "/tmp", "2026-08-18T07:00:00+00:00")
     outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
@@ -282,8 +333,148 @@ async def test_dead_session_gets_transcript_preview(world, claude_dir, now, tmp_
         await pilot.pause(0.5)
         select_session(app, sid_dead)
         await pilot.pause(0.5)  # debounce
+        assert tmux.created and tmux.created[-1][1][:2] == ["--resume", sid_dead]
         shown = [c[-1] for c in work.calls if c[0] == "respawn-pane"]
-        assert any("--preview-session" in cmd and sid_dead in cmd for cmd in shown)
+        assert any("attach-session" in cmd for cmd in shown)
+        assert not any("--preview-session" in cmd for cmd in shown)
+
+        # settling on it again (e.g. the debounce firing twice before the
+        # next snapshot catches up) must not spawn a second resume
+        spawned_before = len(tmux.created)
+        select_session(app, sid_dead)
+        await pilot.pause(0.5)
+        assert len(tmux.created) == spawned_before
+
+
+async def test_terminal_tab_belongs_to_the_selected_live_session(world, claude_dir, now, tmp_path):
+    # Regression: "N" used to open one shell shared by the whole app,
+    # never cd-ing into whichever session was actually selected. Each
+    # live session must get its own persistent terminal window instead.
+    store, tmux, registry, _ = world
+    sid_beta = "77777777-7777-7777-7777-777777777777"
+    real_dir = tmp_path / "beta-worktree"
+    real_dir.mkdir()
+    init_git_repo(real_dir)
+    TranscriptBuilder(sid_beta, str(real_dir)).ai_title("Beta work").user(
+        "go", ts=ts_ago(1)
+    ).write(claude_dir, mtime=now - 1)
+    store.track(sid_beta, str(real_dir), "2026-08-18T09:00:00+00:00")
+    tmux.sessions.append(
+        TmuxSession(name="beta", created=now - 60, activity=now, attached=False,
+                    pane_pid=2, pane_path=str(real_dir), socket="claude")
+    )
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, sid_beta)
+        await pilot.pause(0.5)
+        app.action_open_terminal()
+        await pilot.pause()
+        assert any(entry.startswith("ensure-window:beta:term:") for entry in tmux.log)
+        assert "ensure-view:beta:term" in tmux.log
+        respawn = [c for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c][-1]
+        assert respawn[-1] == "env -u TMUX tmux -L claude attach-session -t '=beta--term'"
+
+
+async def test_terminal_tab_follows_browsing_without_pressing_n_again(
+    world, claude_dir, now, tmp_path
+):
+    # The actual reported bug: with term-1 already open, just moving the
+    # highlight through the list (never re-pressing "N", never clicking
+    # the tab again) must still repoint term-1 at the newly selected
+    # session — otherwise it keeps showing whatever session last
+    # explicitly opened it, which looks exactly like one shared shell.
+    store, tmux, registry, _ = world  # SID1 = "alpha", lives at "/proj/alpha" (not real)
+    alpha_dir = tmp_path / "alpha-worktree"
+    alpha_dir.mkdir()
+    init_git_repo(alpha_dir)
+    TranscriptBuilder(SID1, str(alpha_dir)).ai_title("Alpha: fix auth").user(
+        "go", ts=ts_ago(1)
+    ).write(claude_dir, mtime=now - 1)  # overwrite with a real, existing worktree
+    store.sessions[SID1].project_dir = str(alpha_dir)
+    tmux.sessions[0].pane_path = str(alpha_dir)  # the "alpha" tmux session, re-pointed
+
+    sid_beta = "66666666-6666-6666-6666-666666666666"
+    real_dir = tmp_path / "beta-worktree"
+    real_dir.mkdir()
+    init_git_repo(real_dir)
+    TranscriptBuilder(sid_beta, str(real_dir)).ai_title("Beta work").user(
+        "go", ts=ts_ago(1)
+    ).write(claude_dir, mtime=now - 1)
+    store.track(sid_beta, str(real_dir), "2026-08-18T09:00:00+00:00")
+    tmux.sessions.append(
+        TmuxSession(name="beta", created=now - 60, activity=now, attached=False,
+                    pane_pid=2, pane_path=str(real_dir), socket="claude")
+    )
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, sid_beta)
+        await pilot.pause(0.5)
+        app.action_open_terminal()  # explicitly open it once, on beta
+        await pilot.pause()
+        respawn = [c for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c][-1]
+        assert "beta--term" in respawn[-1]
+
+        # now just browse away — no "N", no tab click
+        select_session(app, SID1)
+        await pilot.pause(0.5)  # the same viewer-sync debounce, not a new action
+        respawn = [c for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c][-1]
+        assert "alpha--term" in respawn[-1]
+
+
+async def test_terminal_errors_instead_of_falling_back_when_worktree_is_missing(world):
+    # A live session whose recorded worktree no longer exists on disk (a
+    # session tracked from a path that's since moved/vanished) must not
+    # silently open a generic shell somewhere else — it's an explicit
+    # error, and no per-session terminal setup is attempted.
+    from textual.widgets._toast import Toast
+
+    store, tmux, registry, claude_dir = world  # SID1 lives at "/proj/alpha" (not real)
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.5)
+        work.calls.clear()
+        app.action_open_terminal()
+        await pilot.pause(0.2)
+        assert not any(entry.startswith("ensure-window:") for entry in tmux.log)
+        assert not any(c[0] == "respawn-pane" and "=work:term-1" in c for c in work.calls)
+        toasts = list(app.query(Toast))
+        assert any("worktree" in t.render().plain.lower() for t in toasts)
+
+
+async def test_terminal_errors_when_no_session_is_selected(world):
+    from textual.widgets._toast import Toast
+
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause(0.5)
+        app.selected_session_id = "not-a-real-session-id"
+        work.calls.clear()
+        app.action_open_terminal()
+        await pilot.pause(0.2)
+        assert not any(c[0] == "respawn-pane" and "=work:term-1" in c for c in work.calls)
+        toasts = list(app.query(Toast))
+        assert any("no session selected" in t.render().plain.lower() for t in toasts)
 
 
 async def test_internal_preview_hidden_in_sidecar_mode(world):
@@ -398,13 +589,17 @@ class TestQuitTearsDownContainer:
     when merely split into the user's own separate tmux, where killing
     a server would destroy unrelated windows that aren't cagents' to
     touch. Real claude sessions live on an entirely separate socket and
-    are never touched either way."""
+    are never touched either way.
+
+    The tabbed workspace (WORK_SOCKET) is the one thing quit must NOT
+    tear down: terminal tabs (and whatever's running in them) are meant
+    to persist across a cagents restart."""
 
     def _app(self, world) -> CagentsApp:
         store, tmux, registry, claude_dir = world
         return CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
 
-    def test_teardown_kills_the_work_and_container_sockets_only(self, world):
+    def test_teardown_kills_only_the_container_socket(self, world):
         import subprocess
         from unittest import mock
 
@@ -420,8 +615,10 @@ class TestQuitTearsDownContainer:
         with mock.patch("subprocess.run", side_effect=fake_run):
             app._teardown_container()
 
-        assert ["tmux", "-L", WORK_SOCKET, "kill-server"] in calls
         assert ["tmux", "-L", CONTAINER_SOCKET, "kill-server"] in calls
+        # WORK_SOCKET deliberately survives — terminal tabs persist across
+        # a cagents restart, so quitting must never kill that server.
+        assert ["tmux", "-L", WORK_SOCKET, "kill-server"] not in calls
         # never anything mentioning the actual claude-session sockets
         assert not any("claude" in a or "cagents-sessions" in a for c in calls for a in c)
 

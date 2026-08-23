@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -268,6 +269,91 @@ class TrackModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class SearchModal(ModalScreen["object | None"]):
+    """Fuzzy full-text search across every conversation transcript on
+    disk — the complete history (every message), not just titles. A real
+    full scan, deliberately: press Enter to run it rather than searching
+    on every keystroke, since it can take a while across many/large
+    transcripts. Dismisses with the chosen SearchResult, or None."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    SearchModal { align: center middle; }
+    SearchModal > Vertical {
+        width: 110; max-width: 95%; height: 80%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    SearchModal Label { text-style: bold; }
+    SearchModal .hint { color: $text-muted; margin-bottom: 1; }
+    SearchModal Input { margin-bottom: 1; }
+    SearchModal #status { color: $text-muted; height: 1; margin-bottom: 1; }
+    SearchModal OptionList { height: 1fr; }
+    """
+
+    def __init__(self, claude_dir: Path) -> None:
+        super().__init__()
+        self.claude_dir = claude_dir
+        self.results: list = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Search all conversation history")
+            yield Static(
+                "Enter to search (full scan — can take a while) · Esc to cancel",
+                classes="hint",
+            )
+            yield Input(placeholder="fuzzy search…", id="query")
+            yield Static("", id="status")
+            yield OptionList(id="results")
+
+    def on_mount(self) -> None:
+        self.query_one("#query", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if not query:
+            return
+        self.query_one("#status", Static).update(
+            "Searching the complete history — this can take a while…"
+        )
+        self.query_one("#results", OptionList).clear_options()
+        self._run_search(query)
+
+    @work(thread=True, exclusive=True, group="conversation-search")
+    def _run_search(self, query: str) -> None:
+        from .search import search_all_sessions
+
+        results = search_all_sessions(self.claude_dir, query)
+        self.app.call_from_thread(self._show_results, results)
+
+    def _show_results(self, results: list) -> None:
+        from rich.text import Text
+
+        self.results = results
+        option_list = self.query_one("#results", OptionList)
+        option_list.clear_options()
+        status = self.query_one("#status", Static)
+        if not results:
+            status.update("No matches.")
+            return
+        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
+        for i, result in enumerate(results):
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(f"{result.title[:70]:<70}\n", style="bold")
+            row.append(f"  {result.project_dir}\n", style="dim cyan")
+            row.append(f"  {result.snippet}", style="italic dim")
+            option_list.add_option(Option(row, id=str(i)))
+        option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.results[int(event.option.id)])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ConfirmModal(ModalScreen[bool]):
     BINDINGS = [
         Binding("escape", "no", "No"),
@@ -312,9 +398,11 @@ HELP_TEXT = """\
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
 
-[bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]
-  ctrl+d        build the selected session's diff vs master -> diff tab
+[bold cyan]Tabs (top of the right pane: session · diff · term-1 · +term)[/bold cyan]
+  click diff    builds automatically (mouse-interactive lazygit, if installed)
+  ctrl+d        same, plus jumps to the diff tab
   ctrl+s        switch to the persistent terminal tab
+  click +term   open another terminal tab (term-2, term-3, …)
   click a tab   or press enter to return to the session tab
 
 [bold cyan]Act on a session[/bold cyan]
@@ -335,6 +423,8 @@ HELP_TEXT = """\
   N             the shell way: terminal tab -> cd/z/mkdir anywhere -> type "claude"
                 and it opens as a managed session right there
   a             track an existing session
+  /             search all conversation history (fuzzy, full scan — off by
+                default, enable in settings)
   :             fleet assistant — plain English, proposes a plan, you confirm
   R             refresh now
 
@@ -495,6 +585,20 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Desktop notifications",
         "macOS notification when a session starts needing you. With terminal-notifier "
         "installed, clicking it selects the task in the list.",
+    ),
+    (
+        "jira_integration",
+        "Jira columns",
+        "Look up each session's linked Jira card (via its PR) and add JIRA / STATUS / "
+        "ASSIGNEE columns to the list views. Shift-O opens the card. Requires "
+        "JIRA_SITE, JIRA_EMAIL, and JIRA_API_TOKEN in the environment.",
+    ),
+    (
+        "conversation_search",
+        "Conversation search (/)",
+        "Fuzzy full-text search across every conversation transcript on disk — the "
+        "complete history, not just titles. Off by default: a full scan can take a "
+        "while across many/large transcripts.",
     ),
 ]
 

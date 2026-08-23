@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from .agent_status import fetch_agent_states
 from .claude_data import (
     DiscoveredSession,
     ParsedSession,
@@ -26,6 +27,7 @@ from .tmuxctl import (
     TmuxClient,
     TmuxSession,
     extract_prompt_question,
+    pane_shell_count,
     pane_shows_prompt,
     pane_shows_working,
 )
@@ -34,7 +36,9 @@ from .tmuxctl import (
 class SessionState(Enum):
     WORKING = "working"
     NEEDS_INPUT = "needs input"  # blocked on a human: permission / question
+    EXTERNAL_UPDATE = "external update"  # was waiting; the PR changed (comment, review, or any other update)
     NEEDS_REVIEW = "needs review"  # Claude finished; no human has looked yet
+    SHELL_RUNNING = "shell running"  # idle, but a shell it started is still live
     MONITORING = "monitoring"  # idle, but Claude's own Monitor is watching
     BACKGROUND = "background"  # idle, but a backgrounded command/agent runs
     WAITING_EXTERNAL = "waiting"  # done here; parked on a PR (w)
@@ -45,15 +49,22 @@ class SessionState(Enum):
 # Lower number = needs the human sooner. Used by the queue view and for
 # sorting within groups. Monitoring/background/waiting are all "Claude (or
 # the world) is on it" — lower priority than a genuine needs-review.
+# external_update outranks a plain needs-review: something specific
+# happened on the PR (a comment, a review, a push), not just "Claude
+# happened to finish quietly".
+# shell_running outranks monitoring: a shell Claude left running is more
+# directly "your problem" than an automated Monitor watch.
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
-    SessionState.NEEDS_REVIEW: 1,
-    SessionState.MONITORING: 2,
-    SessionState.BACKGROUND: 3,
-    SessionState.WORKING: 4,
-    SessionState.WAITING_EXTERNAL: 5,
-    SessionState.STOPPED: 6,
-    SessionState.DONE: 7,
+    SessionState.EXTERNAL_UPDATE: 1,
+    SessionState.NEEDS_REVIEW: 2,
+    SessionState.SHELL_RUNNING: 3,
+    SessionState.MONITORING: 4,
+    SessionState.BACKGROUND: 5,
+    SessionState.WORKING: 6,
+    SessionState.WAITING_EXTERNAL: 7,
+    SessionState.STOPPED: 8,
+    SessionState.DONE: 9,
 }
 
 _STATE_BY_VALUE = {state.value: state for state in SessionState}
@@ -103,6 +114,12 @@ class SessionView:
     # Lineage, resolved against the snapshot (ids of *visible* sessions):
     child_ids: list[str] = field(default_factory=list)
     sibling_ids: list[str] = field(default_factory=list)
+    # When this session last actually *changed* state (not last_activity,
+    # which ticks forward on every token while genuinely WORKING) — sort
+    # keys use this instead, so a session's position among same-rank peers
+    # stays put while nothing meaningful has changed, only reshuffling
+    # when a rank actually changes. See SessionRegistry._state_since.
+    rank_stable_since: float = 0.0
 
     @property
     def parent_id(self) -> str:
@@ -111,6 +128,26 @@ class SessionView:
     @property
     def relation(self) -> str:
         return self.tracked.relation
+
+    @property
+    def jira_key(self) -> str:
+        return self.tracked.jira_key
+
+    @property
+    def jira_status(self) -> str:
+        return self.tracked.jira_status
+
+    @property
+    def jira_assignee(self) -> str:
+        return self.tracked.jira_assignee
+
+    @property
+    def jira_url(self) -> str:
+        if not self.tracked.jira_key:
+            return ""
+        from .jira import browse_url
+
+        return browse_url(self.tracked.jira_key)
 
     @property
     def title(self) -> str:
@@ -158,6 +195,24 @@ class SessionView:
 
 EVENT_TOLERANCE = 2.0  # records may trail their hook event by a moment
 
+# Claude Code's own discriminator on the Notification hook payload (docs:
+# code.claude.com/docs/en/hooks#notification). It fires this ONE hook, with
+# the same generic "Claude is waiting for your input" message text, both
+# for a real blocking dialog and for a plain idle nudge once nothing has
+# happened for ~60s — the message alone can't tell them apart (replicated
+# live: an idle_prompt landing 60s after Stop with no pending tool call
+# was misread as a fresh dialog before this field was checked). Only these
+# types mean an actual human decision is pending.
+BLOCKING_NOTIFICATION_TYPES = frozenset({
+    "permission_prompt",
+    "elicitation_dialog",
+    "elicitation_url_dialog",
+    "agent_needs_input",
+})
+# idle_prompt, auth_success, elicitation_complete, elicitation_response,
+# agent_completed, and any type this version of cagents doesn't yet know
+# about, are all non-blocking — never a reason to show NEEDS_INPUT.
+
 
 def derive_from_events(
     events: dict, parsed: ParsedSession, tracked: TrackedSession, now: float
@@ -185,8 +240,20 @@ def derive_from_events(
     if latest <= 0:
         return None
     if t_notif == latest:
-        message = str(events.get("message") or "waiting on you")
-        return (SessionState.NEEDS_INPUT, message[:110])
+        notification_type = events.get("notification_type")
+        if isinstance(notification_type, str) and notification_type:
+            # Authoritative: cagents-ctx stamped exactly what Claude Code
+            # told it this notification was.
+            blocking = notification_type in BLOCKING_NOTIFICATION_TYPES
+        else:
+            # Older Claude Code build, or a payload that didn't carry the
+            # field — fall back to the best available signal: a real
+            # dialog always has an unresolved tool call behind it.
+            blocking = parsed.pending_tool_use
+        if blocking:
+            message = str(events.get("message") or "waiting on you")
+            return (SessionState.NEEDS_INPUT, message[:110])
+        return _finished_state(parsed, tracked, now)
     if t_stop == latest:
         return _finished_state(parsed, tracked, now)
     return (SessionState.WORKING, _working_detail(parsed))
@@ -199,11 +266,18 @@ def derive_state(
     pane_text: str = "",
     now: float | None = None,
     events: dict | None = None,
+    agent_state: dict | None = None,
 ) -> tuple[SessionState, str]:
     """Derive the lifecycle state and a short human-readable detail.
 
     The rules, in the order they win:
 
+    - `claude agents --json`'s own busy/waiting/idle for this session
+      (see agent_status.py) — authoritative, independent of pane text or
+      hooks; busy -> WORKING, waiting -> NEEDS_INPUT. idle alone isn't
+      enough to pick a specific state (doesn't distinguish done /
+      needs-review / monitoring / …), so it falls through to everything
+      below exactly as if this signal weren't available.
     - live pane showing a permission/question prompt  -> NEEDS_INPUT
     - live pane showing an in-progress turn           -> WORKING
     - a conversation record (user/assistant) written
@@ -226,6 +300,15 @@ def derive_state(
 
     if parsed is None:
         return (SessionState.STOPPED, "transcript missing")
+
+    if live and agent_state:
+        status = agent_state.get("status")
+        if status == "busy":
+            return (SessionState.WORKING, _working_detail(parsed))
+        if status == "waiting":
+            return (SessionState.NEEDS_INPUT, str(agent_state.get("waitingFor") or "waiting on you"))
+        # status == "idle" (or anything unrecognized): not specific
+        # enough on its own — fall through to events/pane heuristics.
 
     if live and events:
         from_events = derive_from_events(events, parsed, tracked, now)
@@ -260,7 +343,7 @@ def derive_state(
         if parsed.last_record_role == "":
             # A live session with no conversation yet: it's waiting for you.
             return (SessionState.NEEDS_INPUT, "at the prompt")
-        return _finished_state(parsed, tracked, now)
+        return _finished_state(parsed, tracked, now, pane_text)
 
     # Not live in any tmux we can see. If the transcript is being written
     # RIGHT NOW, some other host (e.g. cmux, a bare terminal) is running it:
@@ -276,26 +359,39 @@ def derive_state(
 
 
 def _finished_state(
-    parsed: ParsedSession, tracked: TrackedSession, now: float
+    parsed: ParsedSession, tracked: TrackedSession, now: float, pane_text: str = ""
 ) -> tuple[SessionState, str]:
     reviewed = tracked.reviewed_datetime()
     last = parsed.last_timestamp
     if reviewed is not None and (last is None or reviewed >= last):
-        detail = tracked.external_update or "done"
+        detail = tracked.finished_reason or "done"
         return (SessionState.DONE, detail)
     waiting = tracked.waiting_datetime()
     if waiting is not None and (last is None or waiting >= last):
         # Parked on the outside world; the PR poller resolves it. New local
         # activity makes the comparison fail -> back to needs-review.
         return (SessionState.WAITING_EXTERNAL, "waiting on PR")
+    external_update = tracked.external_update_datetime()
+    if external_update is not None and (last is None or external_update >= last):
+        # Reopened by the PR poller: something happened on the PR — a
+        # comment, a review, or any other change (commits, labels, edits)
+        # — while this was parked waiting. Same self-expiring idiom as
+        # waiting_since — the moment real new activity happens (you type
+        # something, the session goes back to work), the comparison fails
+        # on its own and this falls through to a plain needs-review/
+        # working, no explicit clearing required.
+        return (SessionState.EXTERNAL_UPDATE, tracked.finished_reason or "external update")
     # Long-lived side tasks make an idle prompt "not really needs you" —
     # and they survive new messages: only their own completion/timeout
     # (or, for monitors, the expiry deadline) ends them.
+    shells = pane_shell_count(pane_text)
+    if shells:
+        return (SessionState.SHELL_RUNNING, f"{shells} shell{'s' if shells != 1 else ''} running")
     if parsed.monitor_running(now):
         return (SessionState.MONITORING, "Claude monitor active")
     if parsed.background_active:
         return (SessionState.BACKGROUND, "background task running")
-    detail = tracked.external_update or "finished, unreviewed"
+    detail = tracked.finished_reason or "finished, unreviewed"
     return (SessionState.NEEDS_REVIEW, detail)
 
 
@@ -307,11 +403,13 @@ def derive_did_needs(
 ) -> tuple[str, str]:
     """The two waiting-on-you lines. Deliberately empty while WORKING —
     a mid-turn 'did' would be stale the moment it rendered."""
-    if state not in (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW):
+    if state not in (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW, SessionState.EXTERNAL_UPDATE):
         return ("", "")
     did = parsed.last_assistant_text if parsed else ""
     if state == SessionState.NEEDS_INPUT:
         needs = extract_prompt_question(pane_text) or detail or "your input"
+    elif state == SessionState.EXTERNAL_UPDATE:
+        needs = f"{detail or 'external update'} — check github, then r to accept"
     else:
         needs = "your review — r to accept"
     return (did, needs)
@@ -466,21 +564,28 @@ class SessionRegistry:
         store: Store,
         tmux: TmuxClient | None = None,
         claude_dir: Path | None = None,
+        agents_runner=None,
     ):
         self.store = store
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
+        self.agents_runner = agents_runner  # injectable for `claude agents --json`
         # Debounce state: a WORKING session must look blocked on two
         # consecutive refreshes before we say "needs you" — a single frame
         # of prompt-looking pane content is usually transient.
         self._last_state: dict[str, SessionState] = {}
         self._input_streak: dict[str, int] = {}
+        # When each session's currently-displayed state was last actually
+        # entered — frozen while the state doesn't change, so list order
+        # doesn't jitter from last_activity ticking forward every token.
+        self._state_since: dict[str, float] = {}
 
     def refresh(self, now: float | None = None) -> Snapshot:
         import time
 
         now = time.time() if now is None else now
         tmux_sessions = self.tmux.list_sessions()
+        agent_states = fetch_agent_states(runner=self.agents_runner)
 
         pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
         for tracked in list(self.store.sessions.values()):
@@ -511,9 +616,13 @@ class SessionRegistry:
             pane_text = pane_text_of(tmux) if tmux is not None else ""
             events = self._load_events(tracked.session_id)
             state, detail = derive_state(
-                parsed, tracked, live, pane_text, now, events=events
+                parsed, tracked, live, pane_text, now, events=events,
+                agent_state=agent_states.get(tracked.session_id),
             )
+            previous_state = self._last_state.get(tracked.session_id)
             state, detail = self._debounce(tracked.session_id, state, detail)
+            if state != previous_state or tracked.session_id not in self._state_since:
+                self._state_since[tracked.session_id] = now
             did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
             views.append(
                 SessionView(
@@ -529,6 +638,7 @@ class SessionRegistry:
                     missing=parsed is None,
                     did_line=did_line,
                     needs_line=needs_line,
+                    rank_stable_since=self._state_since[tracked.session_id],
                 )
             )
 
