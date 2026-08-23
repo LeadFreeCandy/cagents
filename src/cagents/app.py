@@ -59,7 +59,10 @@ from .tmuxctl import TmuxClient
 from .views import GroupedView, KanbanView, QueueView, SelectionChanged
 
 REFRESH_SECONDS = 2.0
-VIEWER_DEBOUNCE = 0.25  # settle time before the viewer follows the highlight
+VIEWER_DEBOUNCE = 0.4  # settle time before the viewer follows the highlight —
+# 0.25 was shorter than a natural pause mid-arrowing, so browsing to a row
+# two steps away respawned the viewer onto every row passed over (visible
+# flash of a foreign session; user-reported as flicker)
 PR_POLL_SECONDS = 300.0
 JIRA_POLL_SECONDS = 300.0
 COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
