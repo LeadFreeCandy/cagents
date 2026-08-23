@@ -592,3 +592,82 @@ async def test_shift_n_opens_terminal_tab(world, tmp_path, now, claude_dir):
         assert ["select-window", "-t", "=work:term-1"] in work.calls
         assert ["select-pane", "-t", "%1"] in outer.calls  # pane focused, tab untouched
         assert any(entry.startswith("ensure-window:alpha:term:") for entry in tmux.log)
+
+
+class TestCtxToasts:
+    """cagents-ctx runs as a short-lived tmux hook process — its warnings
+    must reach the app as real toasts via the toast-request file, not just
+    a tmux display-message flash."""
+
+    def test_do_shell_queues_shared_checkout_warning(self, monkeypatch, tmp_path):
+        import subprocess
+
+        from cagents import ctx
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        state = tmp_path / "state"
+        state.mkdir()
+        monkeypatch.setattr(ctx, "_workspace_alive", lambda: True)
+        monkeypatch.setattr(ctx, "_work_windows", lambda: ["session", "diff", "term-1"])
+        monkeypatch.setattr(ctx, "_work", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_tmux", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_display", lambda msg: None)
+        monkeypatch.setattr(ctx, "_last_term_target", lambda: "")
+        monkeypatch.setattr(ctx, "_set_last_term_target", lambda v: None)
+
+        assert ctx.do_shell(str(repo), state_dir=state) == 0
+        import json
+
+        lines = (state / ctx.TOAST_REQUEST_FILE).read_text().splitlines()
+        data = json.loads(lines[-1])
+        assert "no dedicated worktree" in data["message"]
+        assert data["severity"] == "warning"
+
+    def test_do_shell_queues_error_when_no_worktree(self, monkeypatch, tmp_path):
+        import json
+
+        from cagents import ctx
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        state = tmp_path / "state"
+        state.mkdir()
+        monkeypatch.setattr(ctx, "_workspace_alive", lambda: True)
+        monkeypatch.setattr(ctx, "_work", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_tmux", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_display", lambda msg: None)
+        monkeypatch.setattr(ctx, "_set_last_term_target", lambda v: None)
+
+        assert ctx.do_shell(str(plain), state_dir=state) == 1
+        data = json.loads((state / ctx.TOAST_REQUEST_FILE).read_text().splitlines()[-1])
+        assert data["severity"] == "error"
+
+    async def test_app_drains_toast_requests_into_notify(self, world, monkeypatch):
+        import json
+
+        from cagents.ctx import TOAST_REQUEST_FILE
+
+        app, store, tmux = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            shown = []
+            monkeypatch.setattr(
+                app, "notify",
+                lambda message, **kw: shown.append((message, kw.get("severity"))),
+            )
+            path = store.path.parent / TOAST_REQUEST_FILE
+            path.write_text(
+                json.dumps({"message": "cagents: no dedicated worktree for this session — "
+                                       "terminal opened in the shared repo checkout (/r)",
+                            "severity": "warning"}) + "\n"
+                + "not json\n"
+                + json.dumps({"message": "", "severity": "warning"}) + "\n"
+            )
+            app._handle_toast_requests()
+            assert len(shown) == 1 and shown[0][1] == "warning"
+            assert "no dedicated worktree" in shown[0][0]
+            assert not path.exists()  # consumed
+            app._handle_toast_requests()  # empty queue: no crash, no repeats
+            assert len(shown) == 1

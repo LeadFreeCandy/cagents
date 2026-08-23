@@ -295,6 +295,7 @@ class CagentsApp(App):
         self._notify_transitions(snapshot)
         self._handle_select_request()
         self._handle_spawn_request()
+        self._handle_toast_requests()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -1032,6 +1033,29 @@ exec {real!r} "$@"
                     ),
                     thread=True,
                 )
+
+    def _handle_toast_requests(self) -> None:
+        """Warnings queued by cagents-ctx (the C-t / tab-click hooks run in
+        their own short-lived processes and can't toast directly)."""
+        import json
+
+        from .ctx import TOAST_REQUEST_FILE
+
+        path = self.store.path.parent / TOAST_REQUEST_FILE
+        try:
+            lines = path.read_text("utf-8").splitlines()
+            path.unlink()
+        except OSError:
+            return
+        for line in lines[-5:]:  # a stale backlog must not toast-storm
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = str(data.get("message", "")).strip()
+            severity = data.get("severity", "warning")
+            if message and severity in ("information", "warning", "error"):
+                self.notify(message, severity=severity)
 
     def _handle_select_request(self) -> None:
         session_id = read_select_request(self.store.path.parent)

@@ -124,6 +124,24 @@ def _display(message: str) -> None:
     _tmux("display-message", message)
 
 
+TOAST_REQUEST_FILE = "toast-request"
+
+
+def queue_toast(state_dir: Path | None, message: str, severity: str = "warning") -> None:
+    """Hand a message to the cagents app to show as a real toast — this
+    process is a short-lived tmux hook, so a tmux display-message flash is
+    all it can render itself (easy to miss). The app drains the file on
+    its next refresh. Best-effort, append-only (two hooks racing just
+    produce two lines)."""
+    if state_dir is None:
+        return
+    try:
+        with (state_dir / TOAST_REQUEST_FILE).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"message": message, "severity": severity}) + "\n")
+    except OSError:
+        pass
+
+
 def shim_path_env(shim_dir: str) -> list[str]:
     """-e args putting the cagents `claude` shim first in shells: PATH for
     plain shells, ZDOTDIR (sibling of the shim dir) so zsh overrides any
@@ -196,7 +214,7 @@ def _set_last_term_target(value: str) -> None:
 
 def do_shell(
     directory: str, session_id: str = "", tmux_name: str = "", tmux_socket: str = "",
-    shim_dir: str = "", select: bool = True,
+    shim_dir: str = "", select: bool = True, state_dir: Path | None = None,
 ) -> int:
     """Point the terminal tab (or, outside tab mode, a fresh split) at
     THIS session's own worktree and its own persistent terminal window —
@@ -208,9 +226,11 @@ def do_shell(
     if not _workspace_alive():
         if kind == "":
             _display("cagents: no git worktree found for this session")
+            queue_toast(state_dir, "No git worktree found for this session.", "error")
             return 1
         if warning:
             _display(warning)
+            queue_toast(state_dir, warning)
         return _tmux("split-window", "-v", "-l", "12", *shim_path_env(shim_dir),
                      "-c", effective_dir)
     if kind == "":
@@ -218,12 +238,14 @@ def do_shell(
               *_error_placeholder("no git worktree found for this session"))
         _set_last_term_target("")
         _display("cagents: no git worktree found for this session")
+        queue_toast(state_dir, "No git worktree found for this session.", "error")
         if select:
             _work("select-window", "-t", "=work:term-1")
             _tmux("select-pane", "-t", ":.1")
         return 1
     if warning:
         _display(warning)
+        queue_toast(state_dir, warning)
     if tmux_name:
         from .tmuxctl import CREATE_SOCKET, TmuxClient
 
@@ -515,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
             tmux_socket=str(context.get("tmux_socket", "")),
             shim_dir=str(context.get("shim_dir", "")),
             select=not args.no_select,
+            state_dir=args.context.parent,
         )
     if args.command == "newterm":
         return do_new_term(directory, shim_dir=str(context.get("shim_dir", "")))
