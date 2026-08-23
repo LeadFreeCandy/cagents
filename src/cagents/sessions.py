@@ -579,6 +579,12 @@ class SessionRegistry:
         # entered — frozen while the state doesn't change, so list order
         # doesn't jitter from last_activity ticking forward every token.
         self._state_since: dict[str, float] = {}
+        # Transcript locations resolved via the discover_sessions fallback.
+        # Claude Code's EnterWorktree physically MOVES the transcript into
+        # the worktree's encoded project dir (verified live), so sessions
+        # that used it miss the canonical path forever — without a cache
+        # that's a full ~/.claude/projects scan on every refresh.
+        self._file_cache: dict[str, Path] = {}
 
     def refresh(self, now: float | None = None) -> Snapshot:
         import time
@@ -701,10 +707,17 @@ class SessionRegistry:
         path = session_file_path(self.claude_dir, tracked.project_dir, tracked.session_id)
         if path.is_file():
             return path
-        # Fall back to a scan: the project dir encoding is lossy, and the
-        # session may have been started in a subdirectory.
+        cached = self._file_cache.get(tracked.session_id)
+        if cached is not None and cached.is_file():
+            return cached
+        # Fall back to a scan: the project dir encoding is lossy, the session
+        # may have started in a subdirectory, and EnterWorktree moves the
+        # transcript under the worktree's own encoded dir. Cache the hit —
+        # rescanning every refresh is the expensive path (and the transcript
+        # can move again on the next EnterWorktree, hence the is_file check).
         for found in discover_sessions(self.claude_dir, min_size=0):
             if found.session_id == tracked.session_id:
+                self._file_cache[tracked.session_id] = found.path
                 return found.path
         return None
 

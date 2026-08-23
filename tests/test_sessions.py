@@ -448,3 +448,55 @@ class TestRegistry:
         registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
         snap = registry.refresh(now=now)
         assert snap.views[0].state == SessionState.NEEDS_INPUT
+
+
+class TestEnterWorktreeTranscriptMove:
+    """Claude Code's EnterWorktree physically moves the transcript file into
+    the worktree's encoded project dir (verified live on 2026-08-23). The
+    registry must keep finding it — and must not pay a full projects scan on
+    every refresh once it has."""
+
+    def _registry(self, tmp_path):
+        from cagents.sessions import SessionRegistry
+        from cagents.store import Store
+
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, "/proj/alpha", "2026-08-23T10:00:00+00:00")
+        claude_dir = tmp_path / "claude"
+        return SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir), claude_dir
+
+    def _write_transcript(self, claude_dir, encoded, sid):
+        d = claude_dir / "projects" / encoded
+        d.mkdir(parents=True)
+        path = d / f"{sid}.jsonl"
+        path.write_text(
+            '{"type": "user", "sessionId": "%s", "cwd": "/proj/alpha-wt", '
+            '"timestamp": "2026-08-23T10:00:00.000Z", '
+            '"message": {"role": "user", "content": "hi"}}\n' % sid
+        )
+        return path
+
+    def test_moved_transcript_found_and_cached(self, tmp_path):
+        reg, claude_dir = self._registry(tmp_path)
+        moved = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-a", SID1)
+        tracked = reg.store.sessions[SID1]
+        assert reg._find_session_file(tracked) == moved
+        assert reg._file_cache[SID1] == moved
+        # Cached: a second lookup must not rescan (poison discover_sessions).
+        import cagents.sessions as sessions_mod
+        orig = sessions_mod.discover_sessions
+        sessions_mod.discover_sessions = lambda *a, **k: (_ for _ in ()).throw(AssertionError("rescanned"))
+        try:
+            assert reg._find_session_file(tracked) == moved
+        finally:
+            sessions_mod.discover_sessions = orig
+
+    def test_second_move_invalidates_cache(self, tmp_path):
+        reg, claude_dir = self._registry(tmp_path)
+        first = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-a", SID1)
+        tracked = reg.store.sessions[SID1]
+        assert reg._find_session_file(tracked) == first
+        # EnterWorktree again: transcript moves to wt-b's encoded dir.
+        second = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-b", SID1)
+        first.unlink()
+        assert reg._find_session_file(tracked) == second
