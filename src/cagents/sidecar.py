@@ -127,21 +127,7 @@ class Sidecar:
             ["unbind", "-n", "WheelDownStatus"],
         ):
             self._work(option)
-        # Every work-session window change lands in ctx.log with its cause
-        # (or lack of one) — the cross-validation line for "it switched on
-        # its own" reports.
-        try:
-            from .ctx import LOG_FILE_NAME
 
-            log_path = str(Path(context_path).parent / LOG_FILE_NAME) if context_path else ""
-        except Exception:
-            log_path = ""
-        if log_path:
-            self._work([
-                "set-hook", "-g", "session-window-changed",
-                'run-shell -b "echo \"$(date \"+%Y-%m-%d %H:%M:%S\") [hook] '
-                f'work window -> #{{window_name}}\" >> {log_path}"',
-            ])
         if ctx_prog and context_path:
             import shlex
 
@@ -165,6 +151,39 @@ class Sidecar:
             self._work([
                 "set-hook", "-g", "-a", "after-select-window",
                 f"if -F '#{{==:#{{window_name}},term-1}}' '{open_term}' ''",
+            ])
+            # ---- forensic instrumentation (all via cagents-ctx wlog, which
+            # timestamps into ctx.log — echo/date quoting inside tmux hooks
+            # proved unfixable). Cross-validation for phantom tab switches:
+            # every select-window command (even re-selecting the current
+            # window), every actual window change, and every mouse event on
+            # the status line gets a line.
+            def wlog(tag: str) -> str:
+                return f"{ctx_prog} wlog {tag} --context {q_context}"
+
+            self._work([
+                "set-hook", "-g", "-a", "after-select-window",
+                'run-shell -b "' + wlog("select-window:#{window_name}") + '"',
+            ])
+            self._work([
+                "set-hook", "-g", "session-window-changed",
+                'run-shell -b "' + wlog("window-changed:#{window_name}") + '"',
+            ])
+            # Wheel over the tab bar: deliberately does NOT switch tabs
+            # (phantom-switch suspect #1) — log-only so we see it happen.
+            for key, tag in (
+                ("WheelUpStatus", "wheel-up-status"),
+                ("WheelDownStatus", "wheel-down-status"),
+            ):
+                self._work(["bind", "-n", key, "run-shell", "-b", wlog(tag)])
+            # Tab-bar click: keep the default switch, but log it first with
+            # coordinates — a phantom switch with no matching click line is
+            # programmatic; one WITH a click line at odd coordinates points
+            # at garbled mouse-escape parsing.
+            click_log = wlog("status-click:#{mouse_x},#{mouse_y}:#{window_name}")
+            self._work([
+                "bind", "-n", "MouseDown1Status",
+                'run-shell -b "' + click_log + '" ; switch-client -t =',
             ])
         if created:
             self._work(["select-window", "-t", "=work:session"])
@@ -227,13 +246,15 @@ class Sidecar:
     def show_viewer(self, shell_command: str) -> None:
         """Point the SESSION TAB at `shell_command` (live attach or static
         preview). Never steals focus or switches tabs — browsing must not
-        disturb what you're looking at."""
+        disturb what you're looking at. Content is respawned BEFORE the
+        viewer pane is (first) created: at startup the split must appear
+        already showing the conversation, not flash the placeholder shell
+        for a beat (user-reported)."""
+        if shell_command != self.current_command:
+            self._ensure_window("session")
+            self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
+            self.current_command = shell_command
         self._ensure_viewer_pane()
-        if shell_command == self.current_command:
-            return
-        self._ensure_window("session")
-        self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
-        self.current_command = shell_command
 
     def select_tab(self, name: str) -> None:
         self._work(["select-window", "-t", f"=work:{name}"])

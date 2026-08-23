@@ -594,7 +594,8 @@ def do_event(kind: str, path: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
     parser.add_argument(
-        "command", choices=["shell", "diff", "newterm", "event"], nargs="?", default="shell"
+        "command", choices=["shell", "diff", "newterm", "event", "wlog"],
+        nargs="?", default="shell",
     )
     parser.add_argument("kind", nargs="?", default="")
     parser.add_argument("--file", type=Path, default=None)
@@ -603,6 +604,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="rebuild without switching tabs (used by the tab-click hook)")
     args = parser.parse_args(argv)
 
+    if args.command == "wlog":
+        # tmux-hook logging: quoting-proof (tmux expands #{formats} into the
+        # kind argument; no shell/date/quote gymnastics involved).
+        if args.context is None:
+            return 2
+        init_log(args.context.parent)
+        _log(f"[tmux-hook] {args.kind}")
+        return 0
     if args.command == "event":
         if not args.kind or args.file is None:
             return 2

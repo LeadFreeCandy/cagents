@@ -245,6 +245,12 @@ class CagentsApp(App):
     def notify(self, message, *, title="", severity="information", timeout=None, **kwargs):
         """Routine toasts are opt-in (settings). Warnings and errors always
         show — silent failure is the one unforgivable sin (spec §11)."""
+        try:
+            # Every toast lands in ctx.log — "it threw an error at startup"
+            # must be reconstructable after the fact.
+            self._dbg(f"notify[{severity}]: {message}")
+        except Exception:
+            pass
         if severity == "information" and not self.store.get_setting("notifications"):
             return None
         if timeout is None:

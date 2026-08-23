@@ -650,7 +650,16 @@ def test_workspace_disables_wheel_tab_switching():
     flat = [" ".join(map(str, c)) for c in work.calls]
     assert any(c == "unbind -n WheelUpStatus" for c in flat)
     assert any(c == "unbind -n WheelDownStatus" for c in flat)
-    assert any("session-window-changed" in c and "ctx.log" in c for c in flat)
+    # forensics: every window change / select / status-line mouse event is
+    # logged through cagents-ctx wlog (quoting-proof), and tab clicks keep
+    # their default switch after logging.
+    assert any("session-window-changed" in c and "wlog window-changed:" in c for c in flat)
+    assert any("wlog select-window:" in c for c in flat)
+    assert any("WheelUpStatus run-shell -b" in c and "wlog wheel-up-status" in c for c in flat)
+    assert any(
+        "MouseDown1Status" in c and "wlog status-click:" in c and "switch-client -t =" in c
+        for c in flat
+    )
 
 
 def test_window_view_selects_only_on_create_or_explicit_open():
