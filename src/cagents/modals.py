@@ -398,11 +398,10 @@ HELP_TEXT = """\
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
 
-[bold cyan]Tabs (top of the right pane: session · diff · term-1 · +term)[/bold cyan]
+[bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]
   click diff    builds automatically (mouse-interactive lazygit, if installed)
   ctrl+d        same, plus jumps to the diff tab
   ctrl+t        toggle the terminal tab (back to session when already there)
-  click +term   open another terminal tab (term-2, term-3, …)
   click a tab   or press enter to return to the session tab
 
 [bold cyan]Act on a session[/bold cyan]

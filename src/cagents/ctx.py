@@ -15,7 +15,6 @@ acts *inside the same tmux server* (run-shell provides $TMUX):
                                            whichever session opened one
                                            last (see do_shell)
     cagents-ctx diff    --context <file>   the diff tab (or a popup)
-    cagents-ctx newterm --context <file>   +term tab: open a fresh terminal
     cagents-ctx event <Kind> --file <f>    Claude Code hook target: stamp a
                                            state event for the session
 
@@ -311,28 +310,21 @@ def do_shell(
     if not _workspace_alive():
         _log("do_shell: workspace not alive -> split-window fallback")
         if kind == "":
-            _display("cagents: no git worktree found for this session")
-            queue_toast(state_dir, "No git worktree found for this session.", "error")
             return 1
-        if warning:
-            _display(warning)
-            queue_toast(state_dir, warning)
         return _tmux("split-window", "-v", "-l", "12", *shim_path_env(shim_dir),
                      "-c", effective_dir)
     if kind == "":
+        # Deliberately quiet (no toast/status flash — user choice): the term
+        # tab itself shows the explanation via the placeholder.
         _work("respawn-pane", "-k", "-t", "=work:term-1",
               *_error_placeholder("no git worktree found for this session"))
         _set_last_term_target("")
-        _display("cagents: no git worktree found for this session")
-        queue_toast(state_dir, "No git worktree found for this session.", "error")
         if select:
             _work("select-window", "-t", "=work:term-1")
             _tmux("select-pane", "-t", ":.1")
         return 1
-    if warning:
-        _display(warning)
-        if select:  # hook resyncs (--no-select) would duplicate the toast
-            queue_toast(state_dir, warning)
+    # Shared repo checkout (no dedicated worktree): open there, silently —
+    # the warning toast/flash proved to be pure noise in practice.
     if tmux_name:
         from .tmuxctl import CREATE_SOCKET, TmuxClient
 
@@ -371,37 +363,6 @@ def do_shell(
     if select:
         _work("select-window", "-t", "=work:term-1")
         _tmux("select-pane", "-t", ":.1")  # focus the workspace pane
-    return 0
-
-
-def _next_term_name(existing: list[str]) -> str:
-    """term-1, term-2, … — the next unused number, not just len+1 (closed
-    tabs leave gaps; two tabs closed then one opened must not collide with
-    a still-open higher-numbered one)."""
-    nums = []
-    for name in existing:
-        if name.startswith("term-"):
-            try:
-                nums.append(int(name[len("term-") :]))
-            except ValueError:
-                pass
-    return f"term-{(max(nums) + 1) if nums else 1}"
-
-
-def do_new_term(directory: str, shim_dir: str = "") -> int:
-    """The +term tab was selected: open a genuinely new terminal tab (not
-    the shared term-1) and switch to it. Tab mode only — +term doesn't
-    exist outside it."""
-    if not _workspace_alive():
-        return 1
-    env = shim_path_env(shim_dir)
-    name = _next_term_name(_work_windows())
-    args = ["new-window", "-d", "-t", "=work:", "-n", name, *env]
-    if directory and Path(directory).is_dir():
-        args += ["-c", directory]
-    _work(*args)
-    _work("select-window", "-t", f"=work:{name}")
-    _tmux("select-pane", "-t", ":.1")
     return 0
 
 
@@ -606,7 +567,7 @@ def do_event(kind: str, path: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
     parser.add_argument(
-        "command", choices=["shell", "diff", "newterm", "event", "wlog"],
+        "command", choices=["shell", "diff", "event", "wlog"],
         nargs="?", default="shell",
     )
     parser.add_argument("kind", nargs="?", default="")
@@ -647,8 +608,6 @@ def main(argv: list[str] | None = None) -> int:
             select=not args.no_select,
             state_dir=args.context.parent,
         )
-    if args.command == "newterm":
-        return do_new_term(directory, shim_dir=str(context.get("shim_dir", "")))
     return do_diff(
         directory, select=not args.no_select,
         mode=str(context.get("diff_mode", "branch")),

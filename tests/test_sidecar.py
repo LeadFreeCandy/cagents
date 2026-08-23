@@ -47,31 +47,24 @@ class TestSidecarPane:
         monkeypatch.setenv("CAGENTS_SIDECAR", "0")
         assert Sidecar.enabled() is False
 
-    def test_ensure_workspace_creates_four_tabs_in_order(self):
+    def test_ensure_workspace_creates_three_tabs_in_order(self):
         sidecar, outer, work = self._sidecar()
         sidecar.ensure_workspace(terminal_dir="/launch/here")
-        # "newterm" is the real window name behind the "+term" tab — see
-        # _ensure_new_term_tab: tmux can't reliably target "-t work:+term".
-        assert work.windows == ["session", "diff", "term-1", "newterm"]  # l -> r
+        assert work.windows == ["session", "diff", "term-1"]  # l -> r
         term = next(c for c in work.calls if c[0] == "new-window" and "term-1" in c)
         assert "-c" in term and "/launch/here" in term
-        new_term = next(c for c in work.calls if c[0] == "new-window" and "newterm" in c)
-        assert "work:99" in " ".join(new_term)  # pinned far right
-        # displayed as "+term" via a per-window format override
         flat = [" ".join(c) for c in work.calls]
-        assert any("window-status-format" in c and "+term" in c for c in flat)
         # tab bar on top of the workspace
         assert any("status-position top" in c for c in flat)
         # the container's right pane attaches the workspace
         split = next(c for c in outer.calls if c[0] == "split-window")
-        assert f"-L {Sidecar.__init__.__defaults__ or ''}" or True
         assert "cagents-work" in split[-1] and "attach-session" in split[-1]
         # idempotent: a second call creates no duplicate tabs, even though
         # it re-applies options/hooks every time on purpose (see the
         # persists-across-restart tests below)
         calls_before = len(work.calls)
         sidecar.ensure_workspace()
-        assert work.windows == ["session", "diff", "term-1", "newterm"]
+        assert work.windows == ["session", "diff", "term-1"]
         assert not any(c[0] == "new-window" for c in work.calls[calls_before:])
 
     def test_hooks_apply_even_to_a_workspace_that_already_existed(self):
@@ -82,34 +75,12 @@ class TestSidecarPane:
         # session too, not just a freshly created one.
         sidecar, outer, work = self._sidecar()
         work.exists = True
-        work.windows = ["session", "diff", "term-1", "newterm"]
+        work.windows = ["session", "diff", "term-1"]
         sidecar.ensure_workspace(ctx_prog="/bin/cagents-ctx", context_path="/tmp/ctx.json")
         flat = [" ".join(c) for c in work.calls]
         assert any("after-select-window" in c and "diff" in c for c in flat)
-        assert any("after-select-window" in c and "newterm" in c for c in flat)
+        assert any("after-select-window" in c and "term-1" in c for c in flat)
         assert any("mouse on" in c for c in flat)
-
-    def test_new_term_window_is_never_named_literally_plus_term(self):
-        # Confirmed live: tmux's target parser silently fails to select a
-        # window named "+term" (-t work:+term never actually changes the
-        # current window, so the after-select-window hook this tab
-        # depends on never fires). Never regress the real window name
-        # back to the literal "+term" string.
-        from cagents.sidecar import NEW_TERM_WINDOW
-
-        sidecar, outer, work = self._sidecar()
-        sidecar.ensure_workspace()
-        assert "+term" not in work.windows
-        assert NEW_TERM_WINDOW in work.windows
-
-    def test_new_term_tab_not_recreated_if_present(self):
-        sidecar, outer, work = self._sidecar()
-        sidecar.ensure_workspace()
-        calls_before = len(work.calls)
-        sidecar.ensure_workspace()
-        assert not any(
-            c[0] == "new-window" and "newterm" in c for c in work.calls[calls_before:]
-        )
 
     def test_show_viewer_respawns_session_tab_only(self):
         sidecar, outer, work = self._sidecar()
@@ -453,8 +424,8 @@ async def test_terminal_errors_instead_of_falling_back_when_worktree_is_missing(
         await pilot.pause(0.2)
         assert not any(entry.startswith("ensure-window:") for entry in tmux.log)
         assert not any(c[0] == "respawn-pane" and "=work:term-1" in c for c in work.calls)
-        toasts = list(app.query(Toast))
-        assert any("worktree" in t.render().plain.lower() for t in toasts)
+        # quiet by design (user choice): no toast for a missing worktree
+        assert not list(app.query(Toast))
 
 
 async def test_terminal_errors_when_no_session_is_selected(world):
@@ -563,7 +534,7 @@ def test_ensure_workspace_installs_diff_click_hook():
     )
     hook = next(
         c for c in work.calls
-        if c[0] == "set-hook" and "after-select-window" in " ".join(c)
+        if c[0] == "set-hook" and "after-select-window" in " ".join(c) and "if -F" in " ".join(c)
     )
     joined = " ".join(hook)
     assert "after-select-window" in joined

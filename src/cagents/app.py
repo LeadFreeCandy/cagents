@@ -763,13 +763,12 @@ exec {real!r} "$@"
             return
         directory, kind, warning = resolve_terminal_directory(view.work_dir)
         if kind == "":
-            self.notify(
-                f"No git worktree found for this session ({view.work_dir or 'no directory'}).",
-                severity="error",
-            )
+            # quiet by design (user choice): nothing usable to attach — the
+            # C-t/tab path shows the placeholder; N just logs and stays put
+            self._dbg(f"open_terminal: no worktree for {view.work_dir!r}")
             return
         if warning:
-            self.notify(warning, severity="warning")
+            self._dbg(f"open_terminal: {warning}")
         if self.sidecar is not None and self.store.get_setting("sidebar"):
             try:
                 if view.live and view.tmux_name:

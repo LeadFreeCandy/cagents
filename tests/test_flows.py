@@ -331,7 +331,7 @@ class TestCtx:
         assert ctx.do_shell(str(plain)) == 1
         respawn = next(c for c in respawned if c[0] == "respawn-pane")
         assert "no git worktree found" in " ".join(str(a) for a in respawn)
-        assert any("no git worktree" in m for m in displayed)
+        assert displayed == []  # quiet by design: the pane text IS the feedback
         # never silently falls back to a plain shell anywhere else
         assert not any(c[0] == "new-window" for c in respawned)
 
@@ -350,7 +350,7 @@ class TestCtx:
         displayed = []
         monkeypatch.setattr(ctx, "_display", lambda msg: displayed.append(msg))
         assert ctx.do_shell(str(repo)) == 0
-        assert any("no dedicated worktree" in m for m in displayed)
+        assert displayed == []  # shared checkout opens silently (user choice)
         respawn = next(c for c in work_calls if c[0] == "respawn-pane")
         assert str(repo.resolve()) in " ".join(str(a) for a in respawn)
 
@@ -395,21 +395,6 @@ class TestCtx:
         work_calls.clear()
         ctx.do_shell(str(wt), tmux_name="alpha", tmux_socket="claude")
         assert not any(c[0] == "respawn-pane" for c in work_calls)
-
-    def test_next_term_name_fills_gaps_and_avoids_collisions(self):
-        from cagents.ctx import _next_term_name
-
-        assert _next_term_name(["session", "diff", "term-1", "+term"]) == "term-2"
-        assert _next_term_name(["session", "diff", "+term"]) == "term-1"
-        # term-1 was closed but term-2 and term-4 are still open — the
-        # next name must not collide with a still-open higher number
-        assert _next_term_name(["session", "diff", "term-2", "term-4", "+term"]) == "term-5"
-
-    def test_do_new_term_requires_a_live_workspace(self, monkeypatch):
-        from cagents import ctx
-
-        monkeypatch.setattr(ctx, "_workspace_alive", lambda: False)
-        assert ctx.do_new_term("/proj/x") == 1
 
     def test_lazygit_command_cds_and_uses_the_disable_popups_config(self, tmp_path, monkeypatch):
         from cagents import ctx
@@ -602,7 +587,7 @@ class TestCtxToasts:
     must reach the app as real toasts via the toast-request file, not just
     a tmux display-message flash."""
 
-    def test_do_shell_queues_shared_checkout_warning(self, monkeypatch, tmp_path):
+    def test_do_shell_shared_checkout_is_silent(self, monkeypatch, tmp_path):
         import subprocess
 
         from cagents import ctx
@@ -621,14 +606,10 @@ class TestCtxToasts:
         monkeypatch.setattr(ctx, "_set_last_term_target", lambda v: None)
 
         assert ctx.do_shell(str(repo), state_dir=state) == 0
-        import json
+        # quiet by design (user choice): shared checkout queues NO toast
+        assert not (state / ctx.TOAST_REQUEST_FILE).exists()
 
-        lines = (state / ctx.TOAST_REQUEST_FILE).read_text().splitlines()
-        data = json.loads(lines[-1])
-        assert "no dedicated worktree" in data["message"]
-        assert data["severity"] == "warning"
-
-    def test_do_shell_queues_error_when_no_worktree(self, monkeypatch, tmp_path):
+    def test_do_shell_no_worktree_is_silent(self, monkeypatch, tmp_path):
         import json
 
         from cagents import ctx
@@ -644,8 +625,8 @@ class TestCtxToasts:
         monkeypatch.setattr(ctx, "_set_last_term_target", lambda v: None)
 
         assert ctx.do_shell(str(plain), state_dir=state) == 1
-        data = json.loads((state / ctx.TOAST_REQUEST_FILE).read_text().splitlines()[-1])
-        assert data["severity"] == "error"
+        # quiet by design (user choice): no toast — the pane placeholder explains
+        assert not (state / ctx.TOAST_REQUEST_FILE).exists()
 
     async def test_app_drains_toast_requests_into_notify(self, world, monkeypatch):
         import json
@@ -697,8 +678,8 @@ class TestCtxLogging:
         assert ctx.tmux_entry(["shell", "--context", str(context)]) == 0
         log = (tmp_path / ctx.LOG_FILE_NAME).read_text()
         assert "invoked (" in log and "do_shell:" in log and "exit: 1" in log
-        # queued as an error toast for the app to show
-        assert "No git worktree found" in (tmp_path / ctx.TOAST_REQUEST_FILE).read_text()
+        # quiet by design: worktree problems never toast (the pane explains)
+        assert not (tmp_path / ctx.TOAST_REQUEST_FILE).exists()
 
     def test_tmux_entry_logs_crashes(self, monkeypatch, tmp_path):
         import json
