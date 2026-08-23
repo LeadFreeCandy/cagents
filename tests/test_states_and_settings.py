@@ -943,3 +943,36 @@ async def test_search_flow_tracks_and_selects_the_chosen_result(world, claude_di
         assert sid in store.sessions
         assert store.sessions[sid].project_dir == "/proj/found-me"
         assert app.selected_session_id == sid
+
+
+class TestTimeOrderedQueue:
+    """time_ordered_queue: every state ranks equal, so recency of the last
+    STATE CHANGE is the whole ordering — a fresh working->review transition
+    outranks a stale needs-review pile."""
+
+    async def test_flat_ranks_and_transition_recency_order(self, world):
+        from cagents.views import attention_sort_key
+
+        app, store, tmux = world
+        store.set_setting("time_ordered_queue", True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            views = app.snapshot.views
+            assert views, "fixture should have sessions"
+            assert all(v.attention_rank == 0 for v in views)
+            # stale review vs fresh working (flat ranks): recency wins now
+            from types import SimpleNamespace
+
+            review = SimpleNamespace(
+                attention_rank=0, rank_stable_since=1000.0, last_activity=None
+            )
+            working = SimpleNamespace(
+                attention_rank=0, rank_stable_since=2000.0, last_activity=None
+            )
+            assert sorted([review, working], key=attention_sort_key)[0] is working
+
+            # setting off: state priority is back in charge
+            store.set_setting("time_ordered_queue", False)
+            app.refresh_data()
+            await pilot.pause(0.3)
+            assert any(v.attention_rank != 0 for v in app.snapshot.views)

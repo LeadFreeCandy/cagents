@@ -662,9 +662,19 @@ class SessionRegistry:
                 ]
 
         # Attention ranks: the user can reorder state priority in settings.
-        rank_map = attention_rank_map(self.store.get_setting("state_order"))
-        for view in views:
-            view.attention_rank = rank_map[view.state]
+        # With time_ordered_queue on, every state ranks equal, so ordering
+        # falls through to rank_stable_since: a session rises to the top
+        # ONLY when its state actually changes (working -> needs review,
+        # a new message arriving, ...). Active work stays near the top; a
+        # backlog of long-unreviewed sessions sinks instead of pinning
+        # itself above everything by state alone.
+        if self.store.get_setting("time_ordered_queue"):
+            for view in views:
+                view.attention_rank = 0
+        else:
+            rank_map = attention_rank_map(self.store.get_setting("state_order"))
+            for view in views:
+                view.attention_rank = rank_map[view.state]
 
         # Stable, human-friendly default order: project, then newest first.
         views.sort(

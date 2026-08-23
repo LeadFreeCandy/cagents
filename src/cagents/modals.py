@@ -600,6 +600,13 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "while across many/large transcripts.",
     ),
     (
+        "time_ordered_queue",
+        "Time-ordered queue",
+        "All states rank equally; sessions rise to the top only when their state "
+        "changes (e.g. working → needs review). Keeps active work above a backlog "
+        "of stale unreviewed sessions.",
+    ),
+    (
         "debug_log",
         "Debug log",
         "Verbose trace of keys, clicks, tmux commands and state changes into ctx.log "

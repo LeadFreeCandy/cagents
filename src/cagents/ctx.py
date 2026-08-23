@@ -120,14 +120,21 @@ def _mark_built() -> None:
 
 
 _LOG_FILE: Path | None = None
+_LOG_FH = None  # cached append handle — reopening per line cost ~1ms on the UI thread
 LOG_FILE_NAME = "ctx.log"
 
 
 def init_log(state_dir: Path) -> None:
     """Point cagents-ctx logging at <state_dir>/ctx.log. The app calls this
     too, so hook processes and the app narrate into the same file."""
-    global _LOG_FILE
+    global _LOG_FILE, _LOG_FH
     _LOG_FILE = state_dir / LOG_FILE_NAME
+    if _LOG_FH is not None:
+        try:
+            _LOG_FH.close()
+        except OSError:
+            pass
+        _LOG_FH = None
 
 
 _VERSION_STAMP: str | None = None
@@ -175,16 +182,19 @@ def _log(message: str) -> None:
     are invisible tmux hooks — when one misbehaves, this file is the only
     place the story exists. Best-effort: logging must never break the
     hook it's narrating."""
+    global _LOG_FH
     if _LOG_FILE is None:
         return
     try:
         from datetime import datetime
 
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with _LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(f"{stamp} [{os.getpid()}] {message}\n")
-    except OSError:
-        pass
+        if _LOG_FH is None:
+            _LOG_FH = _LOG_FILE.open("a", encoding="utf-8")
+        _LOG_FH.write(f"{stamp} [{os.getpid()}] {message}\n")
+        _LOG_FH.flush()
+    except (OSError, ValueError):
+        _LOG_FH = None
 
 
 def _display(message: str) -> None:

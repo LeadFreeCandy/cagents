@@ -159,6 +159,9 @@ class CagentsApp(App):
         self._warned_no_notifier = False
         self._viewer_timer = None
         self._last_viewer_sync = 0.0
+        import threading as _threading
+
+        self._viewer_sync_lock = _threading.Lock()
         self._viewer_target: str = ""
         self._pending_highlight: str | None = None
         self._undo_stack: list[tuple[str, dict]] = []
@@ -362,15 +365,28 @@ class CagentsApp(App):
             # settled on, via the debounce that got us here).
             self._resume_for_preview(view)
             return
-        self._sync_terminal(view)
-        command = self._viewer_command(view)
-        if command == self._viewer_target:
-            return
-        try:
-            self.sidecar.show_viewer(command)
-            self._viewer_target = command
-        except Exception as error:
-            self.notify(f"Viewer failed: {error}", severity="error")
+        # The tmux round-trips run OFF the UI thread: doing them inline in
+        # the event handler blocked Textual's redraw exactly while the ←
+        # focus hook resized the rail — a visibly torn/doubled list frame
+        # for as long as the subprocess calls took.
+        self.run_worker(
+            lambda v=view: self._sync_viewer_blocking(v),
+            thread=True, group="viewer-sync", exclusive=True,
+        )
+
+    def _sync_viewer_blocking(self, view: SessionView) -> None:
+        with self._viewer_sync_lock:  # exclusive= can't stop a running thread
+            try:
+                self._sync_terminal(view)
+                command = self._viewer_command(view)
+                if command == self._viewer_target:
+                    return
+                self.sidecar.show_viewer(command)
+                self._viewer_target = command
+            except Exception as error:
+                self.call_from_thread(
+                    self.notify, f"Viewer failed: {error}", severity="error"
+                )
 
     def _sync_terminal(self, view: SessionView) -> None:
         """Keep the term-1 PANE pointed at the currently selected session

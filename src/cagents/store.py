@@ -53,6 +53,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # documented install step (README), and a one-time in-app warning covers
     # the case where it's missing.
     "desktop_notifications": True,
+    # Ignore state priority in list ordering: every state ranks equal and
+    # sessions bubble up only when their state CHANGES (working -> review,
+    # etc.), so recent activity beats a pile of stale needs-review rows.
+    "time_ordered_queue": False,
     # Verbose debug trace (keys, clicks, tmux commands, state changes)
     # into ctx.log next to state.json. Cheap and invaluable for "it
     # switched tabs on its own" reports — on by default for now.
