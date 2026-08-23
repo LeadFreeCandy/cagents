@@ -59,10 +59,11 @@ from .tmuxctl import TmuxClient
 from .views import GroupedView, KanbanView, QueueView, SelectionChanged
 
 REFRESH_SECONDS = 2.0
-VIEWER_DEBOUNCE = 0.4  # settle time before the viewer follows the highlight —
-# 0.25 was shorter than a natural pause mid-arrowing, so browsing to a row
-# two steps away respawned the viewer onto every row passed over (visible
-# flash of a foreign session; user-reported as flicker)
+# Viewer sync is leading-edge: a selection change attaches IMMEDIATELY (any
+# delay reads as lag — user-tested both ways). Only follow-up changes inside
+# this window coalesce into one trailing sync, so holding an arrow key down
+# doesn't respawn the pane once per row.
+VIEWER_COALESCE = 0.15
 PR_POLL_SECONDS = 300.0
 JIRA_POLL_SECONDS = 300.0
 COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
@@ -157,6 +158,7 @@ class CagentsApp(App):
         self._seen_first_snapshot = False
         self._warned_no_notifier = False
         self._viewer_timer = None
+        self._last_viewer_sync = 0.0
         self._viewer_target: str = ""
         self._pending_highlight: str | None = None
         self._undo_stack: list[tuple[str, dict]] = []
@@ -331,9 +333,15 @@ class CagentsApp(App):
     def _schedule_viewer_sync(self) -> None:
         if self.sidecar is None:
             return
+        import time as _time
+
         if self._viewer_timer is not None:
             self._viewer_timer.stop()
-        self._viewer_timer = self.set_timer(VIEWER_DEBOUNCE, self._sync_viewer)
+            self._viewer_timer = None
+        if _time.monotonic() - self._last_viewer_sync >= VIEWER_COALESCE:
+            self._sync_viewer()
+        else:
+            self._viewer_timer = self.set_timer(VIEWER_COALESCE, self._sync_viewer)
 
     def _viewer_command(self, view: SessionView) -> str:
         socket = view.tmux_socket or self.tmux.create_socket
@@ -342,6 +350,9 @@ class CagentsApp(App):
     def _sync_viewer(self) -> None:
         if self.sidecar is None:
             return
+        import time as _time
+
+        self._last_viewer_sync = _time.monotonic()
         view = self.selected_view()
         if view is None:
             return
