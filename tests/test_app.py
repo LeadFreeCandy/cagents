@@ -490,3 +490,35 @@ class TestUndo:
             await pilot.pause(0.2)
             assert new_id not in store.sessions  # bookkeeping undone
             assert len(tmux.sessions) == sessions_before  # the process lives on
+
+
+async def test_review_queue_orders_newest_response_first(world):
+    """Within the needs-review rank, the most recent response sits on top —
+    even right after an app restart, when every session's in-memory
+    rank_stable_since is identical (the bug: the queue degraded to project
+    order)."""
+    from cagents.views import attention_sort_key
+
+    app, store, tmux, _claude_dir = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        review = [v for v in app.snapshot.views if v.state.value == "needs review"]
+        if len(review) < 2:
+            import pytest
+
+            pytest.skip("world fixture no longer has two review sessions")
+        from datetime import datetime, timezone
+
+        # Simulate post-restart: identical state-entry stamps, and give the
+        # transcripts distinct finish times (older first here).
+        for i, v in enumerate(review):
+            v.rank_stable_since = 1000.0
+            v.parsed.last_timestamp = datetime(
+                2026, 8, 17, 10, i, tzinfo=timezone.utc
+            )
+        ordered = sorted(review, key=attention_sort_key)
+        stamps = [v.last_activity for v in ordered]
+        assert stamps == sorted(stamps, reverse=True), (
+            "review items must be a queue: newest response first"
+        )
+        assert stamps[0] != stamps[-1]

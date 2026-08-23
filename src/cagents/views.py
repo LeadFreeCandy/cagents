@@ -25,6 +25,24 @@ from .format import group_header, jira_header, kanban_card, session_row
 from .sessions import SessionState, Snapshot, SessionView
 
 
+def attention_sort_key(view) -> tuple:
+    """Order within/across ranks: most urgent rank, then most recently
+    changed state, then most recent response.
+
+    rank_stable_since (when the session last actually changed state) is the
+    primary within-rank key so genuinely-WORKING sessions don't reshuffle on
+    every token. But it lives only in memory: after an app restart every
+    pre-existing session shares one timestamp, and without a further tiebreak
+    the review queue silently degrades to project order. last_activity breaks
+    that tie — frozen for finished sessions, so "needs review" reads as a real
+    queue: newest response on top."""
+    return (
+        view.attention_rank,
+        -view.rank_stable_since,
+        -(view.last_activity.timestamp() if view.last_activity else 0.0),
+    )
+
+
 class SessionList(OptionList):
     """OptionList with vim keys and stable-selection rebuilds."""
 
@@ -143,12 +161,9 @@ class GroupedView(BaseSessionView):
             options.append(
                 Option(group_header(project_dir, len(views), compact=compact), disabled=True)
             )
-            # Inside a group: most urgent first, then by rank_stable_since
-            # (when the session last actually changed state) — NOT
-            # last_activity, which ticks forward on every token while
-            # genuinely WORKING and would otherwise reorder the list on
-            # every refresh even though nothing meaningful changed.
-            views.sort(key=lambda v: (v.attention_rank, -v.rank_stable_since))
+            # Inside a group: most urgent first, newest state change /
+            # newest response first — see attention_sort_key.
+            views.sort(key=attention_sort_key)
             for view in views:
                 options.append(
                     Option(session_row(view, now, compact=compact, show_jira=show_jira), id=view.session_id)
@@ -180,10 +195,8 @@ class QueueView(BaseSessionView):
     def update_snapshot(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
         now = datetime.now(timezone.utc)
-        # Stable within a rank — see the comment in GroupedView above.
-        ordered = sorted(
-            snapshot.views, key=lambda v: (v.attention_rank, -v.rank_stable_since)
-        )
+        # A real queue: urgency rank, then newest first — see attention_sort_key.
+        ordered = sorted(snapshot.views, key=attention_sort_key)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
         header = self.query_one("#queue-jira-header", Static)
@@ -274,7 +287,7 @@ class KanbanView(BaseSessionView):
         now = datetime.now(timezone.utc)
         for column in self.query(KanbanColumn):
             views = [v for v in snapshot.views if v.state in column.states]
-            views.sort(key=lambda v: -v.rank_stable_since)  # stable — see GroupedView
+            views.sort(key=attention_sort_key)  # rank uniform per column; newest first
             options = [Option(kanban_card(view, now), id=view.session_id) for view in views]
             session_list = column.query_one(SessionList)
             keep = self.selected_id if self.selected_id in {v.session_id for v in views} else None
