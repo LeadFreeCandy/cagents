@@ -635,3 +635,49 @@ class TestQuitTearsDownContainer:
         monkeypatch.setenv("CAGENTS_SIDECAR", "1")
         app.action_quit()
         assert torn_down == [True]
+
+
+def test_workspace_disables_wheel_tab_switching():
+    """tmux's default WheelUp/DownStatus binds switch windows when the wheel
+    drifts over the tab bar — the top of the claude pane, exactly where you
+    scroll. That read as phantom tab switches; the workspace must unbind both."""
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+    sidecar.ensure_workspace("/tmp", "/bin/cagents-ctx", "/data/context.json")
+    flat = [" ".join(map(str, c)) for c in work.calls]
+    assert any(c == "unbind -n WheelUpStatus" for c in flat)
+    assert any(c == "unbind -n WheelDownStatus" for c in flat)
+    assert any("session-window-changed" in c and "ctx.log" in c for c in flat)
+
+
+def test_window_view_selects_only_on_create_or_explicit_open():
+    """The passive per-refresh terminal sync must not re-select the grouped
+    session's window every 2s (log spam + snaps the view back)."""
+    from cagents.tmuxctl import TmuxClient
+
+    calls = []
+
+    class Probe(TmuxClient):
+        def __init__(self):
+            super().__init__()
+            self._sessions = set()
+
+        def _run(self, socket, *args, timeout=5.0):
+            calls.append(args)
+            import subprocess
+
+            if args[0] == "has-session":
+                ok = args[2].lstrip("=") in self._sessions
+                return subprocess.CompletedProcess(args, 0 if ok else 1, "", "")
+            if args[0] == "new-session":
+                self._sessions.add(args[3])
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+    client = Probe()
+    client.ensure_window_view("alpha", "term")  # creates -> selects once
+    selects = [c for c in calls if c[0] == "select-window"]
+    assert len(selects) == 1
+    client.ensure_window_view("alpha", "term")  # passive resync -> no select
+    assert len([c for c in calls if c[0] == "select-window"]) == 1
+    client.ensure_window_view("alpha", "term", force_select=True)  # explicit open
+    assert len([c for c in calls if c[0] == "select-window"]) == 2

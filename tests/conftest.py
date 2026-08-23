@@ -293,7 +293,7 @@ class FakeTmux:
     def ensure_session_window(self, session_name, window_name, directory, socket=None):
         self.log.append(f"ensure-window:{session_name}:{window_name}:{directory}")
 
-    def ensure_window_view(self, session_name, window_name, socket=None):
+    def ensure_window_view(self, session_name, window_name, socket=None, force_select=False):
         self.log.append(f"ensure-view:{session_name}:{window_name}")
         return f"{session_name}--{window_name}"
 

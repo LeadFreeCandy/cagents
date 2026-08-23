@@ -328,7 +328,9 @@ def do_shell(
         client = TmuxClient()
         try:
             client.ensure_session_window(tmux_name, "term", effective_dir, socket=socket)
-            group = client.ensure_window_view(tmux_name, "term", socket=socket)
+            group = client.ensure_window_view(
+                tmux_name, "term", socket=socket, force_select=select
+            )
         except RuntimeError as error:
             import traceback
 

@@ -757,7 +757,9 @@ exec {real!r} "$@"
                     self.tmux.ensure_session_window(
                         view.tmux_name, "term", directory, socket=socket
                     )
-                    group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
+                    group = self.tmux.ensure_window_view(
+                        view.tmux_name, "term", socket=socket, force_select=True
+                    )
                     command = nested_attach_command(socket, group)
                 else:
                     import shlex

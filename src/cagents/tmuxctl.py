@@ -280,7 +280,8 @@ class TmuxClient:
             raise RuntimeError(f"tmux new-window failed: {result.stderr.strip()}")
 
     def ensure_window_view(
-        self, session_name: str, window_name: str, socket: str | None = None
+        self, session_name: str, window_name: str, socket: str | None = None,
+        force_select: bool = False,
     ) -> str:
         """A grouped session pinned to `window_name` of `session_name`.
 
@@ -293,13 +294,21 @@ class TmuxClient:
         views stay independent. Returns the grouped session's name."""
         socket = socket or self.create_socket
         group_name = f"{session_name}--{window_name}"
+        created = False
         if not self.has_session(group_name, socket=socket):
             proc = self._run(
                 socket, "new-session", "-d", "-s", group_name, "-t", f"={session_name}"
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"tmux new-session (group) failed: {proc.stderr.strip()}")
-        self._run(socket, "select-window", "-t", f"={group_name}:{window_name}")
+            created = True
+        # Select only on creation (the group starts on the target session's
+        # current window) or when the caller explicitly opens the view.
+        # The passive per-refresh sync must NOT re-select: it spammed a
+        # select-window every 2s and would forcibly snap the view back if
+        # the user ever changed windows inside the nested client.
+        if created or force_select:
+            self._run(socket, "select-window", "-t", f"={group_name}:{window_name}")
         return group_name
 
     def has_session(self, session_name: str, socket: str | None = None) -> bool:

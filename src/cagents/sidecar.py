@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 
 COLLAPSED_WIDTH = 34
 WORK_SOCKET = "cagents-work"  # the tabbed workspace behind the right pane
@@ -117,8 +118,30 @@ class Sidecar:
             ["set", "-g", "window-status-current-format",
              "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
             ["set", "-g", "window-status-separator", ""],
+            # Mouse wheel over the tab bar must NOT switch tabs: tmux's
+            # default WheelUp/DownStatus root binds fire previous/next-window,
+            # and the tab bar sits exactly where you scroll while reading the
+            # claude pane — a drifted wheel tick read as a phantom tab switch
+            # (diagnosed from ctx.log, 2026-08-23). Clicks still switch tabs.
+            ["unbind", "-n", "WheelUpStatus"],
+            ["unbind", "-n", "WheelDownStatus"],
         ):
             self._work(option)
+        # Every work-session window change lands in ctx.log with its cause
+        # (or lack of one) — the cross-validation line for "it switched on
+        # its own" reports.
+        try:
+            from .ctx import LOG_FILE_NAME
+
+            log_path = str(Path(context_path).parent / LOG_FILE_NAME) if context_path else ""
+        except Exception:
+            log_path = ""
+        if log_path:
+            self._work([
+                "set-hook", "-g", "session-window-changed",
+                'run-shell -b "echo \"$(date \"+%Y-%m-%d %H:%M:%S\") [hook] '
+                f'work window -> #{{window_name}}\" >> {log_path}"',
+            ])
         if ctx_prog and context_path:
             import shlex
 

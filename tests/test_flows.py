@@ -376,7 +376,7 @@ class TestCtx:
             def ensure_session_window(self, name, window, directory, socket=None):
                 ensure_calls.append(("window", name, window, directory, socket))
 
-            def ensure_window_view(self, name, window, socket=None):
+            def ensure_window_view(self, name, window, socket=None, force_select=False):
                 ensure_calls.append(("view", name, window, socket))
                 return f"{name}--{window}"
 
