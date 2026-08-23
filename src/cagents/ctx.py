@@ -1,4 +1,4 @@
-"""cagents-ctx — tmux-side helper for the global C-s / C-d keys, and for
+"""cagents-ctx — tmux-side helper for the global C-t / C-d keys, and for
 tab-click hooks on the workspace (clicking a tab is pure tmux and never
 touches the Python app process, so anything a click needs to do lives
 here, not in app.py).
@@ -202,7 +202,7 @@ def do_shell(
     THIS session's own worktree and its own persistent terminal window —
     never a shell shared with whichever session opened one last. Same
     entry point whether it's reached by clicking the tab (the
-    after-select-window hook, --no-select) or by the global C-s / "N"
+    after-select-window hook, --no-select) or by the global C-t / "N"
     key (select=True)."""
     effective_dir, kind, warning = resolve_terminal_directory(directory)
     if not _workspace_alive():

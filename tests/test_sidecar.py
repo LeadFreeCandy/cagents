@@ -190,7 +190,7 @@ class TestCommands:
         flat = [" ".join(c) for c in container_setup_commands()]
         assert not any(" Escape " in f" {c} " for c in flat)  # Esc stays Claude's
         # No key bindings in static setup — the ← cycle comes from
-        # left_capture_commands (toggleable); C-s/C-d from ctx binds.
+        # left_capture_commands (toggleable); C-t/C-d from ctx binds.
         assert not any(c.startswith("bind") for c in flat)
         assert any("after-select-pane" in c for c in flat)
         assert any("status-right" in c for c in flat)  # the statusline
@@ -215,7 +215,7 @@ class TestCommands:
     def test_ctx_bind_commands(self):
         commands = ctx_bind_commands("/venv/bin/cagents-ctx", "/data/context.json")
         flat = [" ".join(c) for c in commands]
-        assert any(c.startswith("bind -n C-s run-shell") and "shell" in c for c in flat)
+        assert any(c.startswith("bind -n C-t run-shell") and "shell" in c for c in flat)
         assert any(c.startswith("bind -n C-d run-shell") and "diff" in c for c in flat)
 
     def test_should_bootstrap_only_bare_terminal(self):

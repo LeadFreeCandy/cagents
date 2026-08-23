@@ -94,7 +94,7 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+t", "pick_via_shell", "Shell pick", show=False),
+        Binding("ctrl+o", "pick_via_shell", "Shell pick", show=False),
         Binding("tab", "app.focus_next", "Next field", show=False),
         Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
     ]
@@ -119,7 +119,7 @@ class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
             yield Label("Start a new Claude session")
             yield Static(
                 "Enter to start · tab completes/cycles directories · "
-                "ctrl+t: cd/zoxide in a real shell, use wherever you end up",
+                "ctrl+o: cd/zoxide in a real shell, use wherever you end up",
                 classes="hint",
             )
             yield Input(value=self.initial_dir, placeholder="project directory", id="dir")
@@ -401,7 +401,7 @@ HELP_TEXT = """\
 [bold cyan]Tabs (top of the right pane: session · diff · term-1 · +term)[/bold cyan]
   click diff    builds automatically (mouse-interactive lazygit, if installed)
   ctrl+d        same, plus jumps to the diff tab
-  ctrl+s        switch to the persistent terminal tab
+  ctrl+t        switch to the persistent terminal tab
   click +term   open another terminal tab (term-2, term-3, …)
   click a tab   or press enter to return to the session tab
 
@@ -419,7 +419,7 @@ HELP_TEXT = """\
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
-  n             new session dialog (launch dir default; tab completes; ctrl+t shell-pick)
+  n             new session dialog (launch dir default; tab completes; ctrl+o shell-pick)
   N             the shell way: terminal tab -> cd/z/mkdir anywhere -> type "claude"
                 and it opens as a managed session right there
   a             track an existing session

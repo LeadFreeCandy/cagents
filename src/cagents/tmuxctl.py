@@ -312,7 +312,7 @@ class TmuxClient:
         "status-style": "bg=colour235,fg=colour246",
         "status-left": " cagents ",
         "status-left-style": "bg=colour31,fg=colour231,bold",
-        "status-right": " ← back · C-s shell · C-d diff ",
+        "status-right": " ← back · C-t shell · C-d diff ",
         "status-right-length": "50",
         "window-status-format": "",
         "window-status-current-format": "",

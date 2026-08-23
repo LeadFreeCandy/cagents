@@ -1,5 +1,5 @@
 """Tests for fork (f), handoff (h), lineage (*), the diff review screen
-(D), and the cagents-ctx helper behind the global C-s / C-d keys."""
+(D), and the cagents-ctx helper behind the global C-t / C-d keys."""
 
 from __future__ import annotations
 

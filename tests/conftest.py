@@ -186,6 +186,15 @@ def now() -> float:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """Tests must behave identically inside and outside a real tmux session:
+    with $TMUX set, Sidecar.enabled() would build a REAL sidecar in any test
+    that doesn't inject one, splitting actual panes on the developer's tmux."""
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("CAGENTS_SIDECAR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_agent_status(monkeypatch):
     """`claude agents --json` is a real subprocess call (agent_status.py)
     — never let SessionRegistry.refresh() actually spawn it in tests: it's

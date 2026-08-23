@@ -152,6 +152,7 @@ class CagentsApp(App):
         self.compact = False
         self._prev_states: dict[str, SessionState] = {}
         self._seen_first_snapshot = False
+        self._warned_no_notifier = False
         self._viewer_timer = None
         self._viewer_target: str = ""
         self._pending_highlight: str | None = None
@@ -1004,6 +1005,18 @@ exec {real!r} "$@"
         first = not self._seen_first_snapshot
         self._seen_first_snapshot = True
         enabled = bool(self.store.get_setting("desktop_notifications"))
+        if enabled and not self._warned_no_notifier:
+            self._warned_no_notifier = True
+            import shutil as _shutil
+
+            if not _shutil.which("terminal-notifier"):
+                self.notify(
+                    "desktop notifications: terminal-notifier not installed — "
+                    "falling back to osascript (unreliable, no click-to-select). "
+                    "Fix: brew install terminal-notifier",
+                    severity="warning",
+                    timeout=12,
+                )
         for view in snapshot.views:
             previous = self._prev_states.get(view.session_id)
             self._prev_states[view.session_id] = view.state

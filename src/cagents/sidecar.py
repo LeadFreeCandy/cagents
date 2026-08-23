@@ -377,7 +377,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size · C-d diff tab · C-s terminal tab "],
+        ["set", "-g", "status-right", " ←/→ size · C-d diff tab · C-t terminal tab "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -407,14 +407,17 @@ def apply_left_capture(enable: bool, runner=None) -> None:
 
 
 def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
-    """C-s (shell in the session's dir) and C-d (diff vs master popup),
+    """C-t (shell in the session's dir) and C-d (diff vs master popup),
+    C-t rather than C-s so Claude Code's own ctrl-s binding stays reachable;
     available regardless of which pane has focus."""
     import shlex
 
     prog = shlex.quote(ctx_prog)
     ctx = shlex.quote(context_path)
     return [
-        ["bind", "-n", "C-s", "run-shell", "-b", f"{prog} shell --context {ctx}"],
+        # Drop the pre-rename C-s bind a persisted container may still carry.
+        ["unbind", "-n", "C-s"],
+        ["bind", "-n", "C-t", "run-shell", "-b", f"{prog} shell --context {ctx}"],
         ["bind", "-n", "C-d", "run-shell", "-b", f"{prog} diff --context {ctx}"],
     ]
 
