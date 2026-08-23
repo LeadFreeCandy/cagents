@@ -561,7 +561,10 @@ def test_ensure_workspace_installs_diff_click_hook():
         terminal_dir="/x", ctx_prog="/venv/bin/cagents-ctx",
         context_path="/data/context.json",
     )
-    hook = next(c for c in work.calls if c[0] == "set-hook")
+    hook = next(
+        c for c in work.calls
+        if c[0] == "set-hook" and "after-select-window" in " ".join(c)
+    )
     joined = " ".join(hook)
     assert "after-select-window" in joined
     assert "window_name},diff" in joined  # only the diff tab triggers
