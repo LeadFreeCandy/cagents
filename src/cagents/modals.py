@@ -401,7 +401,7 @@ HELP_TEXT = """\
 [bold cyan]Tabs (top of the right pane: session · diff · term-1 · +term)[/bold cyan]
   click diff    builds automatically (mouse-interactive lazygit, if installed)
   ctrl+d        same, plus jumps to the diff tab
-  ctrl+t        switch to the persistent terminal tab
+  ctrl+t        toggle the terminal tab (back to session when already there)
   click +term   open another terminal tab (term-2, term-3, …)
   click a tab   or press enter to return to the session tab
 

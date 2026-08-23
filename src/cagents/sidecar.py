@@ -118,6 +118,13 @@ class Sidecar:
             ["set", "-g", "window-status-current-format",
              "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
             ["set", "-g", "window-status-separator", ""],
+            # A dying pane must NEVER close its window: when the active
+            # window closes, tmux activates the most-recently-used one —
+            # confirmed live as the "phantom switch to the terminal": the
+            # session tab's nested attach died (its claude session ended)
+            # and the user landed on term-1 with no select-window anywhere.
+            # Dead panes linger instead and the next sync respawns them.
+            ["set", "-g", "-w", "remain-on-exit", "on"],
             # Mouse wheel over the tab bar must NOT switch tabs: tmux's
             # default WheelUp/DownStatus root binds fire previous/next-window,
             # and the tab bar sits exactly where you scroll while reading the
@@ -141,15 +148,15 @@ class Sidecar:
             # the click already selected the window.
             open_term = f"run-shell -b \"{ctx_prog} shell --context {q_context} --no-select\""
             self._work([
-                "set-hook", "-g", "after-select-window",
+                "set-hook", "-g", "after-select-window[0]",
                 f"if -F '#{{==:#{{window_name}},diff}}' '{rebuild_diff}' ''",
             ])
             self._work([
-                "set-hook", "-g", "-a", "after-select-window",
+                "set-hook", "-g", "after-select-window[1]",
                 f"if -F '#{{==:#{{window_name}},{NEW_TERM_WINDOW}}}' '{new_term}' ''",
             ])
             self._work([
-                "set-hook", "-g", "-a", "after-select-window",
+                "set-hook", "-g", "after-select-window[2]",
                 f"if -F '#{{==:#{{window_name}},term-1}}' '{open_term}' ''",
             ])
             # ---- forensic instrumentation (all via cagents-ctx wlog, which
@@ -162,7 +169,7 @@ class Sidecar:
                 return f"{ctx_prog} wlog {tag} --context {q_context}"
 
             self._work([
-                "set-hook", "-g", "-a", "after-select-window",
+                "set-hook", "-g", "after-select-window[3]",
                 'run-shell -b "' + wlog("select-window:#{window_name}") + '"',
             ])
             self._work([
@@ -250,11 +257,23 @@ class Sidecar:
         viewer pane is (first) created: at startup the split must appear
         already showing the conversation, not flash the placeholder shell
         for a beat (user-reported)."""
-        if shell_command != self.current_command:
+        if shell_command != self.current_command or self._pane_dead("session"):
             self._ensure_window("session")
             self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
             self.current_command = shell_command
         self._ensure_viewer_pane()
+
+    def _pane_dead(self, window: str) -> bool:
+        """remain-on-exit keeps dead panes around (deliberately — see
+        ensure_workspace); syncs must revive them even when the target
+        command hasn't changed."""
+        try:
+            out = self._work(
+                ["display-message", "-p", "-t", f"=work:{window}", "#{pane_dead}"]
+            )
+        except RuntimeError:
+            return False
+        return out.strip() == "1"
 
     def select_tab(self, name: str) -> None:
         self._work(["select-window", "-t", f"=work:{name}"])
@@ -277,7 +296,7 @@ class Sidecar:
         changed, so revisiting the same session's terminal doesn't kill
         work already running in it."""
         self._ensure_window("term-1")
-        if shell_command != self.current_terminal_command:
+        if shell_command != self.current_terminal_command or self._pane_dead("term-1"):
             self._work(["respawn-pane", "-k", "-t", "=work:term-1", shell_command])
             self.current_terminal_command = shell_command
 

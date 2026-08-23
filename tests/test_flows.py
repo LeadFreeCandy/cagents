@@ -285,11 +285,14 @@ class TestCtx:
         assert "delta --line-numbers" in command
         assert "|| cat" in command
 
-    def test_do_shell_guards_missing_dir(self):
-        from cagents.ctx import do_shell
+    def test_do_shell_guards_missing_dir(self, monkeypatch):
+        from cagents import ctx
 
-        assert do_shell("") == 1
-        assert do_shell("/definitely/not/a/dir") == 1
+        monkeypatch.setattr(ctx, "_workspace_alive", lambda: False)
+        monkeypatch.setattr(ctx, "_tmux", lambda *a: 0)
+        monkeypatch.setattr(ctx, "_display", lambda m: None)
+        assert ctx.do_shell("") == 1
+        assert ctx.do_shell("/definitely/not/a/dir") == 1
 
     def test_resolve_terminal_directory_distinguishes_worktree_kinds(self, tmp_path):
         from cagents.ctx import resolve_terminal_directory

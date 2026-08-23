@@ -292,6 +292,17 @@ def do_shell(
     entry point whether it's reached by clicking the tab (the
     after-select-window hook, --no-select) or by the global C-t / "N"
     key (select=True)."""
+    if select and _workspace_alive():
+        # C-t is a TOGGLE: pressed while a terminal tab is showing, it takes
+        # you back to the session tab instead of re-opening the terminal.
+        current = _work_output(
+            "display-message", "-p", "-t", "=work:", "#{window_name}"
+        ).strip()
+        if current.startswith("term"):
+            _log(f"do_shell: toggle back from {current!r} -> session tab")
+            _work("select-window", "-t", "=work:session")
+            _tmux("select-pane", "-t", ":.1")
+            return 0
     effective_dir, kind, warning = resolve_terminal_directory(directory)
     _log(
         f"do_shell: dir={directory!r} -> effective={effective_dir!r} kind={kind!r} "
@@ -320,7 +331,8 @@ def do_shell(
         return 1
     if warning:
         _display(warning)
-        queue_toast(state_dir, warning)
+        if select:  # hook resyncs (--no-select) would duplicate the toast
+            queue_toast(state_dir, warning)
     if tmux_name:
         from .tmuxctl import CREATE_SOCKET, TmuxClient
 
