@@ -148,6 +148,7 @@ class CagentsApp(App):
         )
         self.sidecar = sidecar if sidecar is not None else (Sidecar() if Sidecar.enabled() else None)
         self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
+        self._pending_handoffs: dict[str, str] = {}  # source_id -> source title
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
@@ -1223,8 +1224,32 @@ exec {real!r} "$@"
     def _handoff_confirmed(self, source_id: str, prompt: str | None) -> None:
         if not prompt or not prompt.strip():
             return
+        # Show the successor-to-be in the list immediately: the spec turn can
+        # take a minute and otherwise nothing visibly happens.
+        view = self.snapshot.by_id(source_id)
+        title = view.title if view is not None else source_id[:8]
+        self._pending_handoffs[source_id] = title
+        self._push_pending_rows()
         self.notify("Asking the session to write its handoff spec… (can take a minute)", timeout=10)
         self._handoff_worker(source_id, prompt.strip())
+
+    def _push_pending_rows(self) -> None:
+        rows = [
+            (f"pending-handoff-{source_id}", f"creating handoff from: {title}")
+            for source_id, title in self._pending_handoffs.items()
+        ]
+        for view_id in VIEW_IDS:
+            view = self.query_one(f"#{view_id}")
+            view.pending_rows = rows
+            view.update_snapshot(self.snapshot)
+
+    def _clear_pending_handoff(self, source_id: str) -> None:
+        if self._pending_handoffs.pop(source_id, None) is not None:
+            self._push_pending_rows()
+
+    def _handoff_failed(self, source_id: str, message: str) -> None:
+        self._clear_pending_handoff(source_id)
+        self.notify(message, severity="error", timeout=10)
 
     def _handoff_runner(self, source_id: str):
         # Summary turn runs on a throwaway FORK of the old session, so the
@@ -1240,17 +1265,18 @@ exec {real!r} "$@"
             spec = self._handoff_runner(source_id).run(summary_prompt(prompt))
         except Exception as error:
             self.call_from_thread(
-                self.notify, f"Handoff spec failed: {error}", severity="error", timeout=10
+                self._handoff_failed, source_id, f"Handoff spec failed: {error}"
             )
             return
         if not spec.strip():
             self.call_from_thread(
-                self.notify, "Handoff spec came back empty — aborting.", severity="error"
+                self._handoff_failed, source_id, "Handoff spec came back empty — aborting."
             )
             return
         self.call_from_thread(self._handoff_spec_ready, source_id, prompt, spec.strip())
 
     def _handoff_spec_ready(self, source_id: str, prompt: str, spec: str) -> None:
+        self._clear_pending_handoff(source_id)
         view = self.snapshot.by_id(source_id)
         if view is None:
             self.notify("Source session vanished mid-handoff.", severity="error")

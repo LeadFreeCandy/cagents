@@ -112,6 +112,85 @@ async def test_handoff_flow(world, monkeypatch):
         assert "Your task: finish the API layer" in sent_text
 
 
+async def test_handoff_placeholder_appears_then_resolves(world, monkeypatch):
+    """The list shows 'creating handoff from: ...' the moment the handoff
+    starts (the spec turn can take a minute), and the row disappears when
+    the real successor session takes its place."""
+    import threading
+
+    app, store, tmux = world
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    gate = threading.Event()
+
+    class SlowRunner:
+        def run(self, prompt):
+            gate.wait(timeout=10)
+            return "SPEC: we built X, next do Y."
+
+    app._handoff_runner = lambda source_id: SlowRunner()
+
+    def list_rows():
+        session_list = app.query_one(f"#{app.active_view_id}-list", SessionList)
+        return [
+            (render_text(session_list.get_option_at_index(i).prompt),
+             session_list.get_option_at_index(i).disabled)
+            for i in range(session_list.option_count)
+        ]
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("h")
+        await pilot.pause()
+        await pilot.press(*"next phase")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        # placeholder is in the list immediately, at the top, not selectable
+        rows = list_rows()
+        pending = [i for i, (text, _) in enumerate(rows)
+                   if "creating handoff from: Original work" in text]
+        assert pending, f"no placeholder row: {rows}"
+        assert rows[pending[0]][1], "placeholder must be disabled (not selectable)"
+        assert tmux.created == []  # the real session doesn't exist yet
+
+        # it survives a background refresh
+        app.apply_snapshot(app.registry.refresh())
+        await pilot.pause()
+        assert any("creating handoff from" in text for text, _ in list_rows())
+
+        # spec finishes: the placeholder resolves into the real session
+        gate.set()
+        await pilot.pause(0.5)
+        rows = list_rows()
+        assert not any("creating handoff from" in text for text, _ in rows), rows
+        assert tmux.created, "successor session should have been created"
+
+
+async def test_handoff_placeholder_clears_on_failure(world, monkeypatch):
+    app, store, tmux = world
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    class FailingRunner:
+        def run(self, prompt):
+            raise RuntimeError("claude exploded")
+
+    app._handoff_runner = lambda source_id: FailingRunner()
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("h")
+        await pilot.pause()
+        await pilot.press(*"x")
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+
+        session_list = app.query_one(f"#{app.active_view_id}-list", SessionList)
+        rows = [render_text(session_list.get_option_at_index(i).prompt)
+                for i in range(session_list.option_count)]
+        assert not any("creating handoff from" in r for r in rows), rows
+        assert tmux.created == []
+
+
 async def test_handoff_empty_spec_aborts(world, monkeypatch):
     app, store, tmux = world
     app._handoff_runner = lambda sid: type("R", (), {"run": lambda self, p: "  "})()

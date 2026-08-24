@@ -107,6 +107,15 @@ class BaseSessionView(Widget):
         super().__init__(**kwargs)
         self.selected_id: str | None = None
         self.snapshot: Snapshot = Snapshot()
+        # In-flight placeholders (option_id, label) shown at the top of the
+        # list while something slow (a handoff spec) is being produced.
+        self.pending_rows: list[tuple[str, str]] = []
+
+    def _pending_options(self) -> list[Option]:
+        return [
+            Option(Text(f"  ⋯ {label}", style="italic dim"), id=option_id, disabled=True)
+            for option_id, label in self.pending_rows
+        ]
 
     def _emit_selection(self, session_id: str | None) -> None:
         self.selected_id = session_id
@@ -168,6 +177,7 @@ class GroupedView(BaseSessionView):
                 options.append(
                     Option(session_row(view, now, compact=compact, show_jira=show_jira), id=view.session_id)
                 )
+        options = self._pending_options() + options
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#grouped-list", SessionList)
@@ -210,6 +220,7 @@ class QueueView(BaseSessionView):
             )
             for view in ordered
         ]
+        options = self._pending_options() + options
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#queue-list", SessionList)
@@ -289,6 +300,8 @@ class KanbanView(BaseSessionView):
             views = [v for v in snapshot.views if v.state in column.states]
             views.sort(key=attention_sort_key)  # rank uniform per column; newest first
             options = [Option(kanban_card(view, now), id=view.session_id) for view in views]
+            if column.list_id == "kb-working":
+                options = self._pending_options() + options
             session_list = column.query_one(SessionList)
             keep = self.selected_id if self.selected_id in {v.session_id for v in views} else None
             session_list.rebuild(options, keep)
