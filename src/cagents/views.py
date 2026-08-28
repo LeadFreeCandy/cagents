@@ -253,6 +253,7 @@ KANBAN_COLUMNS: list[tuple[str, tuple[SessionState, ...], str]] = [
         (SessionState.WORKING, SessionState.SHELL_RUNNING, SessionState.MONITORING, SessionState.BACKGROUND),
         "kb-working",
     ),
+    ("☾ Snoozed", (SessionState.SNOOZED,), "kb-snoozed"),
     (
         "◆ To review",
         (SessionState.NEEDS_REVIEW, SessionState.EXTERNAL_UPDATE, SessionState.WAITING_EXTERNAL),

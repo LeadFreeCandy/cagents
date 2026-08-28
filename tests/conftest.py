@@ -63,9 +63,19 @@ class TranscriptBuilder:
     def ai_title(self, title: str) -> "TranscriptBuilder":
         return self.raw({"type": "ai-title", "aiTitle": title, "sessionId": self.session_id})
 
-    def user(self, text: str, ts: str = "2026-08-17T10:00:00.000Z") -> "TranscriptBuilder":
+    def custom_title(self, title: str) -> "TranscriptBuilder":
+        """A manual rename done IN Claude Code (not cagents' own `r`) —
+        same "ai-title" record type Claude's auto-title uses, but with
+        "customTitle" set instead of "aiTitle"."""
+        return self.raw({"type": "ai-title", "customTitle": title, "sessionId": self.session_id})
+
+    def user(
+        self, text: str, ts: str = "2026-08-17T10:00:00.000Z", is_meta: bool = False
+    ) -> "TranscriptBuilder":
         record = self._base(ts)
         record.update({"type": "user", "message": {"role": "user", "content": text}})
+        if is_meta:
+            record["isMeta"] = True
         return self.raw(record)
 
     def assistant_text(
@@ -212,6 +222,23 @@ def _no_real_agent_status(monkeypatch):
     monkeypatch.setattr("cagents.agent_status._default_runner", lambda args: "[]")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_desktop_notifications(monkeypatch):
+    """notify_desktop shells out to terminal-notifier / osascript with a
+    REAL 10s timeout (notifier.py) — real bug, confirmed live: a slow or
+    hung notifier call in one of these real subprocess's paths blocked
+    the poll worker that fired it from ever reaching its own later
+    refresh_data() call, for the full 10s, even though app.py now
+    dispatches the notification onto its own worker instead of calling
+    it inline. Never let a test actually invoke it — desktop_notifications
+    defaults ON, so any test that causes an ALERT_STATES transition (or
+    calls the PR/waiting pollers) would otherwise hit this for real,
+    each one adding up to 10 real seconds to the whole suite and, worse,
+    being sensitive to whatever terminal-notifier happens to do on the
+    machine running the tests."""
+    monkeypatch.setattr("cagents.app.notify_desktop", lambda *a, **kw: None)
+
+
 SID1 = "11111111-1111-1111-1111-111111111111"
 SID2 = "22222222-2222-2222-2222-222222222222"
 SID3 = "33333333-3333-3333-3333-333333333333"
@@ -244,6 +271,8 @@ class FakeTmux:
         self.attached_to: list[tuple[str, str]] = []  # (name, socket)
         self.created: list[tuple[str, list[str], str]] = []
         self.sent: list[tuple[str, str, str]] = []  # (name, text, socket)
+        self.shell_created: list[tuple[str, str]] = []  # (directory, session_id)
+        self.shell_commands: list[tuple[str, str]] = []  # (name, command)
         self.log: list[str] = []
 
     def available(self) -> bool:
@@ -277,6 +306,25 @@ class FakeTmux:
             )
         )
         return name
+
+    def new_shell_session(self, directory, session_id="", extra_env=None):
+        from pathlib import Path
+
+        from cagents.tmuxctl import TmuxSession
+
+        name = Path(directory).name or "session"
+        self.shell_created.append((directory, session_id))
+        self.sessions.append(
+            TmuxSession(
+                name=name, created=1e12, activity=1e12, attached=False,
+                pane_pid=1, pane_path=directory, socket=self.create_socket,
+                cagents_session_id=session_id,
+            )
+        )
+        return name
+
+    def send_shell_command(self, name, command, socket=None):
+        self.shell_commands.append((name, command))
 
     def session_statusline_on(self, name, socket=None):
         self.log.append(f"status-on:{name}")

@@ -11,6 +11,7 @@ from cagents.gitops import (
     GitError,
     PRStatus,
     current_branch,
+    current_github_login,
     default_branch,
     find_pr_url,
     github_pr_comments,
@@ -158,21 +159,96 @@ class TestGithubComments:
 
 
 class TestPRStatus:
-    def test_find_pr_url(self):
+    def test_find_pr_url(self, repo: Path):
+        import json as _json
+        import subprocess
+
+        wt = repo.parent / "wt-fix-x"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "fix-x", str(wt)],
+            cwd=repo, capture_output=True, check=True,
+        )
         calls = []
 
         def runner(args, cwd=None):
             calls.append(args)
-            return "https://github.com/o/r/pull/7\n"
+            return _json.dumps({"url": "https://github.com/o/r/pull/7", "headRefName": "fix-x"})
 
-        assert find_pr_url("/proj", runner=runner) == "https://github.com/o/r/pull/7"
+        assert find_pr_url(str(wt), runner=runner) == "https://github.com/o/r/pull/7"
         assert calls[0][:3] == ["gh", "pr", "view"]
 
-    def test_find_pr_url_none(self):
+    def test_find_pr_url_none(self, repo: Path):
+        import subprocess
+
+        wt = repo.parent / "wt-none"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "wt-none-branch", str(wt)],
+            cwd=repo, capture_output=True, check=True,
+        )
+
         def runner(args, cwd=None):
             raise RuntimeError("no pull requests found")
 
-        assert find_pr_url("/proj", runner=runner) == ""
+        assert find_pr_url(str(wt), runner=runner) == ""
+
+    def test_find_pr_url_refuses_a_shared_non_worktree_checkout(self, repo: Path):
+        # Real bug, confirmed live — REPEATEDLY: a whole batch of unrelated
+        # sessions all "inheriting" the same Jira card, traced to exactly
+        # this. A handoff-created session inherits its parent's plain
+        # project dir (the shared main checkout, not a dedicated
+        # worktree) — a branch-matching PR found there is no guarantee
+        # it's actually THIS session's, since "checked out right now" is
+        # really just whatever some OTHER session or a human left it as.
+        # The worktree check is UNCONDITIONAL — it must refuse a shared
+        # checkout even with NO expected_branch given at all (that was
+        # the actual hole: a session with no recorded branch yet skipped
+        # the guard entirely and fell back to trusting the shared
+        # checkout for every such session sharing that directory).
+        import json as _json
+
+        def runner(args, cwd=None):
+            return _json.dumps({"url": "https://github.com/o/r/pull/7", "headRefName": "main"})
+
+        assert find_pr_url(str(repo), runner=runner, expected_branch="main") == ""
+        assert find_pr_url(str(repo), runner=runner) == ""
+
+    def test_find_pr_url_trusts_a_dedicated_worktree_on_branch_match(self, repo: Path):
+        import json as _json
+        import subprocess
+
+        wt = repo.parent / "wt-feature"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "feature-work", str(wt)],
+            cwd=repo, capture_output=True, check=True,
+        )
+
+        def runner(args, cwd=None):
+            return _json.dumps(
+                {"url": "https://github.com/o/r/pull/9", "headRefName": "feature-work"}
+            )
+
+        assert find_pr_url(str(wt), runner=runner, expected_branch="feature-work") == (
+            "https://github.com/o/r/pull/9"
+        )
+
+    def test_find_pr_url_refuses_a_dedicated_worktree_on_branch_mismatch(self, repo: Path):
+        import json as _json
+        import subprocess
+
+        wt = repo.parent / "wt-other"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "other-work", str(wt)],
+            cwd=repo, capture_output=True, check=True,
+        )
+
+        def runner(args, cwd=None):
+            # gh answers for whatever's ACTUALLY checked out there, which
+            # (e.g. a race, or a stale expectation) isn't what was asked
+            return _json.dumps(
+                {"url": "https://github.com/o/r/pull/9", "headRefName": "some-other-branch"}
+            )
+
+        assert find_pr_url(str(wt), runner=runner, expected_branch="other-work") == ""
 
     def test_pr_status_merged_and_activity(self):
         import json as _json
@@ -193,3 +269,42 @@ class TestPRStatus:
                                "comments": [], "reviews": []})
         status = pr_status("url", runner=lambda a, cwd=None: payload)
         assert status.merged is False and status.last_activity == ""
+
+    def test_pr_status_splits_comments_by_author(self):
+        import json as _json
+
+        payload = _json.dumps({
+            "state": "OPEN", "mergedAt": None,
+            "comments": [
+                {"createdAt": "2026-08-18T09:00:00Z", "author": {"login": "alice"}},
+                {"createdAt": "2026-08-18T09:30:00Z", "author": {"login": "me"}},
+            ],
+            "reviews": [{"submittedAt": "2026-08-18T08:00:00Z", "author": {"login": "alice"}}],
+            "commits": [{"committedDate": "2026-08-18T07:00:00Z"}],
+        })
+        status = pr_status("url", runner=lambda a, cwd=None: payload, own_login="me")
+        assert status.last_comment_from_others == "2026-08-18T09:00:00Z"
+        assert status.last_comment_from_self == "2026-08-18T09:30:00Z"
+        assert status.last_review == "2026-08-18T08:00:00Z"
+        assert status.last_commit == "2026-08-18T07:00:00Z"
+
+    def test_pr_status_without_own_login_treats_every_comment_as_from_others(self):
+        import json as _json
+
+        payload = _json.dumps({
+            "state": "OPEN", "mergedAt": None,
+            "comments": [{"createdAt": "2026-08-18T09:00:00Z", "author": {"login": "me"}}],
+            "reviews": [],
+        })
+        status = pr_status("url", runner=lambda a, cwd=None: payload)  # no own_login
+        assert status.last_comment_from_others == "2026-08-18T09:00:00Z"
+        assert status.last_comment_from_self == ""
+
+    def test_current_github_login(self):
+        assert current_github_login(runner=lambda a, cwd=None: "octocat\n") == "octocat"
+
+    def test_current_github_login_swallows_failures(self):
+        def runner(a, cwd=None):
+            raise RuntimeError("not authenticated")
+
+        assert current_github_login(runner=runner) == ""

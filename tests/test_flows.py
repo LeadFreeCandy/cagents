@@ -598,6 +598,54 @@ class TestShellClaude:
             assert "--session-id" not in args
             assert SID2 in store.sessions
 
+    async def test_spawn_request_reuses_a_pending_new_terminal_id(self, world, tmp_path):
+        # `n` tracks a session before `claude` is ever typed — once the
+        # shim reports one, its exact id must be reused (already tracked,
+        # the list row is waiting on it) rather than minting a second,
+        # orphaned one.
+        app, store, tmux = world
+        project = tmp_path / "pendinghere"
+        project.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            pending_id = "99999999-9999-9999-9999-999999999999"
+            app._pending_new_terminals.add(pending_id)
+            store.track(pending_id, str(project), "2026-08-17T09:00:00+00:00")
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": str(project), "pending_id": pending_id, "args": []})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.3)
+            directory, args, sid = tmux.created[-1]
+            assert sid == pending_id
+            assert "--session-id" in args
+            assert pending_id not in app._pending_new_terminals  # consumed
+
+    async def test_spawn_request_ignores_an_unrelated_cagents_session_id(self, world, tmp_path):
+        # The env var a spawn request's pending_id rides on is ALSO present
+        # for a shell opened via the existing "N" terminal-tab-on-a-live-
+        # session feature — but that id is already a real, spawned
+        # session, never in _pending_new_terminals, so it must still get a
+        # genuinely fresh id (today's behavior, unchanged).
+        app, store, tmux = world
+        project = tmp_path / "elsewhere"
+        project.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            live_id = "88888888-8888-8888-8888-888888888888"
+            store.track(live_id, str(project), "2026-08-17T09:00:00+00:00")
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": str(project), "pending_id": live_id, "args": []})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.3)
+            directory, args, sid = tmux.created[-1]
+            assert sid != live_id
+
     async def test_bad_directory_is_loud_and_consumed(self, world):
         app, store, tmux = world
         async with app.run_test(size=(120, 40)) as pilot:
