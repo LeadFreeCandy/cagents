@@ -876,6 +876,38 @@ exec {real!r} "$@"
 
     # -- done / waiting ---------------------------------------------------------
 
+    def _pin_cursor(self) -> None:
+        """Tell every list view to keep the cursor at its current ROW
+        INDEX on the very next render, instead of chasing the selected
+        session's id to wherever it moves — used right before an action
+        that shifts the current row elsewhere in the same list (mark
+        done, snooze, ...), so the cursor lands on whatever now sits in
+        the old spot rather than following the row down."""
+        for view_id in VIEW_IDS:
+            self.query_one(f"#{view_id}").pin_cursor_position()
+
+    def _optimistic_state(self, session_id: str, state: SessionState, detail: str) -> None:
+        """Render a state change the user just caused immediately, on this
+        same keystroke, instead of waiting for the next full background
+        refresh (registry.refresh() re-parses every session's transcript
+        and re-captures every tmux pane — a real refresh_data() call right
+        after this one still runs and reconciles everything properly; this
+        is purely a same-frame visual echo so the row doesn't sit stale for
+        the second or so that takes)."""
+        from .sessions import attention_rank_map
+
+        view = self.snapshot.by_id(session_id)
+        if view is None:
+            return
+        view.state = state
+        view.state_detail = detail
+        if self.store.get_setting("time_ordered_queue"):
+            view.attention_rank = 0
+        else:
+            view.attention_rank = attention_rank_map(self.store.get_setting("state_order"))[state]
+        for view_id in VIEW_IDS:
+            self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
+
     def action_toggle_done(self) -> None:
         view = self.selected_view()
         if view is None:
@@ -884,12 +916,16 @@ exec {real!r} "$@"
         if view.state == SessionState.DONE:
             self.store.clear_reviewed(view.session_id)
             self._notify_undoable("Un-done — back in the queue.")
+            self._pin_cursor()
+            self._optimistic_state(view.session_id, SessionState.NEEDS_REVIEW, "finished, unreviewed")
         elif view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
             self.notify("Still in flight — mark it done when Claude is finished.", severity="warning")
             return
         else:
             self.store.mark_reviewed(view.session_id, utcnow().isoformat())
             self._notify_undoable("Done.")
+            self._pin_cursor()
+            self._optimistic_state(view.session_id, SessionState.DONE, "done")
         self.refresh_data()
 
     def action_toggle_waiting(self) -> None:

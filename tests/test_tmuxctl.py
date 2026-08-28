@@ -41,6 +41,17 @@ def test_working_marker_as_the_actual_last_line_is_working():
     assert pane_shows_working("some old text\n✻ Brewed for 4s · 1 shell still running") is True
 
 
+def test_monitors_still_running_footer_is_not_working():
+    # Real bug: a worktree-creation session sitting idle with only
+    # Monitors going ("✻ Churned for 7m 6s · 2 monitors still running")
+    # showed as WORKING in the list — the generic "still running" marker
+    # matched this idle footer the same as the mid-turn shell spinner.
+    # Monitors persist past the end of the turn by design; this must fall
+    # through to MONITORING, not read as an active turn.
+    assert pane_shows_working("✻ Churned for 7m 6s · 2 monitors still running") is False
+    assert pane_shows_working("✻ Churned for 7m 6s · 1 monitor still running") is False
+
+
 def test_newer_spinner_format_without_esc_to_interrupt_is_working():
     # Replicated live (v2.1.236+): the spinner line dropped "(esc to
     # interrupt)" for elapsed-time/token stats instead — no

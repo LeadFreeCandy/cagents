@@ -110,6 +110,16 @@ class BaseSessionView(Widget):
         # In-flight placeholders (option_id, label) shown at the top of the
         # list while something slow (a handoff spec) is being produced.
         self.pending_rows: list[tuple[str, str]] = []
+        # One-shot: the next update_snapshot should keep the cursor at its
+        # current ROW INDEX rather than chasing selected_id to its new spot.
+        # Set right before an explicit action (mark done, snooze, ...) that
+        # moves the selected row elsewhere in this same list — otherwise the
+        # cursor silently follows that session down instead of landing on
+        # whatever now sits in the old spot.
+        self._pin_cursor_next = False
+
+    def pin_cursor_position(self) -> None:
+        self._pin_cursor_next = True
 
     def _pending_options(self) -> list[Option]:
         return [
@@ -181,7 +191,9 @@ class GroupedView(BaseSessionView):
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#grouped-list", SessionList)
-        session_list.rebuild(options, self.selected_id)
+        keep_id = None if self._pin_cursor_next else self.selected_id
+        self._pin_cursor_next = False
+        session_list.rebuild(options, keep_id)
         self._emit_selection(session_list.highlighted_session_id)
 
     def focus_list(self) -> None:
@@ -224,7 +236,9 @@ class QueueView(BaseSessionView):
         if not options:
             options = [_empty_option()]
         session_list = self.query_one("#queue-list", SessionList)
-        session_list.rebuild(options, self.selected_id)
+        keep_id = None if self._pin_cursor_next else self.selected_id
+        self._pin_cursor_next = False
+        session_list.rebuild(options, keep_id)
         self._emit_selection(session_list.highlighted_session_id)
 
     def focus_list(self) -> None:

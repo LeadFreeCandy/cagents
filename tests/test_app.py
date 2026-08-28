@@ -190,6 +190,27 @@ async def test_done_key_flow(world):
         await pilot.pause(0.1)
         assert store.sessions[SID1].reviewed_at != ""
         assert app.snapshot.by_id(SID1).state == SessionState.DONE
+        # The cursor must NOT have followed SID1 down to its new,
+        # sunk-to-the-bottom spot — it stays at the same row index, which
+        # now belongs to whatever moved up into SID1's old place.
+        assert app.selected_session_id != SID1
+        await pilot.press("d")  # un-done, now acting on the row under the cursor
+        await pilot.pause(0.1)
+        assert store.sessions[SID1].reviewed_at != ""  # untouched by the second press
+
+
+async def test_done_un_done_on_the_same_row(world):
+    """Re-selecting the just-done session and pressing d again does un-done
+    it, and its cursor does not follow it away from its new, un-done spot."""
+    app, store, tmux, _ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)  # needs review
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause(0.1)
+        select_session(app, SID1)
+        await pilot.pause()
         await pilot.press("d")  # un-done
         await pilot.pause(0.1)
         assert store.sessions[SID1].reviewed_at == ""

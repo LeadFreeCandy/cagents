@@ -404,6 +404,18 @@ _PROMPT_MARKERS = (
 # "Do you want me to…", so a phrase alone must never count as a prompt.
 _CHOICE_ROW = re.compile(r"❯\s*\d+\.")
 
+# How far back a dialog's choice-row + marker are trusted as CURRENT.
+# Real bug, confirmed live: answering a dialog (most reproducibly the
+# "do you trust this folder" workspace-trust prompt, since it's the one
+# nearly everyone hits) leaves its own already-resolved ❯-cursored text
+# sitting in the pane's scrollback — pane_shows_prompt used to search the
+# WHOLE captured pane, so that stale text kept reading as "still needs
+# you" well after the real state had moved on, until enough new output
+# finally scrolled it out of the capture window. Same class of bug
+# pane_shows_working's tail restriction already guards against, just
+# never applied here.
+_PROMPT_TAIL_LINES = 15
+
 # Patterns that mean Claude is actively running a turn. The spinner hint
 # text varies by UI state ("esc to interrupt", "· 1 shell still running",
 # …) — observed live against v2.1.235. Kept as exact-phrase markers, so
@@ -413,8 +425,18 @@ _CHOICE_ROW = re.compile(r"❯\s*\d+\.")
 _WORKING_MARKERS = (
     "esc to interrupt",
     "ctrl+b to run in background",
-    "still running",
 )
+
+# "N shell(s) still running" is the mid-turn spinner's own phrasing — a
+# shell tool call blocks the turn, so seeing it always means WORKING (see
+# test_shell_count_defers_to_the_mid_turn_still_running_marker). Deliberately
+# scoped to "shell(s)": real bug, confirmed live — a plain "still running"
+# substring check also matched the unrelated idle footer "N monitors still
+# running" (a persistent Monitor watch, not an active turn), which read a
+# worktree-creation session with only monitors going as WORKING. Monitors
+# outlive the turn that started them by design (see MONITORING/
+# monitor_running) and must never be conflated with the shell case.
+_SHELL_STILL_RUNNING_RE = re.compile(r"\bshells?\s+still running\b")
 
 # Newer Claude Code builds (v2.1.236+, observed live) replaced the spinner
 # line's "(esc to interrupt)" suffix with elapsed time / token stats, e.g.
@@ -450,12 +472,16 @@ def _tail_lines(pane_text: str, count: int) -> str:
 
 
 def pane_shows_prompt(pane_text: str) -> bool:
-    """True only for a real dialog: a ❯-cursored numbered choice AND a
-    prompt phrase, both visible. Either alone is too easy to fake with
-    ordinary conversation output."""
-    if not _CHOICE_ROW.search(pane_text):
+    """True only for a real, CURRENT dialog: a ❯-cursored numbered choice
+    AND a prompt phrase, both within the last _PROMPT_TAIL_LINES —
+    checked in the tail for the same reason pane_shows_working is:
+    either alone is too easy to fake with ordinary conversation output,
+    and searching the whole pane risks matching an already-answered
+    dialog's own text still sitting in scrollback."""
+    tail = _tail_lines(pane_text, _PROMPT_TAIL_LINES)
+    if not _CHOICE_ROW.search(tail):
         return False
-    return any(marker in pane_text for marker in _PROMPT_MARKERS)
+    return any(marker in tail for marker in _PROMPT_MARKERS)
 
 
 def pane_shows_working(pane_text: str) -> bool:
@@ -469,7 +495,10 @@ def pane_shows_working(pane_text: str) -> bool:
     still running?"). The structural "Verb…  (" pattern is specific enough
     to safely check a wider tail, which is what actually catches it once
     a footer pushes the spinner line up."""
-    if any(marker in _tail_lines(pane_text, 1) for marker in _WORKING_MARKERS):
+    tail = _tail_lines(pane_text, 1)
+    if any(marker in tail for marker in _WORKING_MARKERS):
+        return True
+    if _SHELL_STILL_RUNNING_RE.search(tail):
         return True
     return bool(_SPINNER_IN_PROGRESS_RE.search(_tail_lines(pane_text, _SPINNER_TAIL_LINES)))
 
