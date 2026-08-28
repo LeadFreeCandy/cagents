@@ -330,6 +330,8 @@ class SearchModal(ModalScreen["object | None"]):
     def _show_results(self, results: list) -> None:
         from rich.text import Text
 
+        from .search import MatchKind
+
         self.results = results
         option_list = self.query_one("#results", OptionList)
         option_list.clear_options()
@@ -339,8 +341,10 @@ class SearchModal(ModalScreen["object | None"]):
             return
         status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
         for i, result in enumerate(results):
+            is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
             row = Text(no_wrap=True, overflow="ellipsis")
-            row.append(f"{result.title[:70]:<70}\n", style="bold")
+            row.append(f"{result.title[:60]:<60}", style="bold cyan" if is_title_match else "bold")
+            row.append(f"  [{result.kind.label}]\n", style="dim italic")
             row.append(f"  {result.project_dir}\n", style="dim cyan")
             row.append(f"  {result.snippet}", style="italic dim")
             option_list.add_option(Option(row, id=str(i)))
