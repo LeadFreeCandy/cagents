@@ -356,6 +356,7 @@ def parse_session_file(
     # tool_use id -> preview index, so tool_results can be matched up.
     open_tool_uses: dict[str, str] = {}  # id -> tool name
     fallback_title = ""
+    custom_title = ""  # a rename done in Claude Code; outranks every aiTitle
     last_prompt = ""
     seen_links: set[str] = set()
     seen_files: set[str] = set()
@@ -385,24 +386,32 @@ def parse_session_file(
 
         rtype = record.get("type")
 
-        if rtype == "ai-title":
+        if rtype == "custom-title":
             # Renaming the conversation IN Claude Code (not cagents' own `r`)
-            # writes a "customTitle" field on this same record type, sitting
-            # alongside its auto-generated "aiTitle" — confirmed against the
-            # installed `claude` binary's own bundled source, which reads
-            # its title back the same way (a `customTitleFromTail` scan for
-            # `"customTitle":"..."`). Only ever checking aiTitle here meant
-            # a manual rename in Claude Code never reached cagents at all.
-            # Last record chronologically wins, same as aiTitle always did;
-            # customTitle wins within one record since it's the deliberate
-            # override.
+            # writes its own record type: `saveCustomTitle` in the claude
+            # binary appends {"type":"custom-title","customTitle":...}, and
+            # reads it back with a `customTitleFromTail` scan keyed on that
+            # same type. Never checking for it meant a manual rename never
+            # reached cagents at all. Last one wins, as for aiTitle.
             custom = record.get("customTitle")
             if isinstance(custom, str) and custom.strip():
                 parsed.title = custom.strip()
-            else:
-                title = record.get("aiTitle")
-                if isinstance(title, str) and title.strip():
-                    parsed.title = title.strip()
+                custom_title = parsed.title
+            continue
+        if rtype == "ai-title":
+            # Claude appends BOTH records on every save — the custom-title
+            # first, then the auto-generated one right behind it — so an
+            # explicit rename only survives if it outranks aiTitle rather
+            # than merely preceding it. Some builds also carry customTitle
+            # on this record; honour that too.
+            custom = record.get("customTitle")
+            if isinstance(custom, str) and custom.strip():
+                parsed.title = custom.strip()
+                custom_title = parsed.title
+                continue
+            title = record.get("aiTitle")
+            if isinstance(title, str) and title.strip() and not custom_title:
+                parsed.title = title.strip()
             continue
         if rtype == "agent-name":
             name = record.get("agentName")

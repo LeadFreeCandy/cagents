@@ -76,8 +76,8 @@ def test_pending_tool_use_detected(claude_dir: Path):
 
 def test_manual_rename_in_claude_code_overrides_ai_title(claude_dir: Path):
     # Renaming the conversation IN Claude Code (not cagents' own `r`) writes
-    # "customTitle" on the same "ai-title" record type the auto-generated
-    # title uses — must win over (and, if it comes later, replace) aiTitle.
+    # its own "custom-title" record — must win over (and, if it comes later,
+    # replace) the auto-generated aiTitle.
     b = TranscriptBuilder(SID1, "/proj/alpha")
     b.ai_title("Fix the login bug")
     b.user("please fix the login bug")
@@ -95,6 +95,18 @@ def test_ai_title_after_a_custom_title_does_not_override_it(claude_dir: Path):
     b.raw({"type": "ai-title", "aiTitle": "Fix the login bug", "customTitle": "Auth token bug"})
     parsed = parse_session_file(b.write(claude_dir))
     assert parsed.title == "Auth token bug"
+
+
+def test_custom_title_survives_a_later_ai_title_record(claude_dir: Path):
+    # Claude writes BOTH records on every save — the custom-title first, then
+    # a plain ai-title right behind it. Whichever came last must not decide
+    # the title, or every renamed session reverts to its generated one.
+    b = TranscriptBuilder(SID1, "/proj/alpha")
+    b.custom_title("osg-converter")
+    b.user("keep going")
+    b.ai_title("Review osg-converter project and restart testing framework")
+    parsed = parse_session_file(b.write(claude_dir))
+    assert parsed.title == "osg-converter"
 
 
 def test_title_fallback_to_first_user_message(claude_dir: Path):

@@ -64,10 +64,12 @@ class TranscriptBuilder:
         return self.raw({"type": "ai-title", "aiTitle": title, "sessionId": self.session_id})
 
     def custom_title(self, title: str) -> "TranscriptBuilder":
-        """A manual rename done IN Claude Code (not cagents' own `r`) —
-        same "ai-title" record type Claude's auto-title uses, but with
-        "customTitle" set instead of "aiTitle"."""
-        return self.raw({"type": "ai-title", "customTitle": title, "sessionId": self.session_id})
+        """A manual rename done IN Claude Code (not cagents' own `r`) — its
+        own "custom-title" record, which is what `saveCustomTitle` in the
+        claude binary writes."""
+        return self.raw(
+            {"type": "custom-title", "customTitle": title, "sessionId": self.session_id}
+        )
 
     def user(
         self, text: str, ts: str = "2026-08-17T10:00:00.000Z", is_meta: bool = False
