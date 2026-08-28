@@ -567,3 +567,81 @@ async def test_review_queue_orders_newest_response_first(world):
             "review items must be a queue: newest response first"
         )
         assert stamps[0] != stamps[-1]
+
+
+async def test_state_invariant_violation_is_logged_and_surfaced(world, monkeypatch):
+    """A session flipping from DONE back to NEEDS_REVIEW with no new
+    transcript activity is a state-derivation bug, not a legitimate
+    transition — it must be caught loudly (log + toast) the moment it
+    happens, not just when someone notices the wrong label live."""
+    from cagents import ctx as ctx_module
+
+    app, store, tmux, _claude_dir = world
+    logged = []
+    monkeypatch.setattr(ctx_module, "_log", lambda message: logged.append(message))
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause()
+        view = app.snapshot.views[0]
+        view.state = SessionState.DONE
+        app.apply_snapshot(app.snapshot)  # establishes the baseline (prev_state, prev_last_activity)
+        await pilot.pause()
+
+        view.state = SessionState.NEEDS_REVIEW  # no new transcript activity
+        app.apply_snapshot(app.snapshot)
+        await pilot.pause()
+
+        assert any("STATE-INVARIANT-VIOLATION" in m for m in logged)
+        from textual.widgets._toast import Toast
+
+        toasts = list(app.query(Toast))
+        assert any("invariant violation" in t.render().plain.lower() for t in toasts)
+
+
+async def test_done_to_review_backed_by_new_activity_is_not_flagged(world, monkeypatch):
+    from datetime import timedelta, timezone, datetime as dt
+
+    from cagents import ctx as ctx_module
+
+    app, store, tmux, _claude_dir = world
+    logged = []
+    monkeypatch.setattr(ctx_module, "_log", lambda message: logged.append(message))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = app.snapshot.views[0]
+        view.state = SessionState.DONE
+        app.apply_snapshot(app.snapshot)
+        await pilot.pause()
+
+        view.state = SessionState.NEEDS_REVIEW
+        if view.parsed is not None:
+            baseline = view.parsed.last_timestamp or dt.now(timezone.utc)
+            view.parsed.last_timestamp = baseline + timedelta(minutes=1)
+        app.apply_snapshot(app.snapshot)
+        await pilot.pause()
+
+        assert not any("STATE-INVARIANT-VIOLATION" in m for m in logged)
+
+
+async def test_typing_a_message_never_trips_the_invariant_check(world, monkeypatch):
+    """Real bug, confirmed live: the user typed a message (a legitimate
+    NEEDS_REVIEW -> WORKING, justified by the live pane's spinner, not by
+    the transcript file — which Claude Code hasn't flushed yet) and got a
+    false-positive violation. Nothing -> WORKING is watched at all now;
+    this must stay quiet forever, regardless of transcript timestamps."""
+    from cagents import ctx as ctx_module
+
+    app, store, tmux, _claude_dir = world
+    logged = []
+    monkeypatch.setattr(ctx_module, "_log", lambda message: logged.append(message))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        view = app.snapshot.views[0]
+        view.state = SessionState.NEEDS_REVIEW
+        app.apply_snapshot(app.snapshot)
+        await pilot.pause()
+
+        view.state = SessionState.WORKING  # transcript file hasn't caught up
+        app.apply_snapshot(app.snapshot)
+        await pilot.pause()
+
+        assert not any("STATE-INVARIANT-VIOLATION" in m for m in logged)

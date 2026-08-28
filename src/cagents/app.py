@@ -50,6 +50,7 @@ from .sidecar import (
     CONTAINER_SOCKET,
     Sidecar,
     apply_ctx_binds,
+    apply_dim_chat,
     apply_left_capture,
     nested_attach_command,
 )
@@ -125,8 +126,10 @@ class CagentsApp(App):
     # Footer shows these in order; the important ones come first.
     BINDINGS = [
         Binding("enter", "attach", "Attach"),
+        Binding("i", "enter_chat", "Enter chat", show=False),
         Binding("d", "toggle_done", "Done"),
         Binding("w", "toggle_waiting", "Waiting"),
+        Binding("s", "toggle_snooze", "Snooze"),
         Binding("f", "fork", "Fork"),
         Binding("h", "handoff", "Handoff"),
         Binding("D", "show_diff", "Diff"),
@@ -185,6 +188,7 @@ class CagentsApp(App):
         self.selected_session_id: str | None = None
         self.compact = False
         self._prev_states: dict[str, SessionState] = {}
+        self._prev_last_activity: dict[str, object] = {}  # session_id -> last datetime seen
         self._seen_first_snapshot = False
         self._warned_no_notifier = False
         self._viewer_timer = None
@@ -231,6 +235,7 @@ class CagentsApp(App):
             try:
                 apply_left_capture(bool(self.store.get_setting("capture_left")))
                 apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
+                apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
             except Exception as error:
                 self.notify(f"Container key setup failed: {error}", severity="warning")
         try:
@@ -322,12 +327,33 @@ class CagentsApp(App):
     def refresh_data(self) -> None:
         self._refresh_worker()
 
-    @work(thread=True, exclusive=True, group="refresh")
+    @work(thread=True, exclusive=True, group="refresh", exit_on_error=False)
     def _refresh_worker(self) -> None:
-        snapshot = self.registry.refresh()
+        # This runs unconditionally every REFRESH_SECONDS, from the very
+        # first tick at boot — a single session with data that trips some
+        # edge case here must never take the whole app down with it
+        # (spec §11: silent failure is the one unforgivable sin, and an
+        # uncaught worker exception is fatal to the whole app by default).
+        try:
+            snapshot = self.registry.refresh()
+        except Exception as error:
+            self.call_from_thread(self.notify, f"Refresh failed: {error}", severity="error")
+            return
         self.call_from_thread(self.apply_snapshot, snapshot)
 
     def apply_snapshot(self, snapshot: Snapshot) -> None:
+        # A stale, slower-finishing refresh can complete AFTER a newer one
+        # already landed — Textual's "exclusive" worker cancellation can't
+        # actually stop a running thread (only the wrapping task), so an
+        # older _refresh_worker call can still call back in here later —
+        # confirmed live: a poll's own store mutation got silently
+        # reverted by an in-flight refresh that had started before it.
+        # generated_at is stamped at the START of registry.refresh(), so
+        # it orders correctly by when the read began, not by when the
+        # (possibly slow) work happened to finish; discard anything older
+        # than what's already showing.
+        if snapshot.generated_at < self.snapshot.generated_at:
+            return
         self.snapshot = snapshot
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
@@ -399,13 +425,31 @@ class CagentsApp(App):
         # the event handler blocked Textual's redraw exactly while the ←
         # focus hook resized the rail — a visibly torn/doubled list frame
         # for as long as the subprocess calls took.
+        #
+        # exit_on_error=False is deliberate: Textual's default kills the
+        # WHOLE APP if a worker's callable raises anything other than
+        # CancelledError. This is a passive background convenience
+        # (keep the session/terminal panes in step with the highlight) —
+        # a bug in it, or a subprocess call failing in some way the
+        # try/except below doesn't anticipate, must never be fatal.
+        # Replicated live: a stuck/rejected sync here took the whole
+        # process down, leaving nothing but the boot placeholder forever
+        # (the app was simply gone — confirmed via `ps`).
         self.run_worker(
             lambda v=view: self._sync_viewer_blocking(v),
-            thread=True, group="viewer-sync", exclusive=True,
+            thread=True, group="viewer-sync", exclusive=True, exit_on_error=False,
         )
 
     def _sync_viewer_blocking(self, view: SessionView) -> None:
+        from textual.worker import get_current_worker
+
+        worker = get_current_worker()
         with self._viewer_sync_lock:  # exclusive= can't stop a running thread
+            if worker.is_cancelled:
+                # Superseded by a newer sync while queued on the lock —
+                # its target is stale now; let the newer one act instead
+                # of doing (and possibly erroring on) work nobody wants.
+                return
             try:
                 self._sync_terminal(view)
                 command = self._viewer_command(view)
@@ -414,9 +458,10 @@ class CagentsApp(App):
                 self.sidecar.show_viewer(command)
                 self._viewer_target = command
             except Exception as error:
-                self.call_from_thread(
-                    self.notify, f"Viewer failed: {error}", severity="error"
-                )
+                if not worker.is_cancelled:
+                    self.call_from_thread(
+                        self.notify, f"Viewer failed: {error}", severity="error"
+                    )
 
     def _sync_terminal(self, view: SessionView) -> None:
         """Keep the term-1 PANE pointed at the currently selected session
@@ -533,13 +578,35 @@ class CagentsApp(App):
             self.action_attach()
 
     def action_attach(self) -> None:
+        self._attach()
+
+    def action_enter_chat(self) -> None:
+        """i: attach AND zoom the chat to full width in one step — the
+        vim "insert mode" feel this is modeled on (i = dive into the
+        chat; ← already unwinds HIDDEN -> SMALL -> WIDE back to the
+        list, so no new "exit" binding is needed for that half).
+
+        Deliberately no Escape binding for the reverse direction: Escape
+        is Claude's own interrupt key once a session pane has real
+        focus, and a root-level tmux binding intercepts a key before the
+        focused pane ever sees it — there's no way to tell "leave chat"
+        and "interrupt Claude" apart for the same keypress there, so
+        capturing it would break interrupting a running turn."""
+        view = self._attach()
+        if view is not None and self.sidecar is not None:
+            try:
+                self.sidecar.hide_rail()
+            except Exception as error:
+                self.notify(f"Layout failed: {error}", severity="warning")
+
+    def _attach(self) -> SessionView | None:
         view = self.selected_view()
         if view is None:
             self.notify("No session selected.", severity="warning")
-            return
+            return None
         if not self.tmux.available():
             self.notify("tmux not found on PATH — cannot attach.", severity="error")
-            return
+            return None
         try:
             if view.live:
                 self._attach_live(view)
@@ -547,7 +614,10 @@ class CagentsApp(App):
                 self._resume_dead_session(view)
         except Exception as error:  # loud, specific failure (spec §11)
             self.notify(f"Attach failed: {error}", severity="error", timeout=10)
+            self.refresh_data()
+            return None
         self.refresh_data()
+        return view
 
     def _attach_live(self, view: SessionView) -> None:
         if self.sidecar is not None and self.store.get_setting("sidebar"):
@@ -988,7 +1058,36 @@ exec {real!r} "$@"
         if recorded:
             self._set_waiting(view.session_id, recorded)
         else:
-            self._find_pr_worker(view.session_id, view.project_dir)
+            branch = view.parsed.git_branch if view.parsed else ""
+            self._find_pr_worker(view.session_id, view.project_dir, branch)
+
+    def action_toggle_snooze(self) -> None:
+        """s: defer this session for `snooze_duration` (settings panel;
+        default 1h) — a genuinely blocking/active session (WORKING,
+        NEEDS_INPUT) can't be snoozed away, same guard as done/waiting."""
+        view = self.selected_view()
+        if view is None:
+            return
+        if view.state == SessionState.SNOOZED:
+            self._checkpoint("snooze change")
+            self.store.clear_snooze(view.session_id)
+            self._notify_undoable("Un-snoozed — back in the queue.")
+            self.refresh_data()
+            return
+        if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+            self.notify("Still in flight — snooze it once Claude is finished.", severity="warning")
+            return
+        from datetime import timedelta
+
+        from .store import SNOOZE_MINUTES
+
+        duration = str(self.store.get_setting("snooze_duration"))
+        minutes = SNOOZE_MINUTES.get(duration, 60)
+        self._checkpoint("snooze change")
+        until = utcnow() + timedelta(minutes=minutes)
+        self.store.set_snooze(view.session_id, until.isoformat())
+        self._notify_undoable(f"Snoozed for {duration} (until {until.strftime('%H:%M')}).")
+        self.refresh_data()
 
     @staticmethod
     def _recorded_pr_url(view: SessionView) -> str:
@@ -1001,9 +1100,9 @@ exec {real!r} "$@"
                     return link.url
         return view.tracked.pr_url or view.tracked.waiting_pr
 
-    @work(thread=True, exclusive=True, group="findpr")
-    def _find_pr_worker(self, session_id: str, directory: str) -> None:
-        url = gitops.find_pr_url(directory, runner=self.gh_runner)
+    @work(thread=True, exclusive=True, group="findpr", exit_on_error=False)
+    def _find_pr_worker(self, session_id: str, directory: str, expected_branch: str = "") -> None:
+        url = gitops.find_pr_url(directory, runner=self.gh_runner, expected_branch=expected_branch)
         if url:
             self.call_from_thread(self._set_waiting, session_id, url)
         else:
@@ -1031,14 +1130,17 @@ exec {real!r} "$@"
     def _poll_waiting_prs(self) -> None:
         self._poll_waiting_worker()
 
-    @work(thread=True, exclusive=True, group="prpoll")
+    @work(thread=True, exclusive=True, group="prpoll", exit_on_error=False)
     def _poll_waiting_worker(self) -> None:
         changed = False
+        own_login = gitops.current_github_login(runner=self.gh_runner)
         for tracked in list(self.store.sessions.values()):
             if not tracked.waiting_since or not tracked.waiting_pr:
                 continue
             try:
-                status = gitops.pr_status(tracked.waiting_pr, runner=self.gh_runner)
+                status = gitops.pr_status(
+                    tracked.waiting_pr, runner=self.gh_runner, own_login=own_login
+                )
             except Exception:
                 continue  # transient gh failure; try again next poll
             short = tracked.label or tracked.session_id[:8]
@@ -1052,26 +1154,59 @@ exec {real!r} "$@"
                 self.store.clear_waiting(tracked.session_id, finished_reason="pr closed")
                 changed = True
                 self._desktop_note(f"PR closed — {short} needs review", tracked.session_id)
-            elif status.last_activity and status.last_activity > tracked.waiting_since:
-                self.store.mark_external_update(tracked.session_id, utcnow().isoformat(), "github comments")
-                changed = True
-                self._desktop_note(
-                    f"New PR comments — {short} external update", tracked.session_id
-                )
-            elif status.updated_at and status.updated_at > tracked.waiting_since:
-                # ANY other change (pushed commits, labels, edits, base
-                # change…) — folded into the same "external update" bucket
-                # as comments, not a generic needs-review: something
-                # specific happened on the PR while this was parked.
-                self.store.mark_external_update(tracked.session_id, utcnow().isoformat(), "pr updated")
-                changed = True
-                self._desktop_note(f"PR updated — {short} external update", tracked.session_id)
+            else:
+                note, reason = self._external_update_reason(status, tracked.waiting_since)
+                if reason:
+                    self.store.mark_external_update(tracked.session_id, utcnow().isoformat(), reason)
+                    changed = True
+                    self._desktop_note(f"{note} — {short} external update", tracked.session_id)
         if changed:
             self.call_from_thread(self.refresh_data)
 
+    def _external_update_reason(self, status, waiting_since: str) -> tuple[str, str]:
+        """Which (if any) enabled trigger category fired since the
+        session parked as waiting — each independently toggleable in
+        settings (see SETTINGS_DEFAULTS). Checked in a fixed priority so
+        one poll reports exactly one reason even if several categories
+        moved at once, rather than double-notifying."""
+        get = self.store.get_setting
+        if get("external_update_on_comments") and status.last_comment_from_others > waiting_since:
+            return "New PR comments", "github comments"
+        if get("external_update_on_self_comments") and status.last_comment_from_self > waiting_since:
+            return "Your own PR comment", "own comment"
+        if get("external_update_on_reviews") and status.last_review > waiting_since:
+            return "New PR review", "pr review"
+        if get("external_update_on_commits") and status.last_commit > waiting_since:
+            return "New commits pushed", "new commits"
+        if get("external_update_on_other_changes") and status.updated_at > waiting_since:
+            # Anything else GitHub bumped updatedAt for (labels, title/
+            # base edits, ...) not already covered above.
+            return "PR updated", "pr updated"
+        return "", ""
+
     def _desktop_note(self, message: str, session_id: str) -> None:
+        """Called from background poll workers — dispatches the actual
+        notification onto its OWN worker rather than running it inline,
+        via call_from_thread since run_worker itself must be started from
+        the main thread. Real bug, confirmed live: notify_desktop shells
+        out to terminal-notifier / osascript with a 10s timeout, and this
+        used to run synchronously INSIDE the poll worker's own thread,
+        before that same worker's later refresh_data() call. A slow or
+        hung notifier call (terminal-notifier can genuinely take the
+        full 10s in some environments) blocked the poll from ever
+        reaching the refresh that would make its own already-applied
+        store mutation visible — the store was correct, but the UI kept
+        showing stale state for up to 10s (or until the next unrelated
+        refresh) every time. Desktop notification delivery has no
+        business gating anything else."""
         if self.store.get_setting("desktop_notifications"):
-            notify_desktop("cagents", message, session_id, self.store.path.parent)
+            self.call_from_thread(self._dispatch_desktop_note, message, session_id)
+
+    def _dispatch_desktop_note(self, message: str, session_id: str) -> None:
+        self.run_worker(
+            lambda: notify_desktop("cagents", message, session_id, self.store.path.parent),
+            thread=True, exit_on_error=False,
+        )
 
     # -- Jira (optional; jira_integration setting) ---------------------------
 
@@ -1080,7 +1215,7 @@ exec {real!r} "$@"
             return
         self._poll_jira_worker(list(self.snapshot.views))
 
-    @work(thread=True, exclusive=True, group="jirapoll")
+    @work(thread=True, exclusive=True, group="jirapoll", exit_on_error=False)
     def _poll_jira_worker(self, views: list[SessionView]) -> None:
         if not jira.credentials_configured():
             return
@@ -1096,14 +1231,38 @@ exec {real!r} "$@"
             # just re-polled that same key's status). _recorded_pr_url
             # always prefers the session's real recorded PR over the
             # directory guess, so once a real PR exists this self-heals.
+            #
+            # expected_branch guards the OTHER half of this same bug class,
+            # confirmed live: `view.project_dir` is often a SHARED checkout
+            # (several sessions, no dedicated worktree each), and
+            # find_pr_url otherwise answers "whatever's checked out right
+            # now" — a different session's branch, a different PR, a
+            # different Jira card, silently attached and then cached into
+            # tracked.pr_url forever (defeating the self-heal above, since
+            # _recorded_pr_url trusts that field once it's non-empty). The
+            # session's own last-known branch (from its own transcript,
+            # never from re-inspecting the directory) is what find_pr_url
+            # verifies the found PR against before trusting it.
             pr_url = self._recorded_pr_url(view) or gitops.find_pr_url(
-                view.project_dir, runner=self.gh_runner
+                view.project_dir, runner=self.gh_runner,
+                expected_branch=view.parsed.git_branch if view.parsed else "",
             )
             if not pr_url:
+                # No legitimate PR to derive from this poll (e.g.
+                # find_pr_url now correctly refusing a shared, non-
+                # dedicated checkout it used to trust) — clear rather
+                # than leave a stale, unverifiable card sitting there;
+                # derived, not stored.
+                if tracked.jira_key:
+                    self.store.clear_jira_info(tracked.session_id)
+                    changed = True
                 continue
             title, body, branch = gitops.pr_jira_sources(pr_url, runner=self.gh_runner)
             key = jira.extract_jira_key(title, body, branch)
             if not key:
+                if tracked.jira_key:
+                    self.store.clear_jira_info(tracked.session_id)
+                    changed = True
                 continue
             try:
                 issue = jira.fetch_issue(key, fetch=self.jira_fetch)
@@ -1161,12 +1320,17 @@ exec {real!r} "$@"
                 )
         for view in snapshot.views:
             previous = self._prev_states.get(view.session_id)
+            previous_last_activity = self._prev_last_activity.get(view.session_id)
             self._prev_states[view.session_id] = view.state
+            self._prev_last_activity[view.session_id] = (
+                view.parsed.last_timestamp if view.parsed else None
+            )
             if previous is not None and previous != view.state:
                 self._dbg(
                     f"state {view.session_id[:8]}: {previous.value} -> {view.state.value}"
                     f" ({view.state_detail})"
                 )
+                self._check_state_invariant(previous, previous_last_activity, view)
             if first or not enabled:
                 continue
             if view.state in ALERT_STATES and previous not in ALERT_STATES and previous is not None:
@@ -1177,8 +1341,40 @@ exec {real!r} "$@"
                         v.session_id,
                         self.store.path.parent,
                     ),
-                    thread=True,
+                    thread=True, exit_on_error=False,
                 )
+
+    def _check_state_invariant(
+        self, previous: SessionState, previous_last_activity, view: SessionView
+    ) -> None:
+        """Catch state-derivation bugs the moment they happen, in the wild,
+        instead of only when someone notices a session showing the wrong
+        label. See sessions.check_state_invariant / REQUIRES_NEW_ACTIVITY
+        for exactly which transitions are watched and why. Always-on (not
+        gated by the debug_log setting) and loud — this is meant to
+        surface bugs, not get tuned into silence."""
+        from .sessions import check_state_invariant
+
+        violation = check_state_invariant(previous, previous_last_activity, view)
+        if violation is None:
+            return
+        from .ctx import _log
+
+        tracked = view.tracked
+        _log(
+            "STATE-INVARIANT-VIOLATION "
+            f"session={view.session_id} title={view.title!r} {violation} | "
+            f"live={view.live} tmux_name={view.tmux_name!r} "
+            f"reviewed_at={tracked.reviewed_datetime()!r} "
+            f"waiting_since={tracked.waiting_datetime()!r} "
+            f"external_update={tracked.external_update_datetime()!r} "
+            f"pending_tool_use={view.parsed.pending_tool_use if view.parsed else None} "
+            f"last_record_role={view.parsed.last_record_role if view.parsed else None!r}"
+        )
+        self.notify(
+            f"State invariant violation on '{view.title}': {violation} — see ctx.log",
+            severity="error", timeout=15,
+        )
 
     def _handle_toast_requests(self) -> None:
         """Warnings queued by cagents-ctx (the C-t / tab-click hooks run in
@@ -1270,7 +1466,7 @@ exec {real!r} "$@"
         self._send_prompt_later(name, prompt, "Forked — prompt sent to the new session.")
         self.refresh_data()
 
-    @work(thread=True, group="send")
+    @work(thread=True, group="send", exit_on_error=False)
     def _send_prompt_later(self, tmux_name: str, text: str, success_note: str) -> None:
         import time
 
@@ -1336,7 +1532,7 @@ exec {real!r} "$@"
             extra_args=("--resume", source_id, "--fork-session"),
         )
 
-    @work(thread=True, exclusive=True, group="handoff")
+    @work(thread=True, exclusive=True, group="handoff", exit_on_error=False)
     def _handoff_worker(self, source_id: str, prompt: str) -> None:
         try:
             spec = self._handoff_runner(source_id).run(summary_prompt(prompt))
@@ -1426,7 +1622,7 @@ exec {real!r} "$@"
         self.notify("Building diff…")
         self._diff_worker(view.work_dir)
 
-    @work(thread=True, exclusive=True, group="diff")
+    @work(thread=True, exclusive=True, group="diff", exit_on_error=False)
     def _diff_worker(self, directory: str) -> None:
         try:
             diff = gitops.worktree_diff(directory)
@@ -1457,7 +1653,7 @@ exec {real!r} "$@"
             return
         self._send_review_worker(view, result.send_message, result.comment_count)
 
-    @work(thread=True, exclusive=True, group="sendreview")
+    @work(thread=True, exclusive=True, group="sendreview", exit_on_error=False)
     def _send_review_worker(self, view: SessionView, message: str, count: int) -> None:
         import time
 
@@ -1535,7 +1731,7 @@ exec {real!r} "$@"
     def action_track_session(self) -> None:
         self._load_track_candidates()
 
-    @work(thread=True, exclusive=True, group="track")
+    @work(thread=True, exclusive=True, group="track", exit_on_error=False)
     def _load_track_candidates(self) -> None:
         from .claude_data import parse_session_file
 
@@ -1694,7 +1890,7 @@ exec {real!r} "$@"
         self.notify("Asking the fleet assistant… (plan will need your confirmation)")
         self._run_palette_request(request)
 
-    @work(thread=True, exclusive=True, group="palette")
+    @work(thread=True, exclusive=True, group="palette", exit_on_error=False)
     def _run_palette_request(self, request: str) -> None:
         snapshot = self.snapshot
         runner = self.claude_runner or CliClaudeRunner(claude_bin=self._claude_bin())
@@ -1738,6 +1934,12 @@ exec {real!r} "$@"
                 apply_left_capture(bool(value))
             except Exception as error:
                 self.notify(f"Could not apply ← binding: {error}", severity="error")
+            return
+        if key == "dim_chat_preview" and os.environ.get("CAGENTS_SIDECAR") == "1":
+            try:
+                apply_dim_chat(bool(value))
+            except Exception as error:
+                self.notify(f"Could not apply chat dimming: {error}", severity="error")
             return
         if key == "jira_integration" and value:
             if not jira.credentials_configured():

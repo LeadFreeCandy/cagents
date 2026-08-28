@@ -10,6 +10,8 @@ from cagents.claude_data import parse_session_file
 from cagents.sessions import (
     SessionRegistry,
     SessionState,
+    SessionView,
+    check_state_invariant,
     derive_state,
     map_tmux_sessions,
 )
@@ -201,6 +203,63 @@ class TestDeriveState:
         state, detail = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_INPUT
         assert detail == "at the prompt"
+
+
+class TestStateInvariant:
+    """check_state_invariant: catches a state-derivation bug at the moment
+    it happens (a reviewed session flipping back to NEEDS_REVIEW with no
+    new transcript activity to justify it), instead of only when someone
+    notices the wrong label live.
+
+    Nothing -> WORKING is watched here — real bug, confirmed live: it
+    false-positived the instant a user typed a message. derive_state
+    checks the LIVE PANE before ever touching the transcript, and Claude
+    Code updates the pane before the transcript file is flushed to disk,
+    so `parsed.last_timestamp` lagging right after you type something is
+    completely normal, not evidence of a bug — and this checker has no
+    pane text to tell the two cases apart. See REQUIRES_NEW_ACTIVITY."""
+
+    def _view(self, claude_dir: Path, now: float, state: SessionState, ts_offset: float) -> SessionView:
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("fix it").assistant_text(
+            "done", ts="2026-08-17T10:00:00.000Z"
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - ts_offset))
+        return SessionView(session_id=SID1, tracked=_tracked(), parsed=parsed, state=state, live=True)
+
+    def test_done_to_review_with_no_new_activity_is_a_violation(self, claude_dir: Path, now: float):
+        view = self._view(claude_dir, now, SessionState.NEEDS_REVIEW, ts_offset=10)
+        same_last_activity = view.parsed.last_timestamp
+        violation = check_state_invariant(SessionState.DONE, same_last_activity, view)
+        assert violation is not None
+        assert "no new transcript activity" in violation
+
+    def test_done_to_review_backed_by_new_activity_is_fine(self, claude_dir: Path, now: float):
+        from datetime import timedelta
+
+        view = self._view(claude_dir, now, SessionState.NEEDS_REVIEW, ts_offset=10)
+        earlier = view.parsed.last_timestamp - timedelta(minutes=5)
+        assert check_state_invariant(SessionState.DONE, earlier, view) is None
+
+    def test_anything_to_working_is_never_flagged(self, claude_dir: Path, now: float):
+        # The false positive this class of check must never regress to:
+        # typing a message legitimately flips WORKING on via the live
+        # pane, well before the transcript file catches up.
+        view = self._view(claude_dir, now, SessionState.WORKING, ts_offset=10)
+        same_last_activity = view.parsed.last_timestamp
+        for previous in (SessionState.NEEDS_REVIEW, SessionState.DONE, SessionState.SNOOZED):
+            assert check_state_invariant(previous, same_last_activity, view) is None
+
+    def test_unwatched_pair_is_never_flagged(self, claude_dir: Path, now: float):
+        view = self._view(claude_dir, now, SessionState.NEEDS_REVIEW, ts_offset=10)
+        assert check_state_invariant(SessionState.WORKING, view.parsed.last_timestamp, view) is None
+
+    def test_no_previous_state_is_not_flagged(self, claude_dir: Path, now: float):
+        view = self._view(claude_dir, now, SessionState.WORKING, ts_offset=10)
+        assert check_state_invariant(None, None, view) is None
+
+    def test_unchanged_state_is_not_flagged(self, claude_dir: Path, now: float):
+        view = self._view(claude_dir, now, SessionState.WORKING, ts_offset=10)
+        assert check_state_invariant(SessionState.WORKING, view.parsed.last_timestamp, view) is None
 
 
 class TestTmuxMapping:

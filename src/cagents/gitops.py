@@ -303,21 +303,85 @@ class PRStatus:
     state: str = ""  # OPEN / CLOSED / MERGED
     last_activity: str = ""  # ISO timestamp of newest comment/review, "" if none
     updated_at: str = ""  # ISO timestamp of ANY change to the PR
+    # Per-trigger-category timestamps, each "" if that category never
+    # happened — lets the external-update settings gate on exactly the
+    # kind of activity that occurred, not just "something changed".
+    last_comment_from_others: str = ""
+    last_comment_from_self: str = ""  # own_login's own comments
+    last_review: str = ""
+    last_commit: str = ""
 
 
 def _gh_runner_default(args: list[str], cwd: str | None = None) -> str:
     return _run(args, cwd or ".", timeout=30.0)
 
 
-def find_pr_url(directory: str, runner=None) -> str:
-    """The PR for this worktree's current branch, per gh; '' if none."""
+def current_github_login(runner=None) -> str:
+    """The authenticated gh user's own login — lets pr_status tell a
+    comment someone else left apart from one you left yourself, so
+    self-comments can be gated by their own (default-off) setting
+    without hiding real feedback from others."""
     run = runner or _gh_runner_default
     try:
-        out = run(["gh", "pr", "view", "--json", "url", "-q", ".url"], directory)
+        out = run(["gh", "api", "user", "--jq", ".login"], None)
     except Exception:
         return ""
-    url = out.strip()
-    return url if url.startswith("http") else ""
+    return out.strip()
+
+
+def find_pr_url(directory: str, runner=None, expected_branch: str = "") -> str:
+    """The PR for whatever branch is CURRENTLY checked out in `directory`,
+    per gh; '' if none, or if the result can't be trusted.
+
+    Real bug, confirmed live (repeatedly — a whole batch of unrelated
+    sessions all "inheriting" the same Jira card): `directory` is very
+    often a SHARED checkout, not a dedicated worktree — several cagents
+    sessions (e.g. a handoff-created session, which inherits its parent's
+    plain project dir) can point at the exact same directory. `gh pr
+    view` there answers "what's checked out right now", not "this
+    session's own PR" — so without a check, one session's lookup can
+    silently attach a completely unrelated session's PR (and from there,
+    its Jira card) the moment someone else's branch happens to be checked
+    out at call time — and because that gets cached into the session's
+    own tracked.pr_url, it then sticks forever, never re-checked again.
+
+    The worktree check below is UNCONDITIONAL, not just "when a branch
+    was given to check against" — that was the actual hole: a session
+    with no recorded `gitBranch` yet (a near-empty transcript; there's no
+    shortage of those) skipped the whole guard and fell straight back to
+    trusting a shared checkout's current branch, for every such session
+    pointed at that directory, all inheriting whichever PR happened to be
+    checked out there at poll time.
+
+      1. `directory` must be a genuinely dedicated (linked) worktree, not
+         the shared main checkout — ALWAYS required, branch known or not:
+         a branch match in a shared checkout is no guarantee either,
+         since the "checked out branch" there is really just whatever
+         some OTHER session or a human last left it as.
+      2. If `expected_branch` (the session's own last-known branch, from
+         its own transcript's `gitBranch` field — never from re-inspecting
+         the directory) is given, the found PR's actual branch must equal
+         it too.
+    Either failing returns '' (fail closed; mapping the WRONG PR is worse
+    than finding none) rather than a plausible-looking wrong answer."""
+    kind, _root = worktree_status(directory)
+    if kind != "linked":
+        return ""
+    run = runner or _gh_runner_default
+    try:
+        out = run(["gh", "pr", "view", "--json", "url,headRefName"], directory)
+    except Exception:
+        return ""
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    url = str(data.get("url", "") or "")
+    if not url.startswith("http"):
+        return ""
+    if expected_branch and str(data.get("headRefName", "") or "") != expected_branch:
+        return ""
+    return url
 
 
 def pr_jira_sources(pr_url: str, runner=None) -> tuple[str, str, str]:
@@ -341,23 +405,38 @@ def pr_jira_sources(pr_url: str, runner=None) -> tuple[str, str, str]:
     )
 
 
-def pr_status(pr_url: str, runner=None) -> PRStatus:
-    """Merged? And when did a human last touch it (comment/review)?"""
+def pr_status(pr_url: str, runner=None, own_login: str = "") -> PRStatus:
+    """Merged? And when did a human last touch it (comment/review/push)?
+
+    `own_login` (current_github_login()) splits comments into "from
+    others" vs "from yourself" — the latter defaults off in settings,
+    since your own comment on your own PR isn't something you generally
+    need re-alerting about."""
     run = runner or _gh_runner_default
     out = run(
         ["gh", "pr", "view", pr_url, "--json",
-         "state,mergedAt,comments,reviews,updatedAt"], None
+         "state,mergedAt,comments,reviews,commits,updatedAt"], None
     )
     data = json.loads(out)
-    stamps: list[str] = []
+    others: list[str] = []
+    mine: list[str] = []
+    reviews: list[str] = []
+    commits: list[str] = []
     for item in data.get("comments") or []:
         created = item.get("createdAt")
-        if isinstance(created, str):
-            stamps.append(created)
+        if not isinstance(created, str):
+            continue
+        author = str((item.get("author") or {}).get("login", ""))
+        (mine if own_login and author == own_login else others).append(created)
     for item in data.get("reviews") or []:
         submitted = item.get("submittedAt")
         if isinstance(submitted, str):
-            stamps.append(submitted)
+            reviews.append(submitted)
+    for item in data.get("commits") or []:
+        committed = item.get("committedDate")
+        if isinstance(committed, str):
+            commits.append(committed)
+    stamps = others + mine + reviews
     merged = bool(data.get("mergedAt")) or data.get("state") == "MERGED"
     return PRStatus(
         merged=merged,
@@ -365,4 +444,8 @@ def pr_status(pr_url: str, runner=None) -> PRStatus:
         state=str(data.get("state", "")),
         last_activity=max(stamps) if stamps else "",
         updated_at=str(data.get("updatedAt") or ""),
+        last_comment_from_others=max(others) if others else "",
+        last_comment_from_self=max(mine) if mine else "",
+        last_review=max(reviews) if reviews else "",
+        last_commit=max(commits) if commits else "",
     )

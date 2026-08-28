@@ -13,7 +13,7 @@ from cagents.format import JIRA_ASSIGNEE_WIDTH, JIRA_KEY_WIDTH, JIRA_STATUS_WIDT
 from cagents.sessions import SessionState, SessionView
 from cagents.store import Store, TrackedSession
 
-from conftest import SID1, TranscriptBuilder
+from conftest import SID1, TranscriptBuilder, init_git_repo
 
 
 # --------------------------------------------------------------- jira.py ---
@@ -130,6 +130,16 @@ def test_jira_info_roundtrip(tmp_path: Path):
     assert got.jira_status == "In Review"
     assert got.jira_assignee == "Jamie Rivera"
     assert got.jira_checked_at == "2026-08-18T11:00:00+00:00"
+
+
+def test_clear_jira_info_roundtrip(tmp_path: Path):
+    path = tmp_path / "state.json"
+    store = Store.load(path)
+    store.track(SID1, "/proj/a", "2026-08-18T09:00:00+00:00")
+    store.set_jira_info(SID1, "OWNER-721", "In Review", "Jamie Rivera", "2026-08-18T11:00:00+00:00")
+    store.clear_jira_info(SID1)
+    got = Store.load(path).sessions[SID1]
+    assert got.jira_key == "" and got.jira_status == "" and got.jira_assignee == ""
 
 
 def test_jira_integration_defaults_off():
@@ -310,7 +320,10 @@ async def test_jira_poller_self_heals_when_the_recorded_pr_changes(
 async def test_jira_poller_backfills_when_no_pr_recorded_yet(claude_dir: Path, tmp_path: Path, now: float, monkeypatch):
     """No pr-link record, no manual/waiting association — the poller must
     actively look one up (like the 'w' fallback) and keep trying, not
-    silently skip the session forever."""
+    silently skip the session forever. Only trustworthy when the session
+    has its own dedicated worktree, though (see
+    test_jira_poller_refuses_a_pr_from_a_shared_non_worktree_checkout) —
+    so this uses a real linked worktree, on the branch it claims."""
     from cagents.app import CagentsApp
     from cagents.sessions import SessionRegistry
 
@@ -318,12 +331,23 @@ async def test_jira_poller_backfills_when_no_pr_recorded_yet(claude_dir: Path, t
     monkeypatch.setenv("JIRA_EMAIL", "me@team.com")
     monkeypatch.setenv("JIRA_API_TOKEN", "tok")
 
+    main_repo = tmp_path / "repo"
+    main_repo.mkdir()
+    init_git_repo(main_repo)
+    wt = tmp_path / "wt-backfill"
+    import subprocess
+
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "backfill-work", str(wt)],
+        cwd=main_repo, capture_output=True, check=True,
+    )
+
     sid = "77777777-7777-7777-7777-777777777777"
-    TranscriptBuilder(sid, "/proj/pr2").ai_title("Untracked PR work").user("go").assistant_text(
-        "Opened a PR out of band."
-    ).write(claude_dir, mtime=now - 600)
+    TranscriptBuilder(sid, str(wt), git_branch="backfill-work").ai_title(
+        "Untracked PR work"
+    ).user("go").assistant_text("Opened a PR out of band.").write(claude_dir, mtime=now - 600)
     store = Store.load(tmp_path / "state.json")
-    store.track(sid, "/proj/pr2", "2026-08-18T09:00:00+00:00")
+    store.track(sid, str(wt), "2026-08-18T09:00:00+00:00")
     store.set_setting("jira_integration", True)
 
     from conftest import FakeTmux
@@ -332,9 +356,9 @@ async def test_jira_poller_backfills_when_no_pr_recorded_yet(claude_dir: Path, t
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
 
     def gh_runner(args, cwd=None):
-        if "url" in args:  # find_pr_url's shape
-            return "https://github.com/o/r/pull/77"
-        return '{"title": "OWNER-77: backfilled", "body": "", "headRefName": "x"}'
+        if "url,headRefName" in " ".join(args):  # find_pr_url's shape (not pr_jira_sources's title,body,headRefName)
+            return '{"url": "https://github.com/o/r/pull/77", "headRefName": "backfill-work"}'
+        return '{"title": "OWNER-77: backfilled", "body": "", "headRefName": "backfill-work"}'
 
     jira_fetch = lambda url, email, token: {
         "fields": {"status": {"name": "Ready for dev"}, "assignee": None}
@@ -350,6 +374,151 @@ async def test_jira_poller_backfills_when_no_pr_recorded_yet(claude_dir: Path, t
         tracked = store.sessions[sid]
         assert tracked.jira_key == "OWNER-77"
         assert tracked.jira_status == "Ready for dev"
+        assert tracked.jira_assignee == ""
+
+
+async def test_jira_poller_refuses_a_pr_from_a_shared_non_worktree_checkout(
+    claude_dir: Path, tmp_path: Path, now: float, monkeypatch
+):
+    """Real bug, confirmed live: a handoff-created session (c666ef68,
+    "OWNER-736 summaries_enabled wiring") inherited its parent's plain
+    project dir — the shared main checkout, not a dedicated worktree.
+    Pressing `w` on it once triggered find_pr_url(directory), which
+    answered with whatever branch a SIBLING session happened to have
+    checked out there (OWNER-721's), and that got cached into pr_url
+    forever, permanently misattributing this session's Jira card. The
+    poller's fallback lookup must refuse a directory-based PR when it
+    isn't a dedicated worktree, not just when the poll happens to
+    disagree with a cached value."""
+    from cagents.app import CagentsApp
+    from cagents.sessions import SessionRegistry
+    from conftest import FakeTmux
+
+    monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@team.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+
+    shared_dir = tmp_path / "apm_bundle"
+    shared_dir.mkdir()
+    init_git_repo(shared_dir)
+
+    sid = "c6666666-1111-1111-1111-111111111111"
+    TranscriptBuilder(sid, str(shared_dir), git_branch="OWNER-721-owner-index-filters").ai_title(
+        "OWNER-736 summaries_enabled wiring"
+    ).user("go").assistant_text("Wired it up.").write(claude_dir, mtime=now - 600)
+    store = Store.load(tmp_path / "state.json")
+    store.track(sid, str(shared_dir), "2026-08-18T09:00:00+00:00")
+    store.set_setting("jira_integration", True)
+
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+
+    def gh_runner(args, cwd=None):
+        # gh answers for whatever's actually checked out in the SHARED
+        # dir right now — a sibling session's branch, not this one's.
+        if "url,headRefName" in " ".join(args):  # find_pr_url's shape
+            return '{"url": "https://github.com/o/r/pull/122680", ' \
+                   '"headRefName": "OWNER-721-owner-index-filters"}'
+        return '{"title": "OWNER-721: index filters", "body": "", ' \
+               '"headRefName": "OWNER-721-owner-index-filters"}'
+
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir, gh_runner=gh_runner)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_jira_prs()
+        await pilot.pause(0.3)
+        # no pr-link record, no dedicated worktree -> refuses to guess,
+        # rather than attaching the sibling session's OWNER-721 card
+        assert store.sessions[sid].jira_key == ""
+
+
+async def test_jira_poller_refuses_a_shared_checkout_even_with_no_recorded_branch(
+    claude_dir: Path, tmp_path: Path, now: float, monkeypatch
+):
+    """Real bug, confirmed live — REPEATEDLY, a whole batch of unrelated
+    sessions all "inheriting" OWNER-721: the worktree guard used to be
+    skipped ENTIRELY whenever a session had no `gitBranch` recorded yet
+    (near-empty transcripts are common) — falling straight back to
+    trusting whatever's checked out in a shared directory, for every
+    such session pointed at it. The guard must be unconditional, not
+    just "when there's a branch to also check"."""
+    from cagents.app import CagentsApp
+    from cagents.sessions import SessionRegistry
+    from conftest import FakeTmux
+
+    monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@team.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+
+    shared_dir = tmp_path / "apm_bundle"
+    shared_dir.mkdir()
+    init_git_repo(shared_dir)
+
+    sid = "6a8f1146-6a8f-6a8f-6a8f-6a8f114be590"
+    # no user/assistant records at all -> parsed.git_branch stays "" —
+    # exactly the near-empty-session shape that hit this live
+    TranscriptBuilder(sid, str(shared_dir)).ai_title("fresh").write(claude_dir, mtime=now - 600)
+    store = Store.load(tmp_path / "state.json")
+    store.track(sid, str(shared_dir), "2026-08-18T09:00:00+00:00")
+    store.set_setting("jira_integration", True)
+
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+
+    def gh_runner(args, cwd=None):
+        if "url,headRefName" in " ".join(args):
+            return '{"url": "https://github.com/o/r/pull/122680", ' \
+                   '"headRefName": "OWNER-721-owner-index-filters"}'
+        return '{"title": "OWNER-721: index filters", "body": "", ' \
+               '"headRefName": "OWNER-721-owner-index-filters"}'
+
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir, gh_runner=gh_runner)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_jira_prs()
+        await pilot.pause(0.3)
+        assert store.sessions[sid].jira_key == ""
+
+
+async def test_jira_poller_clears_a_stale_key_once_it_can_no_longer_be_derived(
+    claude_dir: Path, tmp_path: Path, now: float, monkeypatch
+):
+    """A session that already has a (now-known-wrong) jira_key sitting in
+    the store from before this guard existed must not keep showing it
+    forever — derived, not stored: the moment a poll can no longer find
+    any legitimate PR/key, the stale card actually clears."""
+    from cagents.app import CagentsApp
+    from cagents.sessions import SessionRegistry
+    from conftest import FakeTmux
+
+    monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "me@team.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "tok")
+
+    shared_dir = tmp_path / "apm_bundle"
+    shared_dir.mkdir()
+    init_git_repo(shared_dir)
+
+    sid = "c0551730-c055-c055-c055-c0551730c055"
+    TranscriptBuilder(sid, str(shared_dir)).ai_title("fresh").write(claude_dir, mtime=now - 600)
+    store = Store.load(tmp_path / "state.json")
+    store.track(sid, str(shared_dir), "2026-08-18T09:00:00+00:00")
+    store.set_jira_info(sid, "OWNER-721", "In CR", "Samir Beall", "2026-08-20T00:00:00+00:00")
+    store.set_setting("jira_integration", True)
+
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    gh_runner = lambda args, cwd=None: (_ for _ in ()).throw(  # noqa: E731
+        RuntimeError("no pull requests found")
+    )
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir, gh_runner=gh_runner)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_jira_prs()
+        await pilot.pause(0.3)
+        tracked = store.sessions[sid]
+        assert tracked.jira_key == ""
+        assert tracked.jira_status == ""
         assert tracked.jira_assignee == ""
 
 

@@ -40,6 +40,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "notifications": False,
     # Left arrow drives the layout cycle / returns to the list.
     "capture_left": True,
+    # Dim the chat pane a bit while the rail is at its wide/max size
+    # (choosing a session) — a visual cue for "not what you're doing
+    # right now", cleared once the session pane is focused again.
+    "dim_chat_preview": True,
     # Look up each session's linked Jira card (via its PR) and show it as
     # extra columns: key, board status, assignee. Off by default — needs
     # JIRA_SITE / JIRA_EMAIL / JIRA_API_TOKEN in the environment.
@@ -64,12 +68,35 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # What the diff tab shows. "branch": this worktree vs master
     # (merge-base, committed + uncommitted). "uncommitted": vs HEAD only.
     "diff_mode": "branch",
+    # How long `s` (snooze) parks a session for by default.
+    "snooze_duration": "1h",
+    # What re-alerts a session parked "waiting on PR" (w) back out of
+    # that state, as an EXTERNAL_UPDATE — each independently toggleable.
+    # A merge always marks it done, and a close-without-merge always
+    # re-alerts as needs-review, regardless of these (not "an update",
+    # a resolution).
+    "external_update_on_comments": True,  # a comment from someone else
+    # Your OWN comment on your own PR isn't usually something you need
+    # re-alerting about — off by default, unlike everyone else's.
+    "external_update_on_self_comments": False,
+    "external_update_on_reviews": True,  # a review submitted (approve/request changes/comment)
+    "external_update_on_commits": True,  # new commits pushed
+    # Catch-all for anything else GitHub bumped updatedAt for (labels,
+    # title/base edits, ...) that isn't already covered above.
+    "external_update_on_other_changes": True,
     # Queue/list priority of the states, most-urgent first. Reorder in the
     # settings panel's Priority tab.
     "state_order": [
         "needs input", "external update", "needs review", "shell running", "monitoring",
-        "background", "working", "waiting", "stopped", "done",
+        "background", "working", "snoozed", "waiting", "stopped", "done",
     ],
+}
+
+# snooze_duration's allowed values -> minutes. Kept next to SETTINGS_DEFAULTS
+# since both ends (the settings panel's cycling and action_toggle_snooze's
+# math) need the same mapping.
+SNOOZE_MINUTES: dict[str, int] = {
+    "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "1d": 1440,
 }
 
 
@@ -111,6 +138,10 @@ class TrackedSession:
     # Lineage (spec §9's "lightweight relationships").
     parent_id: str = ""
     relation: str = ""  # "fork" | "handoff" | ""
+    # Explicit, time-based defer (s / action_toggle_snooze). A timestamp,
+    # not a flag, so it self-expires the moment `now` passes it — no
+    # explicit clearing needed on the happy path (see _finished_state).
+    snoozed_until: str = ""  # ISO 8601
 
     def added_datetime(self) -> datetime | None:
         return _parse_iso(self.added_at)
@@ -123,6 +154,9 @@ class TrackedSession:
 
     def external_update_datetime(self) -> datetime | None:
         return _parse_iso(self.external_update_since)
+
+    def snoozed_datetime(self) -> datetime | None:
+        return _parse_iso(self.snoozed_until)
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +176,7 @@ class TrackedSession:
             "jira_checked_at": self.jira_checked_at,
             "parent_id": self.parent_id,
             "relation": self.relation,
+            "snoozed_until": self.snoozed_until,
         }
 
     @classmethod
@@ -166,6 +201,7 @@ class TrackedSession:
             jira_checked_at=str(data.get("jira_checked_at", "")),
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
+            snoozed_until=str(data.get("snoozed_until", "")),
         )
 
 
@@ -314,6 +350,20 @@ class Store:
             tracked.external_update_since = when
             self.save()
 
+    # -- snooze -----------------------------------------------------------
+
+    def set_snooze(self, session_id: str, until: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.snoozed_until = until
+            self.save()
+
+    def clear_snooze(self, session_id: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.snoozed_until:
+            tracked.snoozed_until = ""
+            self.save()
+
     def set_jira_info(self, session_id: str, key: str, status: str, assignee: str, when: str) -> None:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
@@ -321,6 +371,18 @@ class Store:
             tracked.jira_status = status
             tracked.jira_assignee = assignee
             tracked.jira_checked_at = when
+            self.save()
+
+    def clear_jira_info(self, session_id: str) -> None:
+        """Derived, not stored (spec §9): once a poll can no longer find
+        any legitimate PR/key to derive from, the card must actually
+        clear — not sit there as stale, unverifiable leftover data from
+        whatever the last successful derivation happened to find."""
+        tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.jira_key:
+            tracked.jira_key = ""
+            tracked.jira_status = ""
+            tracked.jira_assignee = ""
             self.save()
 
     # -- settings -------------------------------------------------------------

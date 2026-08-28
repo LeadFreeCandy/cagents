@@ -12,6 +12,7 @@ conversation and turn-state signals).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -200,19 +201,49 @@ def _iter_content_blocks(message: object):
 
 _BG_ACK = re.compile(r"running in background with ID:\s*(\S+?)\.?(?:\s|$)")
 _MONITOR_ACK = re.compile(r"Monitor started \(task (\S+), timeout (\d+)ms\)")
+# A Monitor started with no `wait`/timeout runs "persistent — runs until
+# TaskStop or session end" instead of "timeout <N>ms" (confirmed live: two
+# persistent monitors in a real transcript never matched _MONITOR_ACK at
+# all, so they never entered active_monitors and monitor_running() stayed
+# permanently False for a session that very much had one running).
+_MONITOR_ACK_PERSISTENT = re.compile(r"Monitor started \(task (\S+), persistent")
 _TASK_NOTIF_ID = re.compile(r"<task-id>(\S+)</task-id>")
 _TASK_TERMINAL = re.compile(r"<status>(?:completed|failed|killed)</status>")
 _MONITOR_TIMED_OUT = re.compile(r"\[Monitor timed out")
 
 
-def _scan_lifecycle(text: str, ts, active_background: dict, active_monitors: dict) -> None:
-    """Track long-lived side tasks through their transcript lifecycle."""
+def _scan_lifecycle(
+    text: str, ts, active_background: dict, active_monitors: dict,
+    terminal_ids: set, timed_out_ids: set,
+) -> None:
+    """Track long-lived side tasks through their transcript lifecycle.
+
+    Only ACCUMULATES here — never pops mid-scan. Real bug, confirmed
+    live: a task's completion notification (a `queue-operation` record)
+    can appear EARLIER in the file than the "running in background"
+    tool_result it's completing (two logically-ordered but physically
+    separate record streams Claude Code interleaves, apparently without
+    a strict ordering guarantee between them) — scan order is then start
+    AFTER completion, so an immediate pop-on-completion has nothing to
+    pop yet, and the later start ack is never cleared, leaving the task
+    "active" forever. Collecting terminal/timed-out ids into their own
+    sets and reconciling once, after the WHOLE scan (see the caller),
+    makes the result independent of which record happened to come
+    first."""
     match = _BG_ACK.search(text)
     if match:
         active_background[match.group(1).rstrip(".")] = True
     match = _MONITOR_ACK.search(text)
     if match and ts is not None:
         active_monitors[match.group(1)] = ts.timestamp() + int(match.group(2)) / 1000.0
+    else:
+        match = _MONITOR_ACK_PERSISTENT.search(text)
+        if match:
+            # No timeout to compute a deadline from — it only ever ends via
+            # an explicit TaskStop/completion (reconciled through
+            # terminal_ids below) or session end, so treat it as never
+            # expiring on its own.
+            active_monitors[match.group(1)] = math.inf
     match = _TASK_NOTIF_ID.search(text)
     if match:
         task_id = match.group(1)
@@ -221,13 +252,51 @@ def _scan_lifecycle(text: str, ts, active_background: dict, active_monitors: dic
             # same <status>completed</status> shape as a background
             # command's (confirmed live: task-notification for a Monitor
             # that finished on its own, not via timeout, reads
-            # "<status>completed</status>" same as background). Popping
-            # both dicts unconditionally is a harmless no-op for whichever
-            # one this task_id doesn't belong to.
-            active_background.pop(task_id, None)
-            active_monitors.pop(task_id, None)
+            # "<status>completed</status>" same as background) — adding
+            # to both sets unconditionally is a harmless no-op for
+            # whichever one this task_id doesn't belong to.
+            terminal_ids.add(task_id)
         if _MONITOR_TIMED_OUT.search(text):
-            active_monitors.pop(task_id, None)
+            timed_out_ids.add(task_id)
+
+
+_LINE_TS_RE = re.compile(r'"timestamp":"([^"]+)"')
+
+
+def _scan_middle_for_lifecycle(
+    path: Path, start: int, end: int,
+    active_background: dict, active_monitors: dict,
+    terminal_ids: set, timed_out_ids: set,
+) -> None:
+    """Regex-only sweep of the byte range `_read_lines` drops for a large
+    transcript, looking for background/Monitor lifecycle markers the
+    bounded head+tail scan never sees.
+
+    Confirmed live: a session's Monitor ack sat ~2MB into a 5MB
+    transcript — well inside the region `_read_lines` skips for files
+    past head_bytes+tail_bytes — so `monitor_running()` stayed False no
+    matter how long the Monitor kept running, even after the wire-format
+    regex was fixed to recognize persistent Monitors. Cheap by design: no
+    JSON parsing, no record reconstruction — the same tag/phrase regexes
+    `_scan_lifecycle` already uses, run straight against each raw JSONL
+    line. Their escaped JSON text is byte-identical to the decoded content
+    for the plain-ASCII phrases matched here, so decoding each record
+    would find nothing this doesn't."""
+    if end <= start:
+        return
+    with path.open("rb") as f:
+        f.seek(start)
+        data = f.read(end - start)
+    for raw_line in data.decode("utf-8", "replace").splitlines():
+        if (
+            "Monitor started" not in raw_line
+            and "running in background" not in raw_line
+            and "<task-id>" not in raw_line
+        ):
+            continue
+        ts_match = _LINE_TS_RE.search(raw_line)
+        ts = _parse_ts(ts_match.group(1)) if ts_match else None
+        _scan_lifecycle(raw_line, ts, active_background, active_monitors, terminal_ids, timed_out_ids)
 
 
 # Fallback for the handful of harness-synthesized shapes seen without a
@@ -293,6 +362,15 @@ def parse_session_file(
     background_tool_ids: set[str] = set()  # tool_use ids with run_in_background
     active_background: dict[str, bool] = {}  # task id -> running
     active_monitors: dict[str, float] = {}  # task id -> expiry epoch
+    terminal_task_ids: set[str] = set()  # reconciled against the above after the scan
+    timed_out_monitor_ids: set[str] = set()
+
+    if parsed.truncated:
+        _scan_middle_for_lifecycle(
+            path, head_bytes, stat.st_size - tail_bytes,
+            active_background, active_monitors,
+            terminal_task_ids, timed_out_monitor_ids,
+        )
 
     for line in lines:
         line = line.strip()
@@ -359,6 +437,7 @@ def parse_session_file(
                 _scan_lifecycle(
                     content, _parse_ts(record.get("timestamp")),
                     active_background, active_monitors,
+                    terminal_task_ids, timed_out_monitor_ids,
                 )
             continue
 
@@ -414,14 +493,18 @@ def parse_session_file(
                     if isinstance(tool_id, str):
                         open_tool_uses.pop(tool_id, None)
                         _scan_lifecycle(
-                            _result_text(block), ts, active_background, active_monitors
+                            _result_text(block), ts, active_background, active_monitors,
+                            terminal_task_ids, timed_out_monitor_ids,
                         )
                 elif btype == "text":
                     text = block.get("text", "")
                     if not isinstance(text, str):
                         continue
                     if is_meta or _SYSTEMISH_USER.match(text):
-                        _scan_lifecycle(text, ts, active_background, active_monitors)
+                        _scan_lifecycle(
+                            text, ts, active_background, active_monitors,
+                            terminal_task_ids, timed_out_monitor_ids,
+                        )
                     elif text.strip():
                         if not fallback_title:
                             fallback_title = _first_line(text, 80)
@@ -474,6 +557,15 @@ def parse_session_file(
     if not parsed.title:
         parsed.title = fallback_title or _first_line(last_prompt, 80) or parsed.session_id[:8]
 
+    # Reconciled once, here, against the WHOLE scan rather than mid-scan —
+    # see _scan_lifecycle's docstring: a completion can appear earlier in
+    # the file than the start it completes, and popping as-you-go would
+    # miss that entirely.
+    for task_id in terminal_task_ids:
+        active_background.pop(task_id, None)
+        active_monitors.pop(task_id, None)
+    for task_id in timed_out_monitor_ids:
+        active_monitors.pop(task_id, None)
     parsed.background_active = bool(active_background)
     parsed.monitor_expiries = sorted(active_monitors.values())
 

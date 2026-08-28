@@ -183,6 +183,38 @@ class TestCommands:
             ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         ]
 
+    def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
+        from cagents.sidecar import dim_chat_commands
+
+        commands = dim_chat_commands(True)
+        flat = [" ".join(c) for c in commands]
+        assert any("set-hook" in c and "after-select-pane" in c for c in flat)
+        hook = next(c for c in flat if "set-hook" in c)
+        # per-pane override (-p) on the chat pane (1), never the rail (0)
+        assert "set-option -p -t :.1 window-style" in hook
+        assert "set-option -p -t :.0" not in hook
+
+    def test_dim_chat_commands_disabled_clears_any_leftover_style(self):
+        from cagents.sidecar import dim_chat_commands
+
+        commands = dim_chat_commands(False)
+        flat = [" ".join(c) for c in commands]
+        hook = next(c for c in flat if "set-hook" in c)
+        assert "window-style" not in hook  # plain, undimmed focus hook
+        assert ["set-option", "-p", "-t", ":.1", "-u", "window-style"] in commands
+
+    def test_apply_dim_chat_is_best_effort(self):
+        from cagents.sidecar import apply_dim_chat
+
+        calls = []
+
+        def runner(args):
+            calls.append(args)
+            raise RuntimeError("no pane yet")
+
+        apply_dim_chat(True, runner=runner)  # must not raise
+        assert calls  # still attempted
+
     def test_ctx_bind_commands(self):
         commands = ctx_bind_commands("/venv/bin/cagents-ctx", "/data/context.json")
         flat = [" ".join(c) for c in commands]
@@ -278,6 +310,47 @@ async def test_enter_focuses_the_same_pane(world):
         assert ["select-window", "-t", "=work:session"] in work.calls
         assert ["select-pane", "-t", "%1"] in outer.calls
         assert tmux.attached_to == []  # no fullscreen handoff happened
+
+
+async def test_enter_chat_binding_attaches_and_zooms_the_viewer(world):
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        app.action_enter_chat()
+        await pilot.pause()
+        # same as Enter: select the session tab + focus the pane...
+        assert ["select-window", "-t", "=work:session"] in work.calls
+        assert ["select-pane", "-t", "%1"] in outer.calls
+        # ...but also zoomed to full width, unlike plain Enter.
+        assert ["resize-pane", "-Z", "-t", "%1"] in outer.calls
+
+
+async def test_enter_chat_skips_zoom_when_attach_fails(world):
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=sidecar,
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        # tmux unavailable -> _attach() notifies and returns None early;
+        # no zoom should be attempted on a session that was never attached.
+        resizes_before = sum(1 for c in outer.calls if c[0] == "resize-pane")
+        monkeypatch_available = tmux.available
+        tmux.available = lambda: False
+        try:
+            app.action_enter_chat()
+            await pilot.pause()
+        finally:
+            tmux.available = monkeypatch_available
+        assert sum(1 for c in outer.calls if c[0] == "resize-pane") == resizes_before
 
 
 async def test_browsing_to_a_dead_session_resumes_the_real_cli(world, claude_dir, now):

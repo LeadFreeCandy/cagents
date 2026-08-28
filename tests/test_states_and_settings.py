@@ -40,11 +40,17 @@ class TestSettings:
         assert "bogus" not in reloaded.settings
 
     def test_meta_matches_defaults(self):
-        from cagents.modals import SETTINGS_META
+        from cagents.modals import EXTERNAL_UPDATE_SETTINGS_META, SETTINGS_META
 
-        toggles = {k for k, _, _ in SETTINGS_META}
-        # state_order lives in the Priority tab, not the toggle list
+        toggles = {k for k, _, _ in SETTINGS_META} | {
+            k for k, _, _ in EXTERNAL_UPDATE_SETTINGS_META
+        }
+        # state_order lives in the Priority tab, not a toggle list
         assert toggles == set(SETTINGS_DEFAULTS) - {"state_order"}
+        # and the two toggle lists don't overlap
+        assert {k for k, _, _ in SETTINGS_META} & {
+            k for k, _, _ in EXTERNAL_UPDATE_SETTINGS_META
+        } == set()
 
     def test_reset_wipes_bookkeeping_only(self, tmp_path: Path):
         path = tmp_path / "state.json"
@@ -67,6 +73,17 @@ class TestWaitingStore:
         store.clear_waiting(SID1, finished_reason="merged")
         got = Store.load(path).sessions[SID1]
         assert got.waiting_since == "" and got.finished_reason == "merged"
+
+    def test_snooze_roundtrip(self, tmp_path: Path):
+        path = tmp_path / "state.json"
+        store = Store.load(path)
+        store.track(SID1, "/proj/a", "2026-08-18T09:00:00+00:00")
+        store.set_snooze(SID1, "2026-08-18T11:00:00+00:00")
+        got = Store.load(path).sessions[SID1]
+        assert got.snoozed_until == "2026-08-18T11:00:00+00:00"
+        store.clear_snooze(SID1)
+        got = Store.load(path).sessions[SID1]
+        assert got.snoozed_until == ""
 
     def test_mark_external_update_roundtrip(self, tmp_path: Path):
         path = tmp_path / "state.json"
@@ -110,6 +127,37 @@ def test_arbitrary_question_text_alone_is_still_not_a_prompt():
     # conversational text that happens to ask a free-form question isn't
     # enough on its own.
     assert pane_shows_prompt("Do you prefer tabs or spaces? Esc to cancel if unsure.") is False
+
+
+def test_an_already_answered_trust_dialog_scrolled_up_is_not_a_prompt():
+    # Real bug, confirmed live: "sometimes ... the state breaks" after a
+    # "do you trust this folder" dialog — answering it leaves the
+    # dialog's own ❯-cursored text sitting in scrollback, and
+    # pane_shows_prompt used to search the WHOLE pane, so that stale text
+    # kept reading as "still needs you" until enough new output finally
+    # pushed it out of the capture. Once real new content (here, well
+    # over _PROMPT_TAIL_LINES of it) sits below the resolved dialog, it
+    # must no longer count — same tail restriction pane_shows_working
+    # already has.
+    trust_dialog = (
+        "Do you trust the files in this folder?\n"
+        "/Users/me/src/some-project\n\n"
+        "❯ 1. Yes, proceed\n"
+        "  2. No, exit\n"
+    )
+    new_output = "\n".join(f"line {i}" for i in range(20))
+    pane = trust_dialog + new_output + "\n❯ \n  Sonnet 5 | ctx: 12%"
+    assert pane_shows_prompt(pane) is False
+
+
+def test_a_currently_active_trust_dialog_is_still_a_prompt():
+    trust_dialog = (
+        "Do you trust the files in this folder?\n"
+        "/Users/me/src/some-project\n\n"
+        "❯ 1. Yes, proceed\n"
+        "  2. No, exit\n"
+    )
+    assert pane_shows_prompt(trust_dialog) is True
 
 
 def test_extract_prompt_question():
@@ -212,6 +260,57 @@ class TestNewStates:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
+    def test_persistent_monitor_ack_yields_monitoring(self, claude_dir, now):
+        # A Monitor started with no `wait`/timeout runs "persistent — runs
+        # until TaskStop or session end" instead of "timeout <N>ms" — a
+        # different wire shape the old regex never matched at all, so a
+        # persistent Monitor never entered monitor_expiries and
+        # monitor_running() stayed permanently False.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("watch it forever")
+        b.assistant_tool_use("t1", "Monitor", {"description": "watch forever"})
+        b.raw_tool_result(
+            "t1",
+            "Monitor started (task pers123, persistent — runs until TaskStop "
+            "or session end). You will be notified on each event.",
+            ts=ts_ago(60),
+        )
+        b.assistant_text("Watching indefinitely.", ts=ts_ago(55))
+        parsed = self._parse(claude_dir, b)
+        assert parsed.monitor_running(now) is True
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.MONITORING
+        # unlike a timeout-bound Monitor, it never expires on its own
+        assert parsed.monitor_running(now + 10_000_000) is True
+
+    def test_persistent_monitor_ack_far_from_head_or_tail_still_detected(self, claude_dir, now):
+        # Real bug, confirmed live: a persistent Monitor's ack sat well
+        # inside the byte range a large transcript's bounded head/tail
+        # read drops entirely — so even after the wire-format regex above
+        # was fixed, monitor_running() stayed False for any transcript big
+        # enough that the ack fell in the dropped middle.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.ai_title("Long-running session")
+        b.user("watch the deploy forever", ts="2026-08-17T09:00:00.000Z")
+        b.assistant_tool_use("t1", "Monitor", {"description": "watch deploy"})
+        b.raw_tool_result(
+            "t1",
+            "Monitor started (task deep99, persistent — runs until TaskStop "
+            "or session end). You will be notified on each event.",
+            ts="2026-08-17T09:00:05.000Z",
+        )
+        filler = "x" * 500
+        for i in range(200):
+            b.assistant_text(f"{filler} step {i}", ts=f"2026-08-17T09:{i % 60:02d}:30.000Z")
+        b.assistant_text("still going", ts="2026-08-17T10:30:00.000Z")
+        path = b.write(claude_dir, mtime=time.time() - 300)
+
+        parsed = parse_session_file(path, head_bytes=4096, tail_bytes=8192)
+        assert parsed.truncated is True
+        assert parsed.monitor_running(now) is True
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.MONITORING
+
     def test_background_ack_yields_background(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("run the long build")
@@ -222,6 +321,37 @@ class TestNewStates:
         parsed = self._parse(claude_dir, b)
         assert parsed.background_active is True
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.BACKGROUND
+
+    def test_pending_background_agents_yields_background(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("kick off a sub-agent").assistant_text(
+            "Started.", ts="2026-08-18T10:00:00.000Z"
+        )
+        b.raw({"type": "system", "sessionId": SID1, "pendingBackgroundAgentCount": 1})
+        parsed = self._parse(claude_dir, b)
+        assert parsed.pending_agents == 1
+        state, detail = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.BACKGROUND
+        assert "background agent" in detail
+
+    def test_pending_background_agents_outranks_a_stale_busy_status(self, claude_dir, now):
+        # Real bug, confirmed live ("Link Summary State" showing WORKING
+        # with a genuine background agent running): `claude agents --json`
+        # reports "busy" whenever the agent process is doing ANYTHING,
+        # including babysitting a background agent from an
+        # already-finished turn — collapsing BACKGROUND into a generic
+        # WORKING. _lingering_background_activity must cover this exactly
+        # like shells/monitors/background commands.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("kick off a sub-agent").assistant_text(
+            "Started.", ts="2026-08-18T10:00:00.000Z"
+        )
+        b.raw({"type": "system", "sessionId": SID1, "pendingBackgroundAgentCount": 1})
+        parsed = self._parse(claude_dir, b)
+        state, _ = derive_state(
+            parsed, _tracked(), live=True, agent_state={"status": "busy"}, now=now
+        )
         assert state == SessionState.BACKGROUND
 
     def test_background_survives_new_messages_until_completion(self, claude_dir, now):
@@ -250,6 +380,40 @@ class TestNewStates:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
+    def test_background_completion_recorded_before_its_own_start_ack_still_clears(
+        self, claude_dir, now
+    ):
+        # Real bug, confirmed live ("Link Summary State" showing BACKGROUND
+        # with nothing running): Claude Code writes the completion
+        # notification (a queue-operation record) and the "running in
+        # background" tool_result on two logically-ordered but physically
+        # separate record streams, interleaved into one file with no
+        # strict ordering guarantee between them — the completion can
+        # appear EARLIER in the file than the start it completes. A
+        # sequential pop-as-you-go scan then has nothing to pop yet when
+        # it hits the completion, and never clears the later start ack.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("run it")
+        # the completion notification, written to the file BEFORE the
+        # start ack it belongs to
+        b.raw(
+            {"type": "queue-operation", "operation": "enqueue",
+             "timestamp": "2026-08-18T10:00:05.000Z", "sessionId": SID1,
+             "content": '<task-notification> <task-id>b8tdgwa8h</task-id> '
+                        '<status>completed</status> <summary>Background command '
+                        '"make" completed (exit code 0)</summary> </task-notification>'}
+        )
+        b.assistant_tool_use("t1", "Bash", {"command": "make", "run_in_background": True})
+        b.raw_tool_result(
+            "t1", "Command running in background with ID: b8tdgwa8h. …",
+            ts="2026-08-18T10:00:10.000Z",
+        )
+        b.assistant_text("Started it.", ts="2026-08-18T10:00:15.000Z")
+        parsed = self._parse(claude_dir, b)
+        assert parsed.background_active is False
+        state, _ = derive_state(parsed, _tracked(), live=True, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
     def test_monitoring_ranks_between_review_and_working(self):
         from cagents.sessions import ATTENTION_ORDER
 
@@ -260,6 +424,67 @@ class TestNewStates:
             < order[SessionState.BACKGROUND]
             < order[SessionState.WORKING]
         )
+
+    def test_snooze_derivation_and_expiry(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("fix it").assistant_text("done", ts="2026-08-18T10:00:00.000Z")
+        parsed = self._parse(claude_dir, b)
+        from datetime import timedelta
+
+        from cagents.claude_data import utcnow
+
+        until = utcnow() + timedelta(minutes=30)
+        tracked = _tracked(snoozed_until=until.isoformat())
+        state, detail = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.SNOOZED
+        assert "snoozed" in detail.lower()
+        # past the deadline -> falls through to normal derivation
+        past = utcnow() - timedelta(minutes=5)
+        tracked = _tracked(snoozed_until=past.isoformat())
+        state, _ = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
+    def test_snooze_is_purely_time_based_not_cleared_by_new_activity(self, claude_dir, now):
+        # Deliberate design choice: unlike waiting/external_update, new
+        # transcript activity while snoozed must NOT wake it early — only
+        # the deadline (or an explicit un-snooze) does.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("fix it").assistant_text("done", ts="2026-08-18T12:00:00.000Z")  # after the snooze
+        parsed = self._parse(claude_dir, b)
+        from datetime import timedelta
+
+        from cagents.claude_data import utcnow
+
+        until = utcnow() + timedelta(minutes=30)
+        tracked = _tracked(snoozed_until=until.isoformat())
+        state, _ = derive_state(parsed, tracked, live=False, now=now)
+        assert state == SessionState.SNOOZED
+
+    def test_snooze_never_overrides_working_or_needs_input(self, claude_dir, now):
+        from datetime import timedelta
+
+        from cagents.claude_data import utcnow
+
+        until = utcnow() + timedelta(minutes=30)
+        tracked = _tracked(snoozed_until=until.isoformat())
+        # actively working (fresh writes)
+        b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(2))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
+        state, _ = derive_state(parsed, tracked, live=True, now=now)
+        assert state == SessionState.WORKING
+        # a live, unanswered prompt
+        pane = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+        b2 = TranscriptBuilder(SID1, "/proj/a")
+        b2.user("run it").assistant_tool_use("t1", "Bash", {"command": "ls"})
+        parsed2 = parse_session_file(b2.write(claude_dir, mtime=now - 1))
+        state, _ = derive_state(parsed2, tracked, live=True, pane_text=pane, now=now)
+        assert state == SessionState.NEEDS_INPUT
+
+    def test_snoozed_ranks_below_working_and_above_waiting(self):
+        from cagents.sessions import ATTENTION_ORDER
+
+        order = ATTENTION_ORDER
+        assert order[SessionState.WORKING] < order[SessionState.SNOOZED] < order[SessionState.WAITING_EXTERNAL]
 
     def test_waiting_external_derivation(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
@@ -419,6 +644,58 @@ async def test_waiting_key_prompts_when_no_pr_found(world):
         assert store.sessions[SID1].waiting_pr == "https://github.com/o/r/pull/42"
 
 
+async def test_snooze_key_parks_and_unparks_using_the_configured_duration(world):
+    app, store, tmux = world
+    store.set_setting("snooze_duration", "30m")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        from conftest import select_session
+
+        select_session(app, SID1)
+        await pilot.pause()
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        tracked = store.sessions[SID1]
+        assert tracked.snoozed_until != ""
+        from datetime import datetime, timedelta
+
+        from cagents.claude_data import utcnow
+
+        until = datetime.fromisoformat(tracked.snoozed_until)
+        # ~30 minutes out, not the 1h default (the configured duration won)
+        assert timedelta(minutes=25) < (until - utcnow()) < timedelta(minutes=35)
+        assert app.snapshot.by_id(SID1).state == SessionState.SNOOZED
+        # toggle off
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        assert store.sessions[SID1].snoozed_until == ""
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+
+
+async def test_snooze_key_refuses_a_session_still_in_flight(world, claude_dir, now):
+    from conftest import select_session
+
+    app, store, tmux = world
+    sid = "66666666-6666-6666-6666-666666666666"
+    TranscriptBuilder(sid, "/proj/beta").ai_title("Live work").user(
+        "go", ts=ts_ago(2)
+    ).write(claude_dir, mtime=now - 2)
+    store.track(sid, "/proj/beta", "2026-08-18T09:00:00+00:00")
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause()
+        select_session(app, sid)
+        await pilot.pause()
+        assert app.snapshot.by_id(sid).state == SessionState.WORKING
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        assert store.sessions[sid].snoozed_until == ""
+        from textual.widgets._toast import Toast
+
+        toasts = list(app.query(Toast))
+        assert any("still in flight" in t.render().plain.lower() for t in toasts)
+
+
 async def test_pr_poll_reopens_on_comments_and_closes_on_merge(world):
     app, store, tmux = world
     store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
@@ -453,6 +730,74 @@ async def test_pr_poll_reopens_on_comments_and_closes_on_merge(world):
         view = app.snapshot.by_id(SID1)
         assert view.state == SessionState.DONE
         assert view.state_detail == "merged"
+
+
+async def test_pr_poll_self_comments_are_off_by_default_but_toggleable(world, monkeypatch):
+    app, store, tmux = world
+    monkeypatch.setattr(
+        "cagents.gitops.current_github_login", lambda runner=None: "me"
+    )
+    store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
+    app.gh_runner = lambda args, cwd=None: (
+        '{"state": "OPEN", "mergedAt": null,'
+        ' "comments": [{"createdAt": "2026-08-18T11:00:00+00:00",'
+        ' "author": {"login": "me"}}], "reviews": []}'
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        # default off: your own comment does not re-alert
+        assert store.sessions[SID1].waiting_since != ""
+        assert store.sessions[SID1].external_update_since == ""
+
+        store.set_setting("external_update_on_self_comments", True)
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        tracked = store.sessions[SID1]
+        assert tracked.waiting_since == ""
+        assert tracked.external_update_since != ""
+        assert app.snapshot.by_id(SID1).state_detail == "own comment"
+
+
+async def test_pr_poll_trigger_categories_are_individually_toggleable(world):
+    app, store, tmux = world
+    store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
+    store.set_setting("external_update_on_comments", False)
+    app.gh_runner = lambda args, cwd=None: (
+        '{"state": "OPEN", "mergedAt": null,'
+        ' "comments": [{"createdAt": "2026-08-18T11:00:00+00:00",'
+        ' "author": {"login": "alice"}}], "reviews": []}'
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        # comments trigger disabled -> stays parked, no re-alert
+        assert store.sessions[SID1].waiting_since != ""
+
+        store.set_setting("external_update_on_comments", True)
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].waiting_since == ""
+        assert app.snapshot.by_id(SID1).state_detail == "github comments"
+
+
+async def test_pr_poll_reacts_to_new_commits(world):
+    app, store, tmux = world
+    store.set_waiting(SID1, "2026-08-18T10:00:00+00:00", "https://x/pull/1")
+    app.gh_runner = lambda args, cwd=None: (
+        '{"state": "OPEN", "mergedAt": null, "comments": [], "reviews": [],'
+        ' "commits": [{"committedDate": "2026-08-18T11:00:00+00:00"}]}'
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._poll_waiting_prs()
+        await pilot.pause(0.3)
+        tracked = store.sessions[SID1]
+        assert tracked.waiting_since == ""
+        assert tracked.external_update_since != ""
+        assert app.snapshot.by_id(SID1).state_detail == "new commits"
 
 
 async def test_notifications_gated_by_setting(world):
@@ -594,6 +939,26 @@ class TestStatePriority:
         assert rank[SessionState.EXTERNAL_UPDATE] == 2
         assert rank[SessionState.NEEDS_REVIEW] == 3
 
+    def test_a_state_added_after_the_setting_was_saved_lands_in_its_canonical_slot(self):
+        # Real bug, confirmed live: state_order is persisted, so a state
+        # introduced to this project AFTER a user already customized their
+        # order (SNOOZED, added later) is "missing" from their saved list
+        # forever — it must be inserted at the same RELATIVE position it
+        # holds in ATTENTION_ORDER (anchored to its nearest canonical
+        # predecessor that IS in the user's list), never just appended
+        # after everything they already have. The exact real saved list
+        # this was found against — no "snoozed" entry anywhere in it.
+        from cagents.sessions import attention_rank_map
+
+        saved = [
+            "needs input", "needs review", "external update", "monitoring",
+            "shell running", "background", "working", "waiting", "stopped", "done",
+        ]
+        rank = attention_rank_map(saved)
+        assert rank[SessionState.WORKING] < rank[SessionState.SNOOZED] < rank[SessionState.WAITING_EXTERNAL]
+        assert rank[SessionState.SNOOZED] < rank[SessionState.DONE]
+        assert rank[SessionState.SNOOZED] < rank[SessionState.STOPPED]
+
     def test_registry_applies_custom_order(self, claude_dir, tmp_path, now):
         # one working (via recent record), one needs-review
         TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(2)).write(
@@ -632,7 +997,7 @@ async def test_priority_tab_reorders_and_persists(claude_dir, tmp_path):
         await pilot.pause()
         await pilot.press("comma")
         await pilot.pause()
-        await pilot.press("2")  # Priority tab
+        await pilot.press("3")  # Priority tab
         await pilot.pause()
         from textual.widgets import OptionList
 
@@ -648,6 +1013,38 @@ async def test_priority_tab_reorders_and_persists(claude_dir, tmp_path):
         await pilot.press("0")  # reset to default
         await pilot.pause(0.1)
         assert store.get_setting("state_order")[0] == "needs input"
+
+
+async def test_external_updates_tab_toggles_its_own_settings(claude_dir, tmp_path):
+    from textual.widgets import OptionList
+
+    store = Store.load(tmp_path / "state.json")
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+    async with app.run_test(size=(120, 45)) as pilot:
+        await pilot.pause()
+        await pilot.press("comma")
+        await pilot.pause()
+        await pilot.press("2")  # External updates tab
+        await pilot.pause()
+        external = app.screen.query_one("#external-list", OptionList)
+        assert external.has_focus
+        ids = [external.get_option_at_index(i).id for i in range(external.option_count)]
+        assert set(ids) == {
+            "external_update_on_comments", "external_update_on_self_comments",
+            "external_update_on_reviews", "external_update_on_commits",
+            "external_update_on_other_changes",
+        }
+        # doesn't leak the General-tab settings
+        assert "sidebar" not in ids
+        self_comments_index = ids.index("external_update_on_self_comments")
+        external.highlighted = self_comments_index
+        assert store.get_setting("external_update_on_self_comments") is False
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert store.get_setting("external_update_on_self_comments") is True
+        assert Store.load(store.path).get_setting("external_update_on_self_comments") is True
 
 
 class TestWorkDir:

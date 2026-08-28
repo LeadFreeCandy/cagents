@@ -222,6 +222,23 @@ def _no_real_agent_status(monkeypatch):
     monkeypatch.setattr("cagents.agent_status._default_runner", lambda args: "[]")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_desktop_notifications(monkeypatch):
+    """notify_desktop shells out to terminal-notifier / osascript with a
+    REAL 10s timeout (notifier.py) — real bug, confirmed live: a slow or
+    hung notifier call in one of these real subprocess's paths blocked
+    the poll worker that fired it from ever reaching its own later
+    refresh_data() call, for the full 10s, even though app.py now
+    dispatches the notification onto its own worker instead of calling
+    it inline. Never let a test actually invoke it — desktop_notifications
+    defaults ON, so any test that causes an ALERT_STATES transition (or
+    calls the PR/waiting pollers) would otherwise hit this for real,
+    each one adding up to 10 real seconds to the whole suite and, worse,
+    being sensitive to whatever terminal-notifier happens to do on the
+    machine running the tests."""
+    monkeypatch.setattr("cagents.app.notify_desktop", lambda *a, **kw: None)
+
+
 SID1 = "11111111-1111-1111-1111-111111111111"
 SID2 = "22222222-2222-2222-2222-222222222222"
 SID3 = "33333333-3333-3333-3333-333333333333"

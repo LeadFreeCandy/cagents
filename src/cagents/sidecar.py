@@ -383,6 +383,22 @@ _FOCUS_HOOK = (
     f"'resize-pane -t :.0 -x {COLLAPSED_WIDTH}'"
 )
 
+# A touch darker than the default background — an overlay, not different
+# content — so the chat pane reads as "not what you're doing right now"
+# while the rail is wide (choosing) without becoming hard to read.
+DIM_CHAT_STYLE = "bg=colour234"
+
+# Same focus-driven resize, plus dimming pane 1 (the chat) specifically
+# while the rail is wide/focused (choosing) and clearing it once the
+# session pane is focused again — `set-option -p` is a PER-PANE override
+# of the window-wide style, so this only ever touches pane 1, never the
+# rail itself. dim_chat_preview setting (default on).
+_FOCUS_HOOK_DIMMED = (
+    "if -F '#{==:#{pane_index},0}' "
+    f"'resize-pane -t :.0 -x 50% ; set-option -p -t :.1 window-style \"{DIM_CHAT_STYLE}\"' "
+    f"'resize-pane -t :.0 -x {COLLAPSED_WIDTH} ; set-option -p -t :.1 -u window-style'"
+)
+
 # The arrow keys are a size control for the Claude pane, over three states
 # ordered by its width: WIDE (50/50, rail focused) < SMALL (slim rail,
 # session focused) < HIDDEN (rail zoomed away). ← shrinks it one step,
@@ -453,6 +469,28 @@ def apply_left_capture(enable: bool, runner=None) -> None:
         except RuntimeError:
             if enable:
                 raise  # failing to bind is worth surfacing; unbind noise isn't
+
+
+def dim_chat_commands(enable: bool) -> list[list[str]]:
+    hook = _FOCUS_HOOK_DIMMED if enable else _FOCUS_HOOK
+    commands = [["set-hook", "-g", "after-select-pane", hook]]
+    if not enable:
+        # clear any dim left over from before the setting was turned off
+        commands.append(["set-option", "-p", "-t", ":.1", "-u", "window-style"])
+    return commands
+
+
+def apply_dim_chat(enable: bool, runner=None) -> None:
+    """Toggle the dim_chat_preview setting on the enclosing container
+    server. Best-effort like apply_left_capture's unbind path — a pane
+    that doesn't exist yet (very first boot, before the split) just means
+    nothing to dim yet, not a real failure."""
+    run = runner or _outer_tmux
+    for command in dim_chat_commands(enable):
+        try:
+            run(command)
+        except RuntimeError:
+            pass
 
 
 def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:

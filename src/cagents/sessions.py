@@ -41,6 +41,7 @@ class SessionState(Enum):
     SHELL_RUNNING = "shell running"  # idle, but a shell it started is still live
     MONITORING = "monitoring"  # idle, but Claude's own Monitor is watching
     BACKGROUND = "background"  # idle, but a backgrounded command/agent runs
+    SNOOZED = "snoozed"  # explicitly deferred by a human (s) until a set time
     WAITING_EXTERNAL = "waiting"  # done here; parked on a PR (w)
     DONE = "done"  # a human explicitly accepted the result
     STOPPED = "stopped"  # ended without completing normally
@@ -54,6 +55,9 @@ class SessionState(Enum):
 # happened to finish quietly".
 # shell_running outranks monitoring: a shell Claude left running is more
 # directly "your problem" than an automated Monitor watch.
+# snoozed sits below working (an explicit, timed "leave me alone" always
+# loses to something actually happening right now) but above waiting (a
+# deliberate defer is still more "yours" than a PR parked on someone else).
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
     SessionState.EXTERNAL_UPDATE: 1,
@@ -62,21 +66,60 @@ ATTENTION_ORDER = {
     SessionState.MONITORING: 4,
     SessionState.BACKGROUND: 5,
     SessionState.WORKING: 6,
-    SessionState.WAITING_EXTERNAL: 7,
-    SessionState.STOPPED: 8,
-    SessionState.DONE: 9,
+    SessionState.SNOOZED: 7,
+    SessionState.WAITING_EXTERNAL: 8,
+    SessionState.STOPPED: 9,
+    SessionState.DONE: 10,
 }
 
 _STATE_BY_VALUE = {state.value: state for state in SessionState}
+
+
+def _migrate_near_complete_state_order(order_setting: list) -> list:
+    """A persisted state_order missing only one or two states was, almost
+    certainly, saved as a COMPLETE list before those states existed —
+    confirmed live: SNOOZED sank to dead last, below DONE, for a store
+    saved before it existed. Those get inserted at their canonical
+    position (anchored to the nearest canonical neighbor the user's list
+    already has) instead of appended after everything else.
+
+    A genuinely small, deliberate custom order (a handful of states the
+    user cares about, the rest left to default) is untouched — appending
+    the remainder in canonical order there (attention_rank_map's own job)
+    is exactly the documented Priority-tab behavior, and there'd be no
+    reliable way to tell "new state" from "one the user just didn't list"
+    once more than a couple are missing."""
+    canonical = sorted(ATTENTION_ORDER, key=ATTENTION_ORDER.get)
+    values = [str(v) for v in order_setting]
+    known = {_STATE_BY_VALUE[v] for v in values if v in _STATE_BY_VALUE}
+    missing = [state for state in canonical if state not in known]
+    if not missing or len(missing) > 2:
+        return list(order_setting)
+    order = list(order_setting)
+    for state in missing:
+        index = canonical.index(state)
+        anchor = next((s for s in reversed(canonical[:index]) if s in known), None)
+        if anchor is not None:
+            insert_at = values.index(anchor.value) + 1
+        else:
+            anchor = next((s for s in canonical[index + 1 :] if s in known), None)
+            insert_at = values.index(anchor.value) if anchor is not None else len(order)
+        order.insert(insert_at, state.value)
+        values.insert(insert_at, state.value)
+        known.add(state)
+    return order
 
 
 def attention_rank_map(order_setting) -> dict[SessionState, int]:
     """The effective priority of each state. A user-provided ordering (list
     of state value strings) wins; unknown names are ignored and missing
     states are appended in default order — so the setting can never brick
-    the sort."""
+    the sort. See _migrate_near_complete_state_order for the one
+    exception: a state new enough that an old, otherwise-complete saved
+    order predates it."""
     if not isinstance(order_setting, list):
         return dict(ATTENTION_ORDER)
+    order_setting = _migrate_near_complete_state_order(order_setting)
     rank: dict[SessionState, int] = {}
     for name in order_setting:
         state = _STATE_BY_VALUE.get(str(name))
@@ -319,12 +362,16 @@ def derive_state(
 
     if live and agent_state:
         status = agent_state.get("status")
-        if status == "busy":
+        if status == "busy" and not _lingering_background_activity(parsed, pane_text, now):
             return (SessionState.WORKING, _working_detail(parsed))
         if status == "waiting":
             return (SessionState.NEEDS_INPUT, str(agent_state.get("waitingFor") or "waiting on you"))
-        # status == "idle" (or anything unrecognized): not specific
-        # enough on its own — fall through to events/pane heuristics.
+        # status == "idle", or "busy" but only because a shell/monitor from
+        # an already-finished turn is still going (see
+        # _lingering_background_activity): not specific enough on its own
+        # — fall through to events/pane heuristics, which is what actually
+        # surfaces SHELL_RUNNING/MONITORING instead of collapsing them
+        # back into a generic WORKING.
 
     if live and events:
         from_events = derive_from_events(events, parsed, tracked, now)
@@ -374,6 +421,28 @@ def derive_state(
     return _finished_state(parsed, tracked, now)
 
 
+def _lingering_background_activity(
+    parsed: ParsedSession, pane_text: str, now: float
+) -> bool:
+    """True when a shell, monitor, or backgrounded command started by an
+    EARLIER, already-finished turn is still going. `claude agents
+    --json`'s "busy" status doesn't distinguish this from an
+    actively-generating turn — both keep the session's own agent process
+    alive — so trusting "busy" at face value collapses the more specific
+    SHELL_RUNNING/MONITORING/BACKGROUND states this project deliberately
+    carries back into a generic WORKING (confirmed live: a session with a
+    genuine background agent running showed WORKING because this check
+    covered shells and monitors but not background_active). When this is
+    true, derive_state falls through to the pane/transcript heuristics
+    instead, which do make that distinction (see _finished_state)."""
+    return (
+        bool(pane_shell_count(pane_text))
+        or parsed.monitor_running(now)
+        or parsed.background_active
+        or bool(parsed.pending_agents)
+    )
+
+
 def _finished_state(
     parsed: ParsedSession, tracked: TrackedSession, now: float, pane_text: str = ""
 ) -> tuple[SessionState, str]:
@@ -382,6 +451,14 @@ def _finished_state(
     if reviewed is not None and (last is None or reviewed >= last):
         detail = tracked.finished_reason or "done"
         return (SessionState.DONE, detail)
+    snoozed_until = tracked.snoozed_datetime()
+    if snoozed_until is not None and now < snoozed_until.timestamp():
+        # Deliberately pure time-based, unlike waiting/external_update
+        # below: snoozing means "leave me alone for exactly this long,"
+        # not "until something happens" — new transcript activity while
+        # snoozed does not wake it early. Only the deadline (or an
+        # explicit un-snooze) does.
+        return (SessionState.SNOOZED, f"snoozed until {snoozed_until.strftime('%H:%M')}")
     waiting = tracked.waiting_datetime()
     if waiting is not None and (last is None or waiting >= last):
         # Parked on the outside world; the PR poller resolves it. New local
@@ -407,8 +484,71 @@ def _finished_state(
         return (SessionState.MONITORING, "Claude monitor active")
     if parsed.background_active:
         return (SessionState.BACKGROUND, "background task running")
+    if parsed.pending_agents:
+        # Claude's own sub-agent concurrency (pendingBackgroundAgentCount
+        # on "system" records) — a background AGENT, not a `run_in_
+        # background` bash command, but the same "idle here, something
+        # else is still going" bucket (BACKGROUND covers both by design —
+        # see the state's own docstring).
+        n = parsed.pending_agents
+        return (SessionState.BACKGROUND, f"{n} background agent{'s' if n != 1 else ''} running")
     detail = tracked.finished_reason or "finished, unreviewed"
     return (SessionState.NEEDS_REVIEW, detail)
+
+
+# Transitions that should be structurally impossible without the
+# transcript's own last-activity timestamp having actually advanced —
+# i.e. without new conversation content genuinely having appeared. This is
+# deliberately a short, high-confidence list, not a general "did every
+# input change" check: plenty of transitions are legitimately time-elapsed
+# with no new writes (WORKING -> NEEDS_REVIEW once the fresh-write window
+# lapses, DONE -> WAITING_EXTERNAL as the PR poller reacts, ...). Each
+# entry here is a case where skipping the check should never happen; a
+# logged violation means a real bug in derive_state (or in what fed it),
+# not a false alarm to be tuned away.
+#
+# Deliberately NOT watching anything -> WORKING here (confirmed live: a
+# false positive fired the moment a user typed a message). derive_state's
+# own priority order checks the LIVE PANE before ever touching the
+# transcript's timestamps — hitting the "esc to interrupt" spinner alone
+# is enough to justify WORKING, and Claude Code updates the pane before
+# the transcript file is flushed to disk. So `parsed.last_timestamp`
+# lagging behind is completely normal right after you type something; it
+# is not evidence of anything wrong, and this checker has no access to
+# pane text to tell the two cases apart. NEEDS_REVIEW has no such
+# shortcut — it's only ever reached through _finished_state, purely from
+# transcript/tracked-field comparisons — so DONE -> NEEDS_REVIEW stays a
+# fully reliable, false-positive-free check on its own.
+REQUIRES_NEW_ACTIVITY = {
+    (SessionState.DONE, SessionState.NEEDS_REVIEW),
+}
+
+
+def check_state_invariant(
+    previous: SessionState | None,
+    previous_last_activity,
+    view: "SessionView",
+) -> str | None:
+    """A human-readable violation description if `view`'s transition from
+    `previous` looks impossible given what actually changed — e.g. a
+    session read as reviewed/finished suddenly reads as WORKING again with
+    no new transcript record to justify it. None when the transition is
+    fine (including: not one of the watched pairs, or genuinely backed by
+    new activity)."""
+    if previous is None or previous == view.state:
+        return None
+    if (previous, view.state) not in REQUIRES_NEW_ACTIVITY:
+        return None
+    current_last_activity = view.parsed.last_timestamp if view.parsed else None
+    advanced = current_last_activity is not None and (
+        previous_last_activity is None or current_last_activity > previous_last_activity
+    )
+    if advanced:
+        return None
+    return (
+        f"{previous.value} -> {view.state.value} with no new transcript activity "
+        f"(last_activity still {current_last_activity})"
+    )
 
 
 def derive_did_needs(

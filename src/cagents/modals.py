@@ -326,6 +326,8 @@ HELP_TEXT = """\
   d             mark done / un-done
   w             waiting on external: parks it on its PR; new comments re-alert,
                 merge marks it done automatically
+  s             snooze / un-snooze for a set time (settings: default 1h) —
+                purely time-based, new activity doesn't wake it early
   f             fork — new session from this one, prompt typed by you
   h             handoff — old session writes a spec, new one starts on it,
                 old is marked done (d restores)
@@ -472,6 +474,7 @@ class PlanConfirmModal(ModalScreen[bool]):
 # Allowed values for string settings; enter cycles through them.
 SETTING_CHOICES: dict[str, list[str]] = {
     "diff_mode": ["branch", "uncommitted"],
+    "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
 }
 
 SETTINGS_META: list[tuple[str, str, str]] = [
@@ -494,10 +497,24 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "text in the Claude prompt.",
     ),
     (
+        "dim_chat_preview",
+        "Dim chat when list is wide",
+        "Dims the chat pane a bit while the rail is at its wide/max size (you're "
+        "choosing a session) — a visual cue for 'not what you're doing right "
+        "now'. Clears once the session pane is focused again.",
+    ),
+    (
         "diff_mode",
         "Diff tab compares against",
         "branch: this worktree vs master (merge-base; committed + uncommitted — "
         "the PR view). uncommitted: only changes not yet committed. Enter cycles.",
+    ),
+    (
+        "snooze_duration",
+        "Snooze duration",
+        "How long `s` parks a session for by default. Enter cycles. Snoozing is "
+        "purely time-based — new transcript activity doesn't wake it early, only "
+        "the deadline (or pressing `s` again) does.",
     ),
     (
         "desktop_notifications",
@@ -534,16 +551,54 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     ),
 ]
 
+# What re-alerts a session parked "waiting on PR" (w) back out of that
+# state, as an EXTERNAL_UPDATE — its own settings tab, not mixed into
+# General: enough independent triggers (comments/self-comments/reviews/
+# commits/other) that they read as one coherent group on their own. A
+# merge always marks it done regardless of these; a close without
+# merging always re-alerts as needs-review — neither is gated here.
+EXTERNAL_UPDATE_SETTINGS_META: list[tuple[str, str, str]] = [
+    (
+        "external_update_on_comments",
+        "Comments",
+        "Re-alert when someone ELSE comments on the PR.",
+    ),
+    (
+        "external_update_on_self_comments",
+        "Your own comments",
+        "Re-alert when the comment was YOUR OWN, on your own PR. Off by default — "
+        "not usually something you need re-alerting about, unlike everyone else's.",
+    ),
+    (
+        "external_update_on_reviews",
+        "Reviews",
+        "Re-alert when someone submits a review (approve / request changes / comment).",
+    ),
+    (
+        "external_update_on_commits",
+        "New commits",
+        "Re-alert when new commits are pushed to the PR's branch.",
+    ),
+    (
+        "external_update_on_other_changes",
+        "Other changes",
+        "Catch-all for anything else GitHub counts as a PR update (labels, title/base "
+        "edits, ...) not already covered by the triggers above.",
+    ),
+]
+
 class SettingsModal(ModalScreen[None]):
-    """`,` — two tabs: General toggles, and the Priority order of states.
-    Everything applies immediately and persists."""
+    """`,` — three tabs: General toggles, External-update triggers, and
+    the Priority order of states. Everything applies immediately and
+    persists."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("q", "close", "Close"),
         Binding("comma", "close", "Close"),
         Binding("1", "show_tab('tab-general')", "General", show=False),
-        Binding("2", "show_tab('tab-priority')", "Priority", show=False),
+        Binding("2", "show_tab('tab-external')", "External updates", show=False),
+        Binding("3", "show_tab('tab-priority')", "Priority", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -570,11 +625,20 @@ class SettingsModal(ModalScreen[None]):
 
         with Vertical():
             yield Label("Settings")
-            yield Static("1/2 — tabs · enter — toggle · esc — close", classes="hint")
+            yield Static("1/2/3 — tabs · enter — toggle · esc — close", classes="hint")
             with TabbedContent(initial="tab-general"):
                 with TabPane("General", id="tab-general"):
                     yield OptionList(id="settings-list")
                     yield Static(id="setting-desc")
+                with TabPane("External updates", id="tab-external"):
+                    yield Static(
+                        "What re-alerts a session parked 'waiting on PR' (w) back out "
+                        "of that state. A merge always marks it done; a close without "
+                        "merging always re-alerts as needs-review — neither is gated here.",
+                        classes="hint",
+                    )
+                    yield OptionList(id="external-list")
+                    yield Static(id="external-desc")
                 with TabPane("Priority", id="tab-priority"):
                     yield Static(
                         "Queue order of the chat states, most-urgent first.\n"
@@ -585,7 +649,8 @@ class SettingsModal(ModalScreen[None]):
                     yield OptionList(id="priority-list")
 
     def on_mount(self) -> None:
-        self._refill()
+        self._refill("#settings-list", SETTINGS_META)
+        self._refill("#external-list", EXTERNAL_UPDATE_SETTINGS_META)
         self._refill_priority()
         self.query_one("#settings-list", OptionList).focus()
 
@@ -593,17 +658,24 @@ class SettingsModal(ModalScreen[None]):
         from textual.widgets import TabbedContent
 
         self.query_one(TabbedContent).active = tab_id
-        target = "#settings-list" if tab_id == "tab-general" else "#priority-list"
+        target = {
+            "tab-general": "#settings-list",
+            "tab-external": "#external-list",
+            "tab-priority": "#priority-list",
+        }[tab_id]
         self.query_one(target, OptionList).focus()
 
-    # -- General tab -----------------------------------------------------------
+    # -- General / External-updates tabs (both plain toggle lists) -------------
 
-    def _refill(self, keep: str | None = None) -> None:
+    def _meta_for(self, list_id: str) -> list[tuple[str, str, str]]:
+        return EXTERNAL_UPDATE_SETTINGS_META if list_id == "#external-list" else SETTINGS_META
+
+    def _refill(self, list_id: str, meta: list[tuple[str, str, str]], keep: str | None = None) -> None:
         from rich.text import Text
 
-        option_list = self.query_one("#settings-list", OptionList)
+        option_list = self.query_one(list_id, OptionList)
         option_list.clear_options()
-        for i, (key, label, _desc) in enumerate(SETTINGS_META):
+        for i, (key, label, _desc) in enumerate(meta):
             value = self.store.get_setting(key)
             row = Text()
             if isinstance(value, str):
@@ -622,15 +694,18 @@ class SettingsModal(ModalScreen[None]):
             option_list.highlighted = 0
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_list.id != "settings-list":
+        list_id = f"#{event.option_list.id}"
+        if list_id not in ("#settings-list", "#external-list"):
             return
-        for key, _label, desc in SETTINGS_META:
+        desc_id = "#setting-desc" if list_id == "#settings-list" else "#external-desc"
+        for key, _label, desc in self._meta_for(list_id):
             if key == event.option.id:
-                self.query_one("#setting-desc", Static).update(desc)
+                self.query_one(desc_id, Static).update(desc)
                 return
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_list.id != "settings-list":
+        list_id = f"#{event.option_list.id}"
+        if list_id not in ("#settings-list", "#external-list"):
             return
         key = event.option.id
         if key is None:
@@ -643,7 +718,7 @@ class SettingsModal(ModalScreen[None]):
         else:
             value = not bool(current)
         self.store.set_setting(key, value)
-        self._refill(keep=key)
+        self._refill(list_id, self._meta_for(list_id), keep=key)
         self.on_change(key, value)
 
     # -- Priority tab ------------------------------------------------------------
