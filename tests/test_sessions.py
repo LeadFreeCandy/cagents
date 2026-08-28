@@ -583,3 +583,19 @@ class TestEnterWorktreeTranscriptMove:
         second = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-b", SID1)
         first.unlink()
         assert reg._find_session_file(tracked) == second
+
+
+def test_map_prefers_the_newest_tmux_session_when_two_carry_one_id(claude_dir: Path, now: float):
+    """`n` opens a helper shell tagged with the pending session id, and the
+    `claude` typed into it spawns the real session under the SAME id. Both
+    are live at once; the row must map to the Claude session (the newer
+    one), not the shell — or Enter attaches you to an empty prompt."""
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))
+    parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
+    shell = _tmux(name="cagents-3", path="/proj", created=now - 60, sid=SID1)
+    claude = _tmux(name="alpha-8", path="/proj/alpha", created=now - 20, sid=SID1)
+    # tmux lists alphabetically, so the shell arrives AFTER the claude
+    # session — the order that used to make the shell win.
+    for order in ([claude, shell], [shell, claude]):
+        mapping = map_tmux_sessions([(_tracked(), parsed)], order)
+        assert mapping[SID1].name == "alpha-8", [t.name for t in order]
