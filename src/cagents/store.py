@@ -112,6 +112,9 @@ class TrackedSession:
     parent_id: str = ""
     relation: str = ""  # "fork" | "handoff" | ""
 
+    def added_datetime(self) -> datetime | None:
+        return _parse_iso(self.added_at)
+
     def reviewed_datetime(self) -> datetime | None:
         return _parse_iso(self.reviewed_at)
 

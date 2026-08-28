@@ -164,6 +164,30 @@ class TestDeriveState:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
+    def test_freshly_tracked_no_transcript_yet_needs_input(self, now: float):
+        # The `n` "new conversation" terminal tracks the session before the
+        # user has actually typed `claude` in it — no transcript exists
+        # yet. Within the grace window that must read as "waiting on you",
+        # not "something went wrong."
+        from datetime import datetime, timedelta, timezone
+
+        added = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(minutes=2)
+        tracked = _tracked()
+        tracked.added_at = added.isoformat()
+        state, detail = derive_state(None, tracked, live=True, now=now)
+        assert state == SessionState.NEEDS_INPUT
+        assert "claude" in detail
+
+    def test_no_transcript_past_the_grace_window_is_stopped(self, now: float):
+        from datetime import datetime, timedelta, timezone
+
+        added = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(minutes=30)
+        tracked = _tracked()
+        tracked.added_at = added.isoformat()
+        state, detail = derive_state(None, tracked, live=True, now=now)
+        assert state == SessionState.STOPPED
+        assert detail == "transcript missing"
+
     def test_empty_live_session_is_at_the_prompt(self, claude_dir: Path, now: float):
         b = TranscriptBuilder(SID1, "/proj/alpha").ai_title("fresh")
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 1))

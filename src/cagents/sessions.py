@@ -93,6 +93,14 @@ def attention_rank_map(order_setting) -> dict[SessionState, int]:
 # turn).
 FRESH_WRITE_SECONDS = 20.0
 
+# The "new conversation" terminal (`n`) tracks its session before any
+# transcript exists — the user still has to actually type `claude` in the
+# plain shell it opens. A tracked session with no transcript at all is
+# otherwise "transcript missing"/STOPPED (something went wrong); within
+# this grace window of being tracked, it's read as the ordinary, expected
+# "hasn't started yet" instead.
+NEW_TERMINAL_GRACE_SECONDS = 15 * 60.0
+
 
 @dataclass
 class SessionView:
@@ -272,6 +280,11 @@ def derive_state(
 
     The rules, in the order they win:
 
+    - no transcript at all, tracked within NEW_TERMINAL_GRACE_SECONDS
+                                                       -> NEEDS_INPUT
+      (the `n` "new conversation" terminal: tracked before `claude` was
+      ever actually typed in it — read as "hasn't started yet", not
+      "something went wrong")
     - `claude agents --json`'s own busy/waiting/idle for this session
       (see agent_status.py) — authoritative, independent of pane text or
       hooks; busy -> WORKING, waiting -> NEEDS_INPUT. idle alone isn't
@@ -299,6 +312,9 @@ def derive_state(
     now = time.time() if now is None else now
 
     if parsed is None:
+        added = tracked.added_datetime()
+        if added is not None and now - added.timestamp() < NEW_TERMINAL_GRACE_SECONDS:
+            return (SessionState.NEEDS_INPUT, "waiting on you — run `claude` in its terminal")
         return (SessionState.STOPPED, "transcript missing")
 
     if live and agent_state:

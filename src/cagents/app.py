@@ -36,7 +36,6 @@ from .modals import (
     ConfirmModal,
     HelpModal,
     InputModal,
-    NewSessionModal,
     PaletteModal,
     PlanConfirmModal,
     RelatedModal,
@@ -71,6 +70,31 @@ COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 VIEW_IDS = ["queue", "grouped", "kanban"]
 
 ALERT_STATES = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
+
+
+def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
+    """The one compound shell command sent into a freshly-opened
+    "new conversation" terminal: numbered cd-shortcuts to the most recent
+    project directories, and a short printed menu. Convenience only — the
+    shell is otherwise completely untouched; typing `claude` directly
+    (with no alias involved) is already intercepted into a managed spawn
+    by the claude shim on $PATH (see _write_claude_shim/_shim_env), the
+    same mechanism the rest of cagents' terminal features use."""
+    from .tmuxctl import _shquote
+
+    commands = ["clear"]
+    menu = [f"You're in: {directory}", ""]
+    if recents:
+        menu.append("Recent directories:")
+        for i, recent in enumerate(recents, start=1):
+            commands.append(f"alias {i}={_shquote(f'cd {_shquote(recent)}')}")
+            menu.append(f"  {i}) {recent}")
+        menu.append("")
+        menu.append("Type a number to jump there, then run: claude")
+    else:
+        menu.append("Run: claude")
+    commands.extend(f"echo {_shquote(line)}" for line in menu)
+    return "; ".join(commands)
 
 
 class CagentsApp(App):
@@ -149,6 +173,11 @@ class CagentsApp(App):
         self.sidecar = sidecar if sidecar is not None else (Sidecar() if Sidecar.enabled() else None)
         self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
         self._pending_handoffs: dict[str, str] = {}  # source_id -> source title
+        # Session ids `n` tracked before `claude` was ever typed in their
+        # terminal — consumed by _handle_spawn_request the moment the shim
+        # reports one, so that spawn reuses this exact id (already tracked,
+        # already the list row waiting on it) instead of minting a new one.
+        self._pending_new_terminals: set[str] = set()
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
@@ -674,8 +703,8 @@ class CagentsApp(App):
         script = f"""#!/bin/bash
 # cagents shim — `claude` here opens a managed session in cagents.
 REQUEST={str(request)!r}
-python3 -c 'import json,sys; print(json.dumps({{"dir": sys.argv[1], "args": sys.argv[2:]}}))' \
-  "$PWD" "$@" > "$REQUEST.tmp" && mv "$REQUEST.tmp" "$REQUEST"
+python3 -c 'import json,sys; print(json.dumps({{"dir": sys.argv[1], "pending_id": sys.argv[2], "args": sys.argv[3:]}}))' \
+  "$PWD" "$CAGENTS_SESSION_ID" "$@" > "$REQUEST.tmp" && mv "$REQUEST.tmp" "$REQUEST"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.4
   [ ! -e "$REQUEST" ] && {{ echo "opened in cagents → session tab"; exit 0; }}
@@ -729,18 +758,30 @@ exec {real!r} "$@"
         except OSError:
             pass
         directory = str(payload.get("dir", ""))
+        pending_id = str(payload.get("pending_id", ""))
         args = [str(a) for a in payload.get("args", [])]
         if not directory or not Path(directory).is_dir():
             self.notify(f"Shell claude: bad directory {directory!r}", severity="error")
             return
-        # An explicit resume keeps its id; anything else gets a fresh one.
+        # An explicit resume keeps its id. Otherwise: if this shell is one
+        # `n` opened (tagged with CAGENTS_SESSION_ID, still pending — the
+        # EXISTING 'N' terminal-tab-on-a-live-session flow also carries
+        # that env var, but for an already-spawned session, so only a
+        # still-pending id is ever reused here), that id was tracked the
+        # moment the terminal opened and the list row is waiting on it —
+        # reuse it rather than minting a second, orphaned one. Anything
+        # else gets a genuinely fresh id.
         session_id = ""
         if "--resume" in args:
             candidate = args[args.index("--resume") + 1] if args.index("--resume") + 1 < len(args) else ""
             if len(candidate) == 36:
                 session_id = candidate
         if not session_id:
-            session_id = str(uuid.uuid4())
+            if pending_id in self._pending_new_terminals:
+                session_id = pending_id
+                self._pending_new_terminals.discard(pending_id)
+            else:
+                session_id = str(uuid.uuid4())
             args = args + ["--session-id", session_id]
         try:
             name = self._spawn_session(directory, args, session_id)
@@ -1443,26 +1484,49 @@ exec {real!r} "$@"
 
     # -- creating / tracking sessions ------------------------------------------
 
-    def action_new_session(self) -> None:
-        initial = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
-        self.push_screen(NewSessionModal(initial), self._new_session_chosen)
+    def _recent_directories(self, limit: int = 5) -> list[str]:
+        """Distinct project directories from the most recently tracked
+        sessions, newest first — offered as quick-jump shortcuts in the
+        new-conversation terminal."""
+        ordered = sorted(self.store.sessions.values(), key=lambda t: t.added_at, reverse=True)
+        seen: list[str] = []
+        for tracked in ordered:
+            directory = tracked.project_dir
+            if directory and directory not in seen:
+                seen.append(directory)
+            if len(seen) >= limit:
+                break
+        return seen
 
-    def _new_session_chosen(self, result: tuple[str, str] | None) -> None:
-        if not result:
-            return
-        directory, label = result
-        claude_bin = self._claude_bin()
-        if not claude_bin:
-            self.notify("claude CLI not found.", severity="error")
-            return
+    def action_new_session(self) -> None:
+        """n: open a plain shell on the right, already tracked as a new
+        session — no upfront directory/label form. You `cd` (or use one of
+        the numbered shortcuts to a recent project directory already
+        seeded into the shell) and type `claude` yourself; the claude shim
+        already on this shell's $PATH (see _write_claude_shim/_shim_env —
+        the same mechanism the rest of cagents' terminal features use)
+        intercepts that into a real managed spawn, and _handle_spawn_request
+        reuses this exact session id since it's still pending — no
+        directory/mtime guessing needed to find the resulting transcript
+        again after the fact."""
+        directory = os.environ.get("CAGENTS_LAUNCH_CWD") or os.getcwd()
         session_id = str(uuid.uuid4())
         try:
-            name = self._spawn_session(directory, ["--session-id", session_id], session_id)
+            name = self.tmux.new_shell_session(
+                directory, session_id=session_id, extra_env=self._shim_env()
+            )
         except Exception as error:
-            self.notify(f"Could not start session: {error}", severity="error", timeout=10)
+            self.notify(f"Could not open a terminal: {error}", severity="error", timeout=10)
             return
+        self._pending_new_terminals.add(session_id)
+        try:
+            self.tmux.send_shell_command(
+                name, _new_terminal_seed_command(directory, self._recent_directories())
+            )
+        except Exception:
+            pass  # cosmetic only — the terminal is still perfectly usable without it
         self._checkpoint("new session")
-        self.store.track(session_id, directory, utcnow().isoformat(), label=label)
+        self.store.track(session_id, directory, utcnow().isoformat())
         self.selected_session_id = session_id
         self._pending_highlight = session_id
         self._show_new_session(name)

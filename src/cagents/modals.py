@@ -85,93 +85,6 @@ def complete_directory(value: str) -> tuple[str, list[str]]:
     return completed, matches
 
 
-class NewSessionModal(ModalScreen["tuple[str, str] | None"]):
-    """Ask for a directory (and optional label) for a brand-new session.
-
-    Deliberately *not* a task-description form (spec §7): you talk to
-    Claude directly once attached.
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+o", "pick_via_shell", "Shell pick", show=False),
-        Binding("tab", "app.focus_next", "Next field", show=False),
-        Binding("shift+tab", "app.focus_previous", "Prev field", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    NewSessionModal { align: center middle; }
-    NewSessionModal > Vertical {
-        width: 80; max-width: 95%; height: auto;
-        border: round $primary; background: $surface; padding: 1 2;
-    }
-    NewSessionModal Label { text-style: bold; }
-    NewSessionModal .hint { color: $text-muted; text-style: none; margin-bottom: 1; }
-    NewSessionModal Input { margin-bottom: 1; }
-    """
-
-    def __init__(self, initial_dir: str) -> None:
-        super().__init__()
-        self.initial_dir = initial_dir
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("Start a new Claude session")
-            yield Static(
-                "Enter to start · tab completes/cycles directories · "
-                "ctrl+o: cd/zoxide in a real shell, use wherever you end up",
-                classes="hint",
-            )
-            yield Input(value=self.initial_dir, placeholder="project directory", id="dir")
-            yield Input(placeholder="optional label (for you, not Claude)", id="label")
-
-    def on_mount(self) -> None:
-        self.query_one("#dir", Input).focus()
-
-    def on_key(self, event) -> None:
-        if event.key != "tab":
-            self._tab_state = None  # typing resets the completion cycle
-            return
-        dir_input = self.query_one("#dir", Input)
-        if not dir_input.has_focus:
-            return
-        state = getattr(self, "_tab_state", None)
-        if state and state[0] == dir_input.value:
-            # Repeated tab: cycle through the full matches.
-            _, matches, index = state
-            index = (index + 1) % len(matches)
-            chosen = matches[index]
-            event.stop()
-            event.prevent_default()
-            dir_input.value = chosen
-            dir_input.cursor_position = len(chosen)
-            self._tab_state = (chosen, matches, index)
-            return
-        completed, matches = complete_directory(dir_input.value)
-        if completed and completed != dir_input.value:
-            event.stop()
-            event.prevent_default()
-            dir_input.value = completed
-            dir_input.cursor_position = len(completed)
-            if len(matches) > 1:
-                self._tab_state = (completed, matches, -1)
-        elif len(matches) > 1:
-            event.stop()
-            event.prevent_default()
-            self._tab_state = (dir_input.value, matches, -1)
-
-    def action_pick_via_shell(self) -> None:
-        dir_input = self.query_one("#dir", Input)
-        start = dir_input.value.strip() or self.initial_dir
-        directory = self.app.pick_directory_via_shell(start)  # type: ignore[attr-defined]
-        dir_input.value = directory
-        dir_input.cursor_position = len(directory)
-        dir_input.focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        directory = self.query_one("#dir", Input).value.strip()
-        label = self.query_one("#label", Input).value.strip()
-        self._finish(directory, label)
 
     def _finish(self, directory: str, label: str) -> None:
         directory = str(Path(directory).expanduser()) if directory else ""
@@ -422,9 +335,12 @@ HELP_TEXT = """\
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
-  n             new session dialog (launch dir default; tab completes; ctrl+o shell-pick)
-  N             the shell way: terminal tab -> cd/z/mkdir anywhere -> type "claude"
-                and it opens as a managed session right there
+  n             new conversation — opens a shell (launch dir default; numbered
+                shortcuts to your 5 most recent directories); type "claude" and
+                it becomes the managed session this row is already waiting on
+  N             the shell way, for a session already in the list: terminal
+                tab -> cd/z/mkdir anywhere -> type "claude" and it opens as a
+                managed session right there
   a             track an existing session
   /             search all conversation history (fuzzy, full scan — off by
                 default, enable in settings)

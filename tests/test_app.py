@@ -277,7 +277,9 @@ async def test_app_keys_do_not_fire_inside_modal(world):
         assert store.sessions[SID1].label == ""
 
 
-async def test_new_session_defaults_to_launch_cwd(world, tmp_path, monkeypatch):
+async def test_new_session_opens_a_shell_terminal_in_launch_cwd(world, tmp_path, monkeypatch):
+    # No modal at all now: `n` opens a plain shell (not claude) already
+    # tracked under a fresh session id, right in CAGENTS_LAUNCH_CWD.
     app, store, tmux, _ = world
     launch_dir = tmp_path / "launchhere"
     launch_dir.mkdir()
@@ -287,31 +289,38 @@ async def test_new_session_defaults_to_launch_cwd(world, tmp_path, monkeypatch):
         select_session(app, SID1)  # selection must NOT influence the default
         await pilot.pause()
         await pilot.press("n")
-        await pilot.pause()
-        dir_input = app.screen.query_one("#dir")
-        assert dir_input.value == str(launch_dir)
-        await pilot.press("enter")
         await pilot.pause(0.2)
-        directory, args, sid = tmux.created[-1]
+        directory, sid = tmux.shell_created[-1]
         assert directory == str(launch_dir)
-        assert args[0] == "--session-id"
         assert sid in store.sessions
+        assert store.sessions[sid].project_dir == str(launch_dir)
+        # a claude session, not a real claude process, was started
+        assert tmux.created == [] or tmux.created[-1][2] != sid
 
 
-async def test_new_session_dir_tab_completion(world, tmp_path, monkeypatch):
+async def test_new_session_seeds_the_terminal_with_recent_directory_shortcuts(
+    world, tmp_path, monkeypatch
+):
     app, store, tmux, _ = world
-    base = tmp_path / "complete"
-    (base / "projects-here").mkdir(parents=True)
-    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(tmp_path))
+    older = tmp_path / "older-proj"
+    newer = tmp_path / "newer-proj"
+    older.mkdir()
+    newer.mkdir()
+    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(tmp_path / "fresh"))
+    (tmp_path / "fresh").mkdir()
+    store.track("11111111-0000-0000-0000-000000000001", str(older), "2026-08-17T09:00:00+00:00")
+    store.track("11111111-0000-0000-0000-000000000002", str(newer), "2026-08-17T10:00:00+00:00")
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await pilot.press("n")
-        await pilot.pause()
-        dir_input = app.screen.query_one("#dir")
-        dir_input.value = str(base / "proj")
-        await pilot.press("tab")
-        await pilot.pause()
-        assert dir_input.value == str(base / "projects-here") + "/"
+        await pilot.pause(0.2)
+        name, command = tmux.shell_commands[-1]
+        assert name == tmux.sessions[-1].name
+        # newest tracked directory listed first, each with a numbered
+        # cd-shortcut alias
+        assert command.index(str(newer)) < command.index(str(older))
+        assert "alias 1=" in command
+        assert "alias 2=" in command
 
 
 async def test_track_modal_lists_untracked(world, claude_dir, now):
@@ -374,6 +383,7 @@ async def test_empty_store_shows_hint(claude_dir, tmp_path):
 
 
 async def test_new_session_is_selected_and_previewed(world, tmp_path, monkeypatch):
+    # A single keypress now does the whole thing — no modal, no Enter.
     app, store, tmux, _ = world
     launch = tmp_path / "newproj"
     launch.mkdir()
@@ -383,10 +393,8 @@ async def test_new_session_is_selected_and_previewed(world, tmp_path, monkeypatc
         select_session(app, SID1)  # somewhere else first
         await pilot.pause()
         await pilot.press("n")
-        await pilot.pause()
-        await pilot.press("enter")
         await pilot.pause(0.3)  # spawn + refresh + pending highlight
-        _, _, new_id = tmux.created[-1]
+        _, new_id = tmux.shell_created[-1]
         # the list highlight moved to the new session -> it drives the preview
         assert app.selected_session_id == new_id
         listing = app.query_one(f"#{app.active_view_id}-list", SessionList)
@@ -395,6 +403,24 @@ async def test_new_session_is_selected_and_previewed(world, tmp_path, monkeypatc
         app.refresh_data()
         await pilot.pause(0.2)
         assert app.selected_session_id == new_id
+
+
+async def test_new_session_shows_needs_input_until_claude_actually_starts(
+    world, tmp_path, monkeypatch
+):
+    # Tracked before any transcript exists — must read as "waiting on
+    # you", not "something went wrong" (STOPPED), while the grace window
+    # holds.
+    app, store, tmux, _ = world
+    launch = tmp_path / "newproj"
+    launch.mkdir()
+    monkeypatch.setenv("CAGENTS_LAUNCH_CWD", str(launch))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause(0.3)
+        _, new_id = tmux.shell_created[-1]
+        assert app.snapshot.by_id(new_id).state == SessionState.NEEDS_INPUT
 
 
 async def test_open_link_prompts_to_associate_pr(world):
@@ -501,16 +527,14 @@ class TestUndo:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             await pilot.press("n")
-            await pilot.pause()
-            await pilot.press("enter")
             await pilot.pause(0.3)
-            _, _, new_id = tmux.created[-1]
+            _, new_id = tmux.shell_created[-1]
             assert new_id in store.sessions
             sessions_before = len(tmux.sessions)
             await pilot.press("z")
             await pilot.pause(0.2)
             assert new_id not in store.sessions  # bookkeeping undone
-            assert len(tmux.sessions) == sessions_before  # the process lives on
+            assert len(tmux.sessions) == sessions_before  # the terminal lives on
 
 
 async def test_review_queue_orders_newest_response_first(world):

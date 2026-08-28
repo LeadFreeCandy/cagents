@@ -254,6 +254,8 @@ class FakeTmux:
         self.attached_to: list[tuple[str, str]] = []  # (name, socket)
         self.created: list[tuple[str, list[str], str]] = []
         self.sent: list[tuple[str, str, str]] = []  # (name, text, socket)
+        self.shell_created: list[tuple[str, str]] = []  # (directory, session_id)
+        self.shell_commands: list[tuple[str, str]] = []  # (name, command)
         self.log: list[str] = []
 
     def available(self) -> bool:
@@ -287,6 +289,25 @@ class FakeTmux:
             )
         )
         return name
+
+    def new_shell_session(self, directory, session_id="", extra_env=None):
+        from pathlib import Path
+
+        from cagents.tmuxctl import TmuxSession
+
+        name = Path(directory).name or "session"
+        self.shell_created.append((directory, session_id))
+        self.sessions.append(
+            TmuxSession(
+                name=name, created=1e12, activity=1e12, attached=False,
+                pane_pid=1, pane_path=directory, socket=self.create_socket,
+                cagents_session_id=session_id,
+            )
+        )
+        return name
+
+    def send_shell_command(self, name, command, socket=None):
+        self.shell_commands.append((name, command))
 
     def session_statusline_on(self, name, socket=None):
         self.log.append(f"status-on:{name}")

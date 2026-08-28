@@ -255,6 +255,54 @@ class TmuxClient:
             self._mouse_enabled.add(self.create_socket)
         return name
 
+    def new_shell_session(
+        self, directory: str, session_id: str = "", extra_env: list[str] | None = None
+    ) -> str:
+        """Create a detached session running a plain interactive shell (no
+        claude) — for the "new conversation" terminal: the user picks a
+        directory and types `claude` themselves, rather than cagents
+        dictating the exact command line up front. Same socket/env/mouse
+        setup as new_claude_session, minus the claude invocation itself.
+
+        `extra_env` is typically the app's claude-shim PATH/ZDOTDIR `-e`
+        pairs, so that `claude` typed in this shell is intercepted into a
+        managed spawn the same way it already is everywhere else the shim
+        applies — this method has no opinion on that, it just forwards
+        whatever env the caller wants set at creation time."""
+        name = self._unique_name(Path(directory).name)
+        env_args: list[str] = list(extra_env or ())
+        if session_id:
+            env_args += ["-e", f"CAGENTS_SESSION_ID={session_id}"]
+        proc = self._run(
+            self.create_socket,
+            "new-session", "-d", *env_args, "-s", name, "-c", directory,
+            timeout=10.0,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"tmux new-session failed: {proc.stderr.strip() or 'unknown error'}")
+        if session_id:
+            self._run(
+                self.create_socket,
+                "set-environment", "-t", f"={name}", "CAGENTS_SESSION_ID", session_id,
+            )
+        if self.create_socket not in self._mouse_enabled:
+            self._run(self.create_socket, "set", "-g", "mouse", "on")
+            self._run(self.create_socket, "set", "-g", "status", "off")
+            self._mouse_enabled.add(self.create_socket)
+        return name
+
+    def send_shell_command(self, session_name: str, command: str, socket: str | None = None) -> None:
+        """Type a compound shell command line into a plain shell pane
+        (new_shell_session's) and press Enter — the "seed" step: defines
+        the recent-directory shortcut aliases and prints the menu. Not
+        send_text's paste-buffer + delayed Enter dance (that exists to
+        dodge Claude's own bracketed-paste UI timing); a single-line
+        semicolon-joined shell command has no such concern."""
+        socket = socket or self.create_socket
+        proc = self._run(socket, "send-keys", "-t", f"={session_name}:", command, "Enter")
+        if proc.returncode != 0:
+            raise RuntimeError(f"tmux send-keys failed: {proc.stderr.strip()}")
+
     def ensure_session_window(
         self, session_name: str, window_name: str, directory: str, socket: str | None = None
     ) -> None:
