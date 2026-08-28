@@ -180,6 +180,11 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
         meta.append(f"· active {human_age(view.last_activity, now)} ago")
         if view.parsed.pending_agents:
             meta.append(f" · ⑂ {view.parsed.pending_agents} agents", style="green")
+        if view.parsed.compact_count:
+            times = f"{view.parsed.compact_count}x" if view.parsed.compact_count > 1 else "once"
+            dropped = view.parsed.compacted_tokens
+            tokens = f" (~{dropped // 1000}k dropped)" if dropped >= 1000 else ""
+            meta.append(f" · ⤳ compacted {times}{tokens}", style="dim yellow")
     if view.live:
         meta.append(f" · tmux:{view.tmux_name}", style="green")
     head.append_text(meta)
