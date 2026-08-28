@@ -79,6 +79,19 @@ def test_label_overrides_title(claude_dir: Path):
     assert "my label" in session_row(view, NOW).plain
 
 
+def test_preview_shows_compaction_hint(claude_dir: Path):
+    from rich.console import Console
+
+    view = _view(claude_dir)
+    view.parsed.compact_count = 2
+    view.parsed.compacted_tokens = 1200000
+    console = Console(width=100, record=True)
+    console.print(preview_renderable(view, NOW))
+    out = console.export_text()
+    assert "compacted 2x" in out
+    assert "1200k dropped" in out
+
+
 def test_kanban_card(claude_dir: Path):
     card = kanban_card(_view(claude_dir), NOW)
     assert "Fix the login bug" in card.plain

@@ -135,6 +135,15 @@ class ParsedSession:
     files_touched: list[str] = field(default_factory=list)  # ordered, deduped
     pending_agents: int = 0  # background agents, per Claude's system records
     last_turn_duration_ms: int = 0
+    # How many times this session's history has been auto/manually compacted
+    # (a "system"/"compact_boundary" record), and the cumulative tokens
+    # dropped across all of them — confirmed live in real transcripts as
+    # {"type":"system","subtype":"compact_boundary","compactMetadata":
+    # {"cumulativeDroppedTokens":...}}. Explains why old context vanishes
+    # from the preview/title derivation without cagents ever seeing an
+    # error.
+    compact_count: int = 0
+    compacted_tokens: int = 0
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -292,9 +301,23 @@ def parse_session_file(
         rtype = record.get("type")
 
         if rtype == "ai-title":
-            title = record.get("aiTitle")
-            if isinstance(title, str) and title.strip():
-                parsed.title = title.strip()
+            # Renaming the conversation IN Claude Code (not cagents' own `r`)
+            # writes a "customTitle" field on this same record type, sitting
+            # alongside its auto-generated "aiTitle" — confirmed against the
+            # installed `claude` binary's own bundled source, which reads
+            # its title back the same way (a `customTitleFromTail` scan for
+            # `"customTitle":"..."`). Only ever checking aiTitle here meant
+            # a manual rename in Claude Code never reached cagents at all.
+            # Last record chronologically wins, same as aiTitle always did;
+            # customTitle wins within one record since it's the deliberate
+            # override.
+            custom = record.get("customTitle")
+            if isinstance(custom, str) and custom.strip():
+                parsed.title = custom.strip()
+            else:
+                title = record.get("aiTitle")
+                if isinstance(title, str) and title.strip():
+                    parsed.title = title.strip()
             continue
         if rtype == "agent-name":
             name = record.get("agentName")
@@ -336,10 +359,18 @@ def parse_session_file(
             agents = record.get("pendingBackgroundAgentCount")
             if isinstance(agents, int):
                 parsed.pending_agents = agents
-            if record.get("subtype") == "turn_duration":
+            subtype = record.get("subtype")
+            if subtype == "turn_duration":
                 duration = record.get("durationMs")
                 if isinstance(duration, int):
                     parsed.last_turn_duration_ms = duration
+            elif subtype == "compact_boundary":
+                parsed.compact_count += 1
+                meta = record.get("compactMetadata")
+                if isinstance(meta, dict):
+                    dropped = meta.get("cumulativeDroppedTokens")
+                    if isinstance(dropped, int):
+                        parsed.compacted_tokens = dropped
             continue
 
         if rtype not in ("user", "assistant"):
@@ -368,6 +399,7 @@ def parse_session_file(
 
         if rtype == "user":
             parsed.last_record_role = "user"
+            is_meta = bool(record.get("isMeta"))
             for block in _iter_content_blocks(message):
                 btype = block.get("type")
                 if btype == "tool_result":
@@ -381,7 +413,7 @@ def parse_session_file(
                     text = block.get("text", "")
                     if not isinstance(text, str):
                         continue
-                    if _SYSTEMISH_USER.match(text):
+                    if is_meta or _SYSTEMISH_USER.match(text):
                         _scan_lifecycle(text, ts, active_background, active_monitors)
                     elif text.strip():
                         if not fallback_title:
