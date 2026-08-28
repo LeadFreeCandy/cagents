@@ -230,6 +230,13 @@ def _scan_lifecycle(text: str, ts, active_background: dict, active_monitors: dic
             active_monitors.pop(task_id, None)
 
 
+# Fallback for the handful of harness-synthesized shapes seen without a
+# structural marker. The primary signal is the record's own "isMeta" field
+# (checked directly at the call site) — confirmed live: 172 "isMeta":true
+# user blocks across real transcripts (skill-injected instructions, pasted
+# image placeholders like "[Image: source: ...]") matched none of these
+# prefixes, so they were read as real user text — became the fallback
+# title and, worse, rendered straight into the preview pane as if typed.
 _SYSTEMISH_USER = re.compile(
     r"^\s*(<system-reminder>|<task-notification>|<local-command|<command-name>|\[Request interrupted)"
 )
