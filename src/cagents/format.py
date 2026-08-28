@@ -5,7 +5,9 @@ No Textual imports here; everything is testable without a running app.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Iterable
 
 from rich.console import Group, RenderableType
 from rich.text import Text
@@ -68,9 +70,42 @@ def state_badge(view: SessionView) -> Text:
 JIRA_KEY_WIDTH = 10
 JIRA_STATUS_WIDTH = 16
 JIRA_ASSIGNEE_WIDTH = 18
-# Width of the fixed prefix before the jira columns start: " {glyph} " (3) +
-# title field (44 + 2 trailing) + label field (10) + age field (4 + 1).
-_JIRA_PREFIX_WIDTH = 3 + 46 + 10 + 5
+
+# The title column is sized to the widest title actually on screen (bounded),
+# not a fixed 44: with short /rename labels a fixed pad left most of the row
+# blank while the project, markers and detail fell off the right edge.
+TITLE_MIN = 12
+TITLE_MAX = 44
+STATE_MIN = len("working")
+
+
+@dataclass(frozen=True)
+class RowWidths:
+    """Column widths shared by every row in one list, so the columns line up.
+    The defaults are the original fixed layout."""
+
+    title: int = TITLE_MAX
+    state: int = 10
+
+
+def row_widths(views: Iterable[SessionView]) -> RowWidths:
+    """Fit the title and state columns to the rows being shown. Bounded so a
+    single long AI title can't shove every other column off the edge."""
+    views = list(views)
+    if not views:
+        return RowWidths()
+    title = max(len(view.title) for view in views)
+    state = max(len(STATE_STYLE[view.state][2]) for view in views)
+    return RowWidths(
+        title=min(TITLE_MAX, max(TITLE_MIN, title)),
+        state=max(STATE_MIN, state),
+    )
+
+
+def _jira_prefix_width(widths: RowWidths) -> int:
+    """Width of the prefix before the jira columns start: " {glyph} " (3) +
+    title field (+ 2 trailing) + state field + age field (4 + 1)."""
+    return 3 + widths.title + 2 + widths.state + 5
 
 
 def session_row(
@@ -79,10 +114,12 @@ def session_row(
     show_project: bool = False,
     compact: bool = False,
     show_jira: bool = False,
+    widths: RowWidths = RowWidths(),
 ) -> Text:
     """One list row: glyph, title, state, age (and optionally the project,
     and optionally Jira key/status/assignee columns). Compact form (sidecar
-    rail): glyph, short title, age — nothing else."""
+    rail): glyph, short title, age — nothing else. `widths` comes from
+    row_widths() over the whole list so every row's columns line up."""
     glyph, style, label = STATE_STYLE[view.state]
     if compact:
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -92,8 +129,11 @@ def session_row(
         return row
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append(f" {glyph} ", style=style)
-    row.append(f"{_truncate(view.title, 44):<44}  ", style="bold" if view.live else "")
-    row.append(f"{label:<10}", style=style)
+    row.append(
+        f"{_truncate(view.title, widths.title):<{widths.title}}  ",
+        style="bold" if view.live else "",
+    )
+    row.append(f"{label:<{widths.state}}", style=style)
     row.append(f"{human_age(view.last_activity, now):>4} ", style="dim")
     if show_jira:
         row.append(f"{view.jira_key or '—':<{JIRA_KEY_WIDTH}}", style="dim magenta" if view.jira_key else "dim")
@@ -122,11 +162,12 @@ def session_row(
     return row
 
 
-def jira_header() -> Text:
+def jira_header(widths: RowWidths = RowWidths()) -> Text:
     """Column titles aligned over session_row's jira columns — shown above
-    the list only when the jira_integration setting is on."""
+    the list only when the jira_integration setting is on. Pass the same
+    `widths` the rows were built with."""
     header = Text(no_wrap=True, overflow="ellipsis", style="dim")
-    header.append(" " * _JIRA_PREFIX_WIDTH)
+    header.append(" " * _jira_prefix_width(widths))
     header.append(f"{'JIRA':<{JIRA_KEY_WIDTH}}", style="bold dim")
     header.append(f"{'STATUS':<{JIRA_STATUS_WIDTH}}", style="bold dim")
     header.append(f"{'ASSIGNEE':<{JIRA_ASSIGNEE_WIDTH}}", style="bold dim")

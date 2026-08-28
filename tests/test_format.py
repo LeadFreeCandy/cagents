@@ -9,10 +9,14 @@ from conftest import SID1, TranscriptBuilder
 
 from cagents.claude_data import parse_session_file
 from cagents.format import (
+    TITLE_MAX,
+    TITLE_MIN,
+    RowWidths,
     header_summary,
     human_age,
     kanban_card,
     preview_renderable,
+    row_widths,
     session_row,
 )
 from cagents.sessions import SessionState, SessionView
@@ -77,6 +81,41 @@ def test_label_overrides_title(claude_dir: Path):
     view = _view(claude_dir, label="my label")
     assert view.title == "my label"
     assert "my label" in session_row(view, NOW).plain
+
+
+def test_row_widths_fit_the_widest_visible_row(claude_dir: Path):
+    views = [
+        _view(claude_dir, label="retreat"),
+        _view(claude_dir, label="oep-sightlab-selection"),
+        _view(claude_dir, state=SessionState.EXTERNAL_UPDATE),
+    ]
+    widths = row_widths(views)
+    assert widths.title == len("oep-sightlab-selection")
+    assert widths.state == len("external update")
+
+
+def test_row_widths_are_bounded(claude_dir: Path):
+    # One very long AI title must not shove every other column off the edge;
+    # one tiny label must not squash the column to nothing.
+    assert row_widths([_view(claude_dir, label="x" * 120)]).title == TITLE_MAX
+    assert row_widths([_view(claude_dir, label="ab")]).title == TITLE_MIN
+    assert row_widths([]) == RowWidths()
+
+
+def test_session_rows_align_the_state_column_across_title_lengths(claude_dir: Path):
+    short = _view(claude_dir, label="retreat")
+    long = _view(claude_dir, label="oep-sightlab-selection")
+    widths = row_widths([short, long])
+    short_row, long_row = session_row(short, NOW, widths=widths), session_row(long, NOW, widths=widths)
+    assert short_row.plain.index("working") == long_row.plain.index("working")
+    # Sized to the visible titles: the widest one sits two spaces from the
+    # state column, not a 44-column pad away.
+    assert long_row.plain.index("working") == long_row.plain.index("oep-sightlab-selection") + widths.title + 2
+
+
+def test_row_widths_default_keeps_the_original_layout(claude_dir: Path):
+    row = session_row(_view(claude_dir), NOW)
+    assert row.plain.index("working") == 3 + 44 + 2
 
 
 def test_preview_shows_compaction_hint(claude_dir: Path):

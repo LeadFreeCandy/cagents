@@ -17,6 +17,7 @@ from conftest import (
     SID3,
     FakeTmux,
     TranscriptBuilder,
+    render_text,
     select_session,
     ts_ago,
     widget_text,
@@ -342,6 +343,84 @@ async def test_track_modal_lists_untracked(world, claude_dir, now):
         await pilot.pause(0.1)
         assert sid_new in store.sessions
         assert store.sessions[sid_new].project_dir == "/proj/gamma"
+
+
+async def test_session_rows_never_fold_onto_a_second_line(world):
+    """format.session_row asks for no_wrap/ellipsis, but Textual reads those
+    from CSS for Content prompts and ignores the Rich Text's own flags — so
+    without the rule on the widget every wide row folds in half."""
+    from textual.visual import visualize
+
+    from cagents.views import SessionList
+
+    app, *_ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        for list_id in ("#queue-list", "#grouped-list"):
+            session_list = app.query_one(list_id, SessionList)
+            rules = session_list.styles.get_render_rules()
+            assert session_list.option_count
+            for index in range(session_list.option_count):
+                prompt = session_list.get_option_at_index(index).prompt
+                # Far narrower than a row needs: it must ellipsize, not fold.
+                height = visualize(session_list, prompt).get_height(rules, 40)
+                assert height == 1, f"{list_id} row {index} folded to {height} lines"
+
+
+async def test_list_columns_size_to_the_visible_titles(world):
+    """The world's titles are all short; the state column must sit right
+    after the widest of them, not 44 columns out — and on the same column
+    in every row."""
+    import re
+
+    from cagents.format import TITLE_MIN
+    from cagents.views import SessionList
+
+    app, *_ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        longest = max(len(view.title) for view in app.snapshot.views)
+        for list_id in ("#queue-list", "#grouped-list"):
+            session_list = app.query_one(list_id, SessionList)
+            rows = [
+                render_text(session_list.get_option_at_index(i).prompt)
+                for i in range(session_list.option_count)
+                if session_list.get_option_at_index(i).id  # skip group headers
+            ]
+            assert rows
+            for row in rows:
+                assert "            " not in row, f"{list_id}: {row!r}"  # 12 blanks = the old pad
+            state_cols = {
+                re.search(r"needs you|working|review|done|stopped|background", row).start()
+                for row in rows
+            }
+            assert state_cols == {3 + max(longest, TITLE_MIN) + 2}
+
+
+async def test_kanban_cards_still_wrap(world):
+    """kanban_card is deliberately multi-line in a narrow column — it must keep
+    folding rather than inherit the flat lists' ellipsis, which would cut every
+    title off at the column edge."""
+    from textual.visual import visualize
+
+    from cagents.views import KanbanView, SessionList
+
+    app, store, *_ = world
+    store.set_label(SID1, "a very long session name that cannot fit in one narrow column")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.refresh_data()
+        await pilot.pause(0.2)
+        heights = []
+        for session_list in app.query_one(KanbanView).query(SessionList):
+            rules = session_list.styles.get_render_rules()
+            for index in range(session_list.option_count):
+                prompt = session_list.get_option_at_index(index).prompt
+                heights.append(visualize(session_list, prompt).get_height(rules, 20))
+        # kanban_card writes 3 explicit lines (title / project · age / detail),
+        # so nowrap caps every card at 3 no matter how long the title is. The
+        # long name above must push past that by folding.
+        assert heights and max(heights) > 3, heights
 
 
 async def test_selection_survives_refresh(world):
