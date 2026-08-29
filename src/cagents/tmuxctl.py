@@ -33,6 +33,7 @@ _LIST_FORMAT = _FIELD_SEP.join(
         "#{session_attached}",
         "#{pane_pid}",
         "#{pane_current_path}",
+        "#{session_group}",
     ]
 )
 
@@ -47,6 +48,15 @@ class TmuxSession:
     pane_path: str
     socket: str = CREATE_SOCKET
     cagents_session_id: str = ""  # from the CAGENTS_SESSION_ID env var, if set
+    group: str = ""  # tmux session group, if any (named after its first member)
+
+    @property
+    def is_view(self) -> bool:
+        """A grouped session that isn't its group's leader — one of the
+        '<name>--term' terminal-tab views ensure_window_view creates. It
+        shares the leader's windows and directory but hosts nothing of its
+        own, so it must never be mistaken for a Claude session's home."""
+        return bool(self.group) and self.group != self.name
 
     @property
     def key(self) -> str:
@@ -111,9 +121,9 @@ class TmuxClient:
         sessions: dict[str, TmuxSession] = {}
         for line in proc.stdout.splitlines():
             parts = line.split(_FIELD_SEP)
-            if len(parts) != 6:
+            if len(parts) != 7:
                 continue
-            name, created, activity, attached, pane_pid, pane_path = parts
+            name, created, activity, attached, pane_pid, pane_path, group = parts
             if name in sessions:
                 continue  # first pane per session is enough
             try:
@@ -125,6 +135,7 @@ class TmuxClient:
                     pane_pid=int(pane_pid),
                     pane_path=pane_path,
                     socket=socket,
+                    group=group,
                 )
             except ValueError:
                 continue

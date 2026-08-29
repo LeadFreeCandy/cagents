@@ -583,3 +583,38 @@ class TestEnterWorktreeTranscriptMove:
         second = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-b", SID1)
         first.unlink()
         assert reg._find_session_file(tracked) == second
+
+
+def test_map_never_hosts_a_session_in_a_grouped_term_view(claude_dir: Path, now: float):
+    """ensure_window_view's grouped '<name>--term' sessions are cagents' own
+    terminal-tab views: plain shells sharing a live session's windows. They
+    report that session's directory, carry no id, and are always the newest
+    thing around, so tiers 2/3 mapped any stopped session in the same
+    directory onto one. The app then opened a terminal FOR that shell,
+    creating '--term--term', which the next refresh mapped again — a
+    runaway chain, seen live (assistant-6--term--term--term--term)."""
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))
+    parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
+    view = _tmux(name="alpha-6--term", path="/proj/alpha", created=now - 20)
+    view.group = "alpha-6"
+    assert map_tmux_sessions([(_tracked(), parsed)], [view]) == {}
+    # The group's leader (group named after itself) is a real host, as is
+    # any ungrouped shell in that directory — tier 2 still works for those.
+    leader = _tmux(name="alpha-6", path="/proj/alpha", created=now - 20)
+    leader.group = "alpha-6"
+    assert map_tmux_sessions([(_tracked(), parsed)], [leader])[SID1].name == "alpha-6"
+
+
+def test_map_never_hands_a_tagged_tmux_session_to_another_id(claude_dir: Path, now: float):
+    """A tmux session tagged with CAGENTS_SESSION_ID belongs to that id,
+    full stop — tier 1 is the ONLY way it may be claimed. Seen live: the
+    `n` helper shell (tagged with its pending id, cd'd into ~/assistant) sat
+    unclaimed after tier 1, so tier 2 gave it to a stopped session in that
+    directory, and Enter on that row opened a bare zsh. Worse, when two
+    sessions carried one id, tier 1 claimed one and tier 2 gave the other
+    (the real Claude) away to whoever was nearby."""
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))
+    parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
+    other = "99999999-9999-9999-9999-999999999999"  # untracked (or pending) id
+    shell = _tmux(name="cagents-3", path="/proj/alpha", created=now - 20, sid=other)
+    assert map_tmux_sessions([(_tracked(), parsed)], [shell]) == {}
