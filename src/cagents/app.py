@@ -444,16 +444,23 @@ class CagentsApp(App):
         from textual.worker import get_current_worker
 
         worker = get_current_worker()
+        def stale() -> bool:
+            # Superseded — by a newer sync (cancelled), or by anything else
+            # that moved the selection since this one was scheduled (a
+            # click's attach path points the pane itself, synchronously).
+            # Checked again right before each tmux write, not just on
+            # entry: the round-trips in between are exactly when a click
+            # lands, and a sync that then "corrects" the pane back to its
+            # own, older target is the new -> old -> new flip seen live.
+            return worker.is_cancelled or view.session_id != self.selected_session_id
+
         with self._viewer_sync_lock:  # exclusive= can't stop a running thread
-            if worker.is_cancelled:
-                # Superseded by a newer sync while queued on the lock —
-                # its target is stale now; let the newer one act instead
-                # of doing (and possibly erroring on) work nobody wants.
+            if stale():
                 return
             try:
                 self._sync_terminal(view)
                 command = self._viewer_command(view)
-                if command == self._viewer_target:
+                if command == self._viewer_target or stale():
                     return
                 self.sidecar.show_viewer(command)
                 self._viewer_target = command

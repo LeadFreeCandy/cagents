@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     SID1,
+    SID2,
     FakeOuterTmux,
     FakeTmux,
     FakeWorkTmux,
@@ -737,3 +738,50 @@ def test_window_view_selects_only_on_create_or_explicit_open():
     assert len([c for c in calls if c[0] == "select-window"]) == 1
     client.ensure_window_view("alpha", "term", force_select=True)  # explicit open
     assert len([c for c in calls if c[0] == "select-window"]) == 2
+
+
+async def test_a_stale_viewer_sync_never_yanks_the_pane_back(world, claude_dir, now):
+    """Seen live: one click made the session pane flip new -> old -> new,
+    three respawn-panes and a full redraw each. The passive per-refresh sync
+    (every 2s, re-emitted on each list rebuild) runs in a thread that
+    captures the view it was scheduled for; when a click lands while one is
+    mid-tmux-round-trip, the click points the pane at the new session, then
+    the stale thread finishes, sees its (old) target differs from the pane,
+    and "corrects" it back — after which the newer sync corrects it again.
+    Slower tmux (a swapping machine) widens the window, so it got worse
+    exactly when everything else did. A sync must apply only if its view is
+    still the selected one."""
+    store, tmux, registry, claude_dir = world
+    TranscriptBuilder(SID2, "/proj/beta").ai_title("Beta").user("go", ts=ts_ago(1)).write(
+        claude_dir, mtime=now - 1
+    )
+    store.track(SID2, "/proj/beta", "2026-08-18T09:05:00+00:00")
+    tmux.sessions.append(
+        TmuxSession(name="beta", created=now - 60, activity=now, attached=False,
+                    pane_pid=2, pane_path="/proj/beta", socket="claude")
+    )
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        alpha = app.snapshot.by_id(SID1)
+        beta = app.snapshot.by_id(SID2)
+        assert alpha is not None and beta is not None
+        # The click already pointed the pane at beta and selected it...
+        app.selected_session_id = SID2
+        app.sidecar.show_viewer(app._viewer_command(beta))
+        app._viewer_target = app._viewer_command(beta)
+        before = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:session" in c]
+        # ...and now the sync that was scheduled for alpha finally runs.
+        app.run_worker(
+            lambda: app._sync_viewer_blocking(alpha),
+            thread=True, group="viewer-sync", exclusive=True, exit_on_error=False,
+        )
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.2)
+        after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:session" in c]
+        assert after == before, f"stale sync re-pointed the pane: {after[len(before):]}"
+        assert app._viewer_target == app._viewer_command(beta)
