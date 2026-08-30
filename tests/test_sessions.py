@@ -583,3 +583,70 @@ class TestEnterWorktreeTranscriptMove:
         second = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-b", SID1)
         first.unlink()
         assert reg._find_session_file(tracked) == second
+
+
+def test_refresh_polls_claude_agents_at_most_every_agent_poll_seconds(claude_dir: Path, tmp_path: Path, now: float):
+    """`claude agents --json --all` boots the whole Claude CLI (~0.3s of a
+    core each time) and refresh() ran it on every 2s tick — plus every
+    explicit refresh_data() on top. Seen live as cagents burning 85% of a
+    core while idle. It's a best-effort signal; poll it on its own, slower
+    clock and reuse the answer in between."""
+    from cagents.sessions import AGENT_POLL_SECONDS, SessionRegistry
+    from cagents.store import Store
+
+    TranscriptBuilder(SID1, "/proj/alpha").user("go").write(claude_dir)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        return "[]"
+
+    registry = SessionRegistry(store, tmux=FakeTmuxEmpty(), claude_dir=claude_dir, agents_runner=runner)
+    registry.refresh(now=now)
+    registry.refresh(now=now + 2)
+    registry.refresh(now=now + AGENT_POLL_SECONDS - 0.5)
+    assert len(calls) == 1
+    registry.refresh(now=now + AGENT_POLL_SECONDS)
+    assert len(calls) == 2
+
+
+def test_refresh_reparses_a_transcript_only_when_it_changed(claude_dir: Path, tmp_path: Path, now: float, monkeypatch):
+    """Every tick re-read and re-parsed every tracked transcript (head +
+    tail, up to ~48KB of JSON each) even though almost none of them change
+    between ticks. Key the parse on (mtime, size) and reuse it."""
+    from cagents import sessions as S
+    from cagents.store import Store
+
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("go")
+    b.write(claude_dir, mtime=now - 100)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    real = S.parse_session_file
+    parses: list[Path] = []
+
+    def counting(path, *a, **k):
+        parses.append(path)
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(S, "parse_session_file", counting)
+    registry = S.SessionRegistry(store, tmux=FakeTmuxEmpty(), claude_dir=claude_dir, agents_runner=lambda a: "[]")
+    registry.refresh(now=now)
+    registry.refresh(now=now + 2)
+    assert len(parses) == 1
+    b.assistant_text("done").write(claude_dir, mtime=now - 50)  # the transcript grew
+    registry.refresh(now=now + 4)
+    assert len(parses) == 2
+    assert registry.refresh(now=now + 6).views[0].parsed.last_record_role == "assistant"
+    assert len(parses) == 2
+
+
+class FakeTmuxEmpty:
+    create_socket = "claude"
+
+    def list_sessions(self):
+        return []
+
+    def capture_pane(self, *a, **k):
+        return ""

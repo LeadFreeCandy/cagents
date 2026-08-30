@@ -79,6 +79,12 @@ class TmuxClient:
         self.create_socket = create_socket
         self.tmux_bin = tmux_bin
         self._mouse_enabled: set[str] = set()
+        # CAGENTS_SESSION_ID per live tmux session, keyed by (socket, name,
+        # created). It's one `show-environment` subprocess per session per
+        # list — dozens of spawns every 2s tick — for a value fixed at
+        # new-session time. A killed-and-recreated session gets a new
+        # `created` stamp, so a stale name never returns a stale id.
+        self._env_cache: dict[tuple[str, str, float], str] = {}
 
     def _run(self, socket: str, *args: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
         if args and args[0] in _MUTATING_COMMANDS:
@@ -130,9 +136,15 @@ class TmuxClient:
                 continue
         found = list(sessions.values())
         for sess in found:
-            sess.cagents_session_id = self.get_session_env(
-                sess.name, "CAGENTS_SESSION_ID", socket=socket
-            )
+            key = (socket, sess.name, sess.created)
+            if key not in self._env_cache:
+                self._env_cache[key] = self.get_session_env(
+                    sess.name, "CAGENTS_SESSION_ID", socket=socket
+                )
+            sess.cagents_session_id = self._env_cache[key]
+        live = {(socket, s.name, s.created) for s in found}
+        for key in [k for k in self._env_cache if k[0] == socket and k not in live]:
+            del self._env_cache[key]
         return found
 
     def get_session_env(self, session_name: str, var: str, socket: str | None = None) -> str:
