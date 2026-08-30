@@ -344,6 +344,24 @@ async def test_track_modal_lists_untracked(world, claude_dir, now):
         assert store.sessions[sid_new].project_dir == "/proj/gamma"
 
 
+async def test_d_marks_a_needs_you_session_done(world, claude_dir, now):
+    """The guard used to refuse with "Still in flight" — an imported session
+    parked on Claude's resume dialog could not be dismissed at all."""
+    app, store, tmux, _ = world
+    # Two sessions share /proj/alpha, so the tmux mapping content-verifies:
+    # the pane must show text from SID2's own transcript to claim it.
+    tmux.panes["alpha"] = "Alpha: add tests\nDo you want to proceed?\n❯ 1. Yes\n  2. No"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        select_session(app, SID2)  # the live one (tmux "alpha")
+        await pilot.pause()
+        assert app.selected_view().state == SessionState.NEEDS_INPUT
+        await pilot.press("d")
+        await pilot.pause(0.3)
+        assert store.sessions[SID2].reviewed_at != ""
+        assert app.snapshot.by_id(SID2).state == SessionState.DONE
+
+
 async def test_selection_survives_refresh(world):
     app, *_ = world
     async with app.run_test(size=(120, 40)) as pilot:

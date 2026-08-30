@@ -1029,7 +1029,7 @@ exec {real!r} "$@"
             self._notify_undoable("Un-done — back in the queue.")
             self._pin_cursor()
             self._optimistic_state(view.session_id, SessionState.NEEDS_REVIEW, "finished, unreviewed")
-        elif view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+        elif view.state == SessionState.WORKING:
             self.notify("Still in flight — mark it done when Claude is finished.", severity="warning")
             return
         else:

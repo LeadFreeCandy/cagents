@@ -583,3 +583,48 @@ class TestEnterWorktreeTranscriptMove:
         second = self._write_transcript(claude_dir, "-proj-alpha--claude-worktrees-wt-b", SID1)
         first.unlink()
         assert reg._find_session_file(tracked) == second
+
+
+class TestDoneDismissesNeedsYou:
+    """d on a needs-you session: 'done' means "I've decided not to engage
+    with this right now" (imported/auto-resumed sessions parked on Claude's
+    startup resume dialog were undismissable). Self-clears the moment the
+    conversation actually moves."""
+
+    PANE = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+
+    def test_reviewed_dismisses_a_live_dialog(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_text("done", ts=ts_ago(9000))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 9000))
+        tracked = _tracked(reviewed_at=ts_ago(100))  # reviewed AFTER the last activity
+        state, detail = derive_state(parsed, tracked, live=True, pane_text=self.PANE, now=now)
+        assert state == SessionState.DONE
+        # The open dialog stays visible in the detail — done, not hidden.
+        assert detail == "done — waiting on you"
+
+    def test_new_activity_after_done_brings_it_back(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_text(
+            "and another thing", ts=ts_ago(100)
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 100))
+        tracked = _tracked(reviewed_at=ts_ago(9000))  # reviewed BEFORE the last activity
+        state, _ = derive_state(parsed, tracked, live=True, pane_text=self.PANE, now=now)
+        assert state == SessionState.NEEDS_INPUT
+
+    def test_reviewed_dismisses_at_the_prompt_too(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(9000))
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 9000))
+        tracked = _tracked(reviewed_at=ts_ago(100))
+        state, detail = derive_state(parsed, tracked, live=True, pane_text="", now=now)
+        assert state == SessionState.DONE
+        assert detail == "done — at the prompt"
+
+    def test_working_is_never_dismissed(self, claude_dir: Path, now: float):
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_tool_use(
+            "t1", "Bash", {"command": "ls"}, ts=ts_ago(1)
+        )
+        parsed = parse_session_file(b.write(claude_dir, mtime=now - 1))
+        tracked = _tracked(reviewed_at=ts_ago(100))
+        pane = "· Running… (esc to interrupt)"
+        state, _ = derive_state(parsed, tracked, live=True, pane_text=pane, now=now)
+        assert state == SessionState.WORKING
