@@ -341,6 +341,10 @@ def derive_state(
       needs-review / monitoring / …), so it falls through to everything
       below exactly as if this signal weren't available.
     - live pane showing a permission/question prompt  -> NEEDS_INPUT
+      (every NEEDS_INPUT above/below: unless reviewed since the last
+      activity — `d` dismisses a needs-you row as done, the open dialog
+      stays named in the detail, and any real new activity clears the
+      review and brings it back)
     - live pane showing an in-progress turn           -> WORKING
     - a conversation record (user/assistant) written
       in the last few seconds, while live             -> WORKING
@@ -360,10 +364,25 @@ def derive_state(
 
     now = time.time() if now is None else now
 
+    def needs_input(detail: str) -> tuple[SessionState, str]:
+        """NEEDS_INPUT — unless the human already dismissed it. `d` on a
+        needs-you row means "I've decided not to engage with this right
+        now" (imported sessions parked on Claude's startup resume dialog
+        were undismissable). Deliberately loud about what's left open:
+        the state reads done but the detail keeps naming the dialog, and
+        the moment the conversation actually moves (new transcript
+        activity past reviewed_at) the review stops counting and the row
+        comes straight back — same self-clearing idiom as NEEDS_REVIEW."""
+        reviewed = tracked.reviewed_datetime()
+        last = parsed.last_timestamp if parsed is not None else None
+        if reviewed is not None and (last is None or reviewed >= last):
+            return (SessionState.DONE, f"done — {detail}")
+        return (SessionState.NEEDS_INPUT, detail)
+
     if parsed is None:
         added = tracked.added_datetime()
         if added is not None and now - added.timestamp() < NEW_TERMINAL_GRACE_SECONDS:
-            return (SessionState.NEEDS_INPUT, "waiting on you — run `claude` in its terminal")
+            return needs_input("waiting on you — run `claude` in its terminal")
         return (SessionState.STOPPED, "transcript missing")
 
     if live and agent_state:
@@ -371,7 +390,7 @@ def derive_state(
         if status == "busy" and not _lingering_background_activity(parsed, pane_text, now):
             return (SessionState.WORKING, _working_detail(parsed))
         if status == "waiting":
-            return (SessionState.NEEDS_INPUT, str(agent_state.get("waitingFor") or "waiting on you"))
+            return needs_input(str(agent_state.get("waitingFor") or "waiting on you"))
         # status == "idle", or "busy" but only because a shell/monitor from
         # an already-finished turn is still going (see
         # _lingering_background_activity): not specific enough on its own
@@ -390,7 +409,7 @@ def derive_state(
                 detail = "waiting on you"
                 if parsed.pending_tool_use and parsed.pending_tool_name:
                     detail = f"permission: {parsed.pending_tool_name}"
-                return (SessionState.NEEDS_INPUT, detail)
+                return needs_input(detail)
             if pane_shows_working(pane_text):
                 return (SessionState.WORKING, _working_detail(parsed))
         conversation_ts = (
@@ -408,10 +427,10 @@ def derive_state(
         if parsed.last_record_role == "user":
             # A user message with no reply and no writes: waiting to start,
             # or the human is mid-conversation at the prompt.
-            return (SessionState.NEEDS_INPUT, "at the prompt")
+            return needs_input("at the prompt")
         if parsed.last_record_role == "":
             # A live session with no conversation yet: it's waiting for you.
-            return (SessionState.NEEDS_INPUT, "at the prompt")
+            return needs_input("at the prompt")
         return _finished_state(parsed, tracked, now, pane_text)
 
     # Not live in any tmux we can see. If the transcript is being written
