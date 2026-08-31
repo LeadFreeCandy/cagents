@@ -645,7 +645,15 @@ def map_tmux_sessions(
     result: dict[str, TmuxSession] = {}
     claimed: set[str] = set()
 
-    by_id = {t.cagents_session_id: t for t in tmux_sessions if t.cagents_session_id}
+    # Two live tmux sessions can carry one id: the helper shell `n` opens
+    # (tagged with the pending id) and the Claude session the `claude` typed
+    # into it then spawns under that same id. The newest is the real one —
+    # tmux lists alphabetically, so "last in the list wins" had the shell
+    # beating the Claude session whenever its name sorted later.
+    by_id: dict[str, TmuxSession] = {}
+    for tmux in sorted(tmux_sessions, key=lambda t: t.created):
+        if tmux.cagents_session_id:
+            by_id[tmux.cagents_session_id] = tmux
     for tracked, _parsed in tracked_views:
         tmux = by_id.get(tracked.session_id)
         if tmux is not None:
