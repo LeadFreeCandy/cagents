@@ -91,3 +91,23 @@ def test_default_store_path_respects_xdg(monkeypatch, tmp_path: Path):
     assert default_store_path() == tmp_path / "cagents" / "state.json"
     monkeypatch.delenv("XDG_DATA_HOME")
     assert str(default_store_path()).endswith(".local/share/cagents/state.json")
+
+
+def test_timestamps_with_a_trailing_z_parse(tmp_path: Path):
+    """datetime.fromisoformat only learned the trailing "Z" in 3.11, and
+    pyproject supports 3.10 — every Z-suffixed timestamp parsed as None and
+    read as "never happened". cagents writes "+00:00" itself, so this is
+    about foreign timestamps: a store migrated in from another supervisor,
+    or one hand-edited. Silent, and it made `d` look like it did nothing."""
+    from datetime import timezone
+
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-17T10:00:00+00:00")
+    store.mark_reviewed(SID1, "2026-08-17T12:00:00.000Z")
+    reviewed = store.sessions[SID1].reviewed_datetime()
+    assert reviewed is not None
+    assert reviewed.utcoffset() == timezone.utc.utcoffset(None)
+    assert reviewed.hour == 12
+    # Still None for genuine junk, rather than raising.
+    store.mark_reviewed(SID1, "not a timestamp")
+    assert store.sessions[SID1].reviewed_datetime() is None

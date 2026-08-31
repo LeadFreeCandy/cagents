@@ -740,3 +740,31 @@ class TestDoneDismissesNeedsYou:
         pane = "· Running… (esc to interrupt)"
         state, _ = derive_state(parsed, tracked, live=True, pane_text=pane, now=now)
         assert state == SessionState.WORKING
+
+
+def test_parse_cache_drops_transcripts_that_left_the_pass(claude_dir: Path, tmp_path: Path, now: float):
+    """The parse cache holds a whole ParsedSession per transcript. Archived
+    (and untracked) sessions `continue` before _find_session_file, so they
+    never reach _parse again and their entry would sit there for the
+    process's lifetime — the same sweep _env_cache already does per list."""
+    from cagents.sessions import SessionRegistry
+    from cagents.store import Store
+
+    TranscriptBuilder(SID1, "/proj/alpha").user("go").write(claude_dir, mtime=now - 100)
+    TranscriptBuilder(SID2, "/proj/beta").user("go").write(claude_dir, mtime=now - 100)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    store.track(SID2, "/proj/beta", "2026-08-18T09:00:00+00:00")
+    registry = SessionRegistry(
+        store, tmux=FakeTmuxEmpty(), claude_dir=claude_dir, agents_runner=lambda a: "[]"
+    )
+    registry.refresh(now=now)
+    assert len(registry._parse_cache) == 2
+
+    store.set_archived(SID2, True)
+    registry.refresh(now=now + 2)
+    assert len(registry._parse_cache) == 1
+
+    store.untrack(SID1)
+    registry.refresh(now=now + 4)
+    assert registry._parse_cache == {}

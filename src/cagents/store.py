@@ -25,6 +25,13 @@ STORE_VERSION = 1
 def _parse_iso(value: str) -> datetime | None:
     if not value:
         return None
+    # fromisoformat only learned the trailing "Z" in 3.11, and pyproject
+    # supports 3.10 — before this, any RFC 3339 timestamp written with a Z
+    # parsed as None and read as "never happened". cagents writes "+00:00"
+    # itself, so this is about foreign timestamps: Claude's own records, a
+    # store hand-edited or migrated in from another supervisor.
+    if value[-1:] in ("Z", "z"):
+        value = value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(value)
     except ValueError:

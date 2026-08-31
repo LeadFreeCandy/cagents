@@ -785,3 +785,75 @@ async def test_a_stale_viewer_sync_never_yanks_the_pane_back(world, claude_dir, 
         after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:session" in c]
         assert after == before, f"stale sync re-pointed the pane: {after[len(before):]}"
         assert app._viewer_target == app._viewer_command(beta)
+
+
+async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
+    world, claude_dir, now, tmp_path
+):
+    """The session pane was only half of the flip. _sync_terminal does three
+    tmux writes with round-trips between them, and it runs BEFORE the
+    viewer's own staleness check — so a click landing mid-round-trip could
+    still let a superseded sync re-point term-1 at the old session. That
+    respawn is right there in the log the fix was written from:
+
+        respawn-pane -k -t =work:term-1 … attach-session -t '=assistant-6--term'
+
+    The entry check can't catch this one: the sync is perfectly fresh when
+    it starts, and only goes stale partway through. Here the first tmux
+    write stands in for "a click landed", the way it does live."""
+    store, tmux, registry, _ = world  # SID1 = "alpha", at "/proj/alpha" (not real)
+    alpha_dir = tmp_path / "alpha-worktree"
+    alpha_dir.mkdir()
+    init_git_repo(alpha_dir)
+    TranscriptBuilder(SID1, str(alpha_dir)).ai_title("Alpha: fix auth").user(
+        "go", ts=ts_ago(1)
+    ).write(claude_dir, mtime=now - 1)
+    store.sessions[SID1].project_dir = str(alpha_dir)
+    tmux.sessions[0].pane_path = str(alpha_dir)
+
+    beta_dir = tmp_path / "beta-worktree"
+    beta_dir.mkdir()
+    init_git_repo(beta_dir)
+    TranscriptBuilder(SID2, str(beta_dir)).ai_title("Beta").user("go", ts=ts_ago(1)).write(
+        claude_dir, mtime=now - 1
+    )
+    store.track(SID2, str(beta_dir), "2026-08-18T09:05:00+00:00")
+    tmux.sessions.append(
+        TmuxSession(name="beta", created=now - 60, activity=now, attached=False,
+                    pane_pid=2, pane_path=str(beta_dir), socket="claude")
+    )
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.5)
+        app.action_open_terminal()  # term-1 open, pointed at alpha
+        await pilot.pause(0.3)
+        alpha = app.snapshot.by_id(SID1)
+        assert alpha is not None
+
+        # The click: it lands while the sync is inside _sync_terminal,
+        # between its round-trips — after which nothing this sync does to
+        # term-1 is wanted any more.
+        real_ensure = tmux.ensure_session_window
+
+        def ensure_then_click(*args, **kwargs):
+            real_ensure(*args, **kwargs)
+            app.selected_session_id = SID2
+
+        tmux.ensure_session_window = ensure_then_click
+        tmux.log.clear()
+        before = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
+        app.run_worker(
+            lambda: app._sync_viewer_blocking(alpha),
+            thread=True, group="viewer-sync", exclusive=True, exit_on_error=False,
+        )
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.2)
+        assert "ensure-view:alpha:term" not in tmux.log
+        after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
+        assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"

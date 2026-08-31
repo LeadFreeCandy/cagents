@@ -14,12 +14,6 @@ from enum import Enum
 from pathlib import Path
 
 from .agent_status import fetch_agent_states
-
-# `claude agents --json --all` boots the whole Claude CLI (~0.3s of a core
-# per call). It's a best-effort signal layered on top of the transcript and
-# pane text, so it gets its own, slower clock rather than riding every
-# refresh — which also runs on demand after most actions, not just the tick.
-AGENT_POLL_SECONDS = 10.0
 from .claude_data import (
     DiscoveredSession,
     ParsedSession,
@@ -37,6 +31,12 @@ from .tmuxctl import (
     pane_shows_prompt,
     pane_shows_working,
 )
+
+# `claude agents --json --all` boots the whole Claude CLI (~0.3s of a core
+# per call). It's a best-effort signal layered on top of the transcript and
+# pane text, so it gets its own, slower clock rather than riding every
+# refresh — which also runs on demand after most actions, not just the tick.
+AGENT_POLL_SECONDS = 10.0
 
 
 class SessionState(Enum):
@@ -802,12 +802,20 @@ class SessionRegistry:
         agent_states = self._agent_states
 
         pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
+        seen_paths: set[Path] = set()
         for tracked in list(self.store.sessions.values()):
             if tracked.archived:
                 continue  # hidden from views; still in the store's history
             path = self._find_session_file(tracked)
             parsed = self._parse(path) if path is not None else None
+            if path is not None:
+                seen_paths.add(path)
             pairs.append((tracked, parsed))
+        # Archived/untracked sessions never reach _parse again, so their
+        # entries would sit on a ParsedSession apiece for the process's
+        # lifetime — the same sweep _env_cache does per list.
+        for gone in self._parse_cache.keys() - seen_paths:
+            del self._parse_cache[gone]
 
         pane_cache: dict[str, str] = {}
 

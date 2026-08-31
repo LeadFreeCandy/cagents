@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -458,7 +459,7 @@ class CagentsApp(App):
             if stale():
                 return
             try:
-                self._sync_terminal(view)
+                self._sync_terminal(view, stale)
                 command = self._viewer_command(view)
                 if command == self._viewer_target or stale():
                     return
@@ -470,7 +471,7 @@ class CagentsApp(App):
                         self.notify, f"Viewer failed: {error}", severity="error"
                     )
 
-    def _sync_terminal(self, view: SessionView) -> None:
+    def _sync_terminal(self, view: SessionView, stale: Callable[[], bool] = lambda: False) -> None:
         """Keep the term-1 PANE pointed at the currently selected session
         even while you're not looking at that tab — mirrors _sync_viewer
         for the session tab. Without this, term-1 only ever updated when
@@ -488,10 +489,21 @@ class CagentsApp(App):
         directory, kind, _warning = resolve_terminal_directory(view.work_dir)
         if kind == "":
             return
+        # `stale` is _sync_viewer_blocking's: these are three tmux writes
+        # with round-trips between them, so the same click that made the
+        # caller stale can land here — and re-pointing term-1 at the old
+        # session is half of the flip that fix was for. Checked before
+        # each write, not once on entry.
         try:
             socket = view.tmux_socket or self.tmux.create_socket
+            if stale():
+                return
             self.tmux.ensure_session_window(view.tmux_name, "term", directory, socket=socket)
+            if stale():
+                return
             group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
+            if stale():
+                return
             self.sidecar.sync_terminal_tab(nested_attach_command(socket, group))
         except Exception:
             pass
