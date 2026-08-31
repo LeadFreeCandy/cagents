@@ -491,10 +491,10 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     ),
     (
         "capture_left",
-        "Bare arrows resize too",
-        "⌥←/⌥→ always resize the Claude pane (list ↔ small sidebar ↔ full "
-        "width). Turn this on to put plain ←/→ on it as well — at the cost "
-        "of not being able to move the cursor while typing in Claude.",
+        "Arrow layout keys",
+        "←/→ resize the Claude pane (list ↔ small sidebar ↔ full width) "
+        "while its composer is empty; type anything and they go back to "
+        "being cursor keys. ⌥←/⌥→ resize regardless.",
     ),
     (
         "dim_chat_preview",

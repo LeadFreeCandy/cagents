@@ -412,52 +412,110 @@ _FOCUS_HOOK_DIMMED = (
 # From the rail, both pass through to the app (kanban columns; → also
 # does WIDE -> SMALL by focusing the session).
 #
-# The size control only ever runs while the SESSION pane has focus, and it
-# is off by default, because bare arrows there are Claude's cursor keys.
+# Bare arrows drive it ONLY while Claude's composer is empty; the moment
+# there is text in it they are Claude's cursor keys again.
 #
-# A previous attempt made the bare arrows yield to a non-empty composer by
-# testing #{cursor_x} > 2 (Claude parks the cursor at column 2 of an empty
-# composer). That does not work, and the reason is worth keeping: column 2
-# means "start of a line", not "composer is empty". Arrow back to the
-# beginning of your own text and cursor_x is 2 with text right there; a
-# soft newline puts every new line at 2; so does each continuation row of
-# a wrapped line. In all of those the size control silently took the key
-# back — ← refused to go further and → zoomed the pane away. There is no
-# threshold that separates the two cases, because they are the same case.
-# Telling them apart needs the composer's CONTENT, which means capturing
-# and grepping the pane on every key repeat. Not worth it: ⌥ arrows below
-# do the job with no guessing at all.
-_LEFT_CYCLE = [
-    "bind", "-n", "Left",
-    "if", "-F", "#{==:#{pane_index},0}",
-    "send-keys Left",
+# Deciding "is the composer empty" is the whole difficulty. A first
+# attempt tested #{cursor_x} > 2, since an empty composer parks the cursor
+# at column 2. That is wrong: column 2 means "start of a line", not
+# "empty". Arrow back to the beginning of your own text and cursor_x is 2
+# with the text right there; so is every line of a multi-line composer,
+# and every continuation row of a wrapped one. The size control then took
+# the key back mid-sentence -- left refusing to move, right zooming the
+# list away.
+#
+# What actually separates them is the placeholder: an empty composer draws
+# a DIM hint after the prompt, and typed input carries no styling at all.
+# Keying on the dim attribute rather than the hint's wording survives the
+# suggestions rotating, and it comes through the container's nested attach
+# intact (verified end to end against a real session).
+#
+# Reading pane content costs a fork, so it happens only in the ambiguous
+# case: cursor_x > 2 already proves there is text (empty is always 2), so
+# holding an arrow to scrub along a line never shells out. Only a press at
+# column 2 does, and that is a boundary you cross once.
+#
+# COMPOSER_PROBE below owns the decision from there, rather than a third
+# level of nested tmux conditionals -- the quoting is unreadable and the
+# shell says what it means.
+EMPTY_COMPOSER_CURSOR_X = 2
+
+# argv: <key> <pane_id> <cursor_y> <zoomed_flag>. Exit status is ignored;
+# it performs the action itself. A missing/failing probe simply means the
+# key never arrives, so the fallback is written to send the key on ANY
+# doubt -- losing the size control on that press is harmless, swallowing a
+# keystroke while someone is typing is not.
+COMPOSER_PROBE = r"""#!/bin/sh
+# cagents: decide whether a bare arrow in the session pane belongs to the
+# size control (empty composer) or to Claude (anything typed).
+key=$1 pane=$2 row=$3 zoomed=$4
+esc=$(printf '\033')
+if tmux capture-pane -pe -t "$pane" -S "$row" -E "$row" 2>/dev/null \
+     | grep -q "$esc\[2m"; then
+  case "$key" in
+    Left)
+      if [ "$zoomed" = 1 ]; then
+        tmux resize-pane -Z -t :.1 && tmux select-pane -t :.1
+      else
+        tmux select-pane -t :.0
+      fi ;;
+    Right) tmux resize-pane -Z -t :.1 ;;
+    *)     tmux send-keys -t "$pane" "$key" ;;
+  esac
+else
+  tmux send-keys -t "$pane" "$key"
+fi
+"""
+
+
+def _gate(key: str, size_control: str, probe: str) -> str:
+    if not probe:
+        return size_control  # no probe: the old all-in behaviour
+    return (
+        f"if -F '#{{>:#{{cursor_x}},{EMPTY_COMPOSER_CURSOR_X}}}' "
+        f"'send-keys {key}' "
+        f"'run-shell \"{probe} {key} #{{pane_id}} #{{cursor_y}} "
+        f"#{{window_zoomed_flag}}\"'"
+    )
+
+
+_LEFT_SIZE = (
     "if -F '#{window_zoomed_flag}' "
     "'resize-pane -Z -t :.1 ; select-pane -t :.1' "
-    "'select-pane -t :.0'",
-]
+    "'select-pane -t :.0'"
+)
+_RIGHT_SIZE = "resize-pane -Z -t :.1"
 
-_RIGHT_CYCLE = [
-    "bind", "-n", "Right",
-    "if", "-F", "#{==:#{pane_index},0}",
-    "send-keys Right",
-    "if -F '#{window_zoomed_flag}' "
-    "'send-keys Right' "
-    "'resize-pane -Z -t :.1'",
-]
 
-# ⌥← / ⌥→ walk the same three states, from either pane, and never yield to
-# anything — which is what makes them the default way to resize now that
-# the bare arrows stay out of Claude's way. Nothing else binds Alt+arrow,
-# so there is no case where these are ambiguous.
+def _left_cycle(probe: str = "") -> list[str]:
+    return [
+        "bind", "-n", "Left",
+        "if", "-F", "#{==:#{pane_index},0}",
+        "send-keys Left",
+        _gate("Left", _LEFT_SIZE, probe),
+    ]
+
+
+def _right_cycle(probe: str = "") -> list[str]:
+    # Already zoomed is already max, so right passes through there too.
+    return [
+        "bind", "-n", "Right",
+        "if", "-F", "#{||:#{==:#{pane_index},0},#{window_zoomed_flag}}",
+        "send-keys Right",
+        _gate("Right", _RIGHT_SIZE, probe),
+    ]
+
+
+# Alt+arrows walk the same three states from either pane and never yield
+# to anything -- the guaranteed path while the composer has text, or if
+# the probe ever stops recognising Claude's placeholder.
 _ALT_LEFT_CYCLE = [
     "bind", "-n", "M-Left",
     "if", "-F", "#{window_zoomed_flag}",
     "resize-pane -Z -t :.1 ; select-pane -t :.1",   # HIDDEN -> SMALL
-    "select-pane -t :.0",                            # SMALL  -> WIDE (no-op at WIDE)
+    "select-pane -t :.0",                            # SMALL  -> WIDE
 ]
 
-# Zoomed is already max, so there is no else branch; otherwise WIDE ->
-# SMALL is a focus change and SMALL -> HIDDEN is the zoom.
 _ALT_RIGHT_CYCLE = [
     "bind", "-n", "M-Right",
     "if", "-F", "#{!=:#{window_zoomed_flag},1}",
@@ -479,7 +537,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ⌥←/→ size · C-d diff · C-t term "],
+        ["set", "-g", "status-right", " ←/→ size (⌥ any time) · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -491,23 +549,23 @@ def container_setup_commands() -> list[list[str]]:
     ]
 
 
-def left_capture_commands(enable: bool) -> list[list[str]]:
+def left_capture_commands(enable: bool, probe: str = "") -> list[list[str]]:
     """The setting governs the BARE arrows only. ⌥←/⌥→ stay bound either
     way: turning the capture off means "stop taking my cursor keys", not
     "take away the size control" — and the Alt pair never collided with
     anything to begin with."""
     if enable:
-        return [_LEFT_CYCLE, _RIGHT_CYCLE, _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE]
+        return [_left_cycle(probe), _right_cycle(probe), _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE]
     return [
         ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE,
     ]
 
 
-def apply_left_capture(enable: bool, runner=None) -> None:
+def apply_left_capture(enable: bool, runner=None, probe: str = "") -> None:
     """Set/unset the ← layout binding on the enclosing container server."""
     run = runner or _outer_tmux
-    for command in left_capture_commands(enable):
+    for command in left_capture_commands(enable, probe):
         try:
             run(command)
         except RuntimeError:

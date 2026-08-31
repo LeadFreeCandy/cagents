@@ -27,7 +27,7 @@ class TestSettings:
         store = Store.load(tmp_path / "state.json")
         assert store.get_setting("sidebar") is True
         assert store.get_setting("notifications") is False
-        assert store.get_setting("capture_left") is False  # bare arrows are Claude's; ⌥ arrows resize
+        assert store.get_setting("capture_left") is True
         assert store.get_setting("desktop_notifications") is True  # on by default; terminal-notifier is an install step
 
     def test_roundtrip_and_unknown_keys(self, tmp_path: Path):

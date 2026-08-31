@@ -234,7 +234,10 @@ class CagentsApp(App):
         _ctx._log(f"app started: {_ctx.version_stamp()} sidecar={self.sidecar is not None}")
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
-                apply_left_capture(bool(self.store.get_setting("capture_left")))
+                apply_left_capture(
+                    bool(self.store.get_setting("capture_left")),
+                    probe=self._write_composer_probe(),
+                )
                 apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
                 apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
             except Exception as error:
@@ -779,6 +782,22 @@ class CagentsApp(App):
 
     def _shim_dir(self) -> Path:
         return self.store.path.parent / "bin"
+
+    def _write_composer_probe(self) -> str:
+        """Write the arrow-key composer probe and return its path (empty on
+        failure, which drops the bare arrows back to the unconditional size
+        control rather than leaving a binding pointing at nothing)."""
+        from .sidecar import COMPOSER_PROBE
+
+        try:
+            path = self._shim_dir() / "composer-probe"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(COMPOSER_PROBE, "utf-8")
+            path.chmod(0o755)
+            return str(path)
+        except OSError as error:
+            self._dbg(f"composer probe not written: {error}")
+            return ""
 
     def _write_claude_shim(self) -> None:
         """`claude` typed in a cagents shell becomes a managed session: the
@@ -1950,7 +1969,7 @@ exec {real!r} "$@"
             return
         if key == "capture_left" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:
-                apply_left_capture(bool(value))
+                apply_left_capture(bool(value), probe=self._write_composer_probe())
             except Exception as error:
                 self.notify(f"Could not apply ← binding: {error}", severity="error")
             return

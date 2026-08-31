@@ -184,42 +184,56 @@ class TestCommands:
             ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         ]
 
-    def test_bare_arrows_never_guess_at_claude_s_composer(self):
-        """A previous version tried to hand the bare arrows back to Claude
-        whenever its composer had text, keyed on #{cursor_x} > 2 (an empty
-        composer parks the cursor at column 2). It does not work: column 2
-        means "start of a line", not "empty". Arrowing back to the start of
-        your own text, a soft newline, and every continuation row of a
-        wrapped line all sit at 2 with text present — and there the size
-        control silently took the key back, so ← would not go further and →
-        zoomed the pane away. Same case, no threshold separates them."""
-        for cmd in left_capture_commands(True) + left_capture_commands(False):
-            assert "cursor_x" not in " ".join(cmd)
+    def test_bare_arrows_gate_on_the_composer_via_the_probe(self):
+        """cursor_x is a FAST PATH, never the decision. An empty composer
+        parks the cursor at column 2, so >2 proves there is text and the
+        key goes straight to Claude with no fork — but 2 proves nothing
+        (start of a line, a multi-line composer, a wrapped row all sit
+        there with text present), so that case defers to the probe. The
+        earlier version treated 2 as "empty" and stole the key mid-line."""
+        left, right = (" ".join(c) for c in
+                       left_capture_commands(True, "/p/probe")[:2])
+        for key, binding in (("Left", left), ("Right", right)):
+            fast = f"if -F '#{{>:#{{cursor_x}},2}}' 'send-keys {key}'"
+            assert fast in binding  # >2 => text => Claude's, no shell out
+            assert "/p/probe" in binding and "run-shell" in binding
+            assert "#{pane_id}" in binding and "#{cursor_y}" in binding
+            # the size control is NOT reachable straight from cursor_x
+            assert binding.index("run-shell") > binding.index(fast)
+
+    def test_probe_keys_on_the_dim_placeholder_and_defaults_to_sending(self):
+        """The placeholder's wording rotates ("Try \"fix lint errors\"",
+        "Try \"how do I log an error?\""), so the probe keys on the dim
+        attribute an empty composer draws it with — typed input carries no
+        styling. Any doubt sends the key: losing the size control on one
+        press is harmless, swallowing a keystroke while typing is not."""
+        from cagents.sidecar import COMPOSER_PROBE
+
+        assert "capture-pane -pe" in COMPOSER_PROBE  # -e: keep the attributes
+        assert "[2m" in COMPOSER_PROBE  # SGR 2 = faint, i.e. the placeholder
+        # the grep failing (no placeholder / probe broken) must send the key
+        tail = COMPOSER_PROBE[COMPOSER_PROBE.index("else"):]
+        assert "send-keys" in tail
+
+    def test_no_probe_falls_back_to_the_unconditional_size_control(self):
+        for cmd in left_capture_commands(True):
+            assert "run-shell" not in " ".join(cmd)
 
     def test_alt_arrows_walk_all_three_sizes_from_either_pane(self):
-        """⌥←/⌥→ are the size control now that the bare arrows stay out of
-        Claude's way, so they have to cover the whole cycle unconditionally
-        — including WIDE -> SMALL, which is a focus change rather than a
-        resize, and which the first cut of these bindings skipped."""
+        """⌥←/⌥→ never yield — the guaranteed path while the composer has
+        text, or if the probe ever stops recognising Claude's placeholder.
+        They cover the whole cycle including WIDE -> SMALL, which is a
+        focus change rather than a resize and which the first cut missed."""
         for enabled in (True, False):
             alt = {c[2]: " ".join(c) for c in left_capture_commands(enabled)
                    if c[:3] in (["bind", "-n", "M-Left"], ["bind", "-n", "M-Right"])}
             assert set(alt) == {"M-Left", "M-Right"}, enabled
-            # never conditioned on what is in the pane
-            assert not any("cursor_x" in b for b in alt.values())
-            # ⌥←: HIDDEN -> SMALL (unzoom) then SMALL -> WIDE (focus rail)
+            for binding in alt.values():
+                assert "cursor_x" not in binding and "run-shell" not in binding
             assert "resize-pane -Z -t :.1 ; select-pane -t :.1" in alt["M-Left"]
             assert "select-pane -t :.0" in alt["M-Left"]
-            # ⌥→: WIDE -> SMALL (focus session) then SMALL -> HIDDEN (zoom)
             assert "select-pane -t :.1" in alt["M-Right"]
             assert "resize-pane -Z -t :.1" in alt["M-Right"]
-
-    def test_alt_arrows_stay_bound_when_bare_capture_is_off(self):
-        """Turning the setting off means "stop taking my cursor keys", not
-        "take away the size control" — and off is the default."""
-        off = [" ".join(c) for c in left_capture_commands(False)]
-        assert ["unbind", "-n", "Left"] in left_capture_commands(False)
-        assert any("M-Left" in c for c in off) and any("M-Right" in c for c in off)
 
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands

@@ -46,11 +46,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Toast notifications (bottom-left). Errors always show regardless.
     "notifications": False,
     # Left arrow drives the layout cycle / returns to the list.
-    # OFF by default: bare arrows in the session pane are Claude's cursor
-    # keys. ⌥←/⌥→ are the size control and are always bound; turning this
-    # ON additionally gives the bare arrows to the size control, at the
-    # documented cost of not being able to move the cursor while typing.
-    "capture_left": False,
+    # Bare arrows drive the pane size control, but only while Claude's
+    # composer is empty — type anything and they are cursor keys again.
+    # ⌥←/⌥→ resize unconditionally either way.
+    "capture_left": True,
     # Dim the chat pane a bit while the rail is at its wide/max size
     # (choosing a session) — a visual cue for "not what you're doing
     # right now", cleared once the session pane is focused again.
