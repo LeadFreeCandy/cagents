@@ -21,7 +21,7 @@ from textual.widget import Widget
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from .format import group_header, jira_header, kanban_card, session_row
+from .format import group_header, jira_header, kanban_card, row_widths, session_row
 from .sessions import SessionState, Snapshot, SessionView
 
 
@@ -45,6 +45,18 @@ def attention_sort_key(view) -> tuple:
 
 class SessionList(OptionList):
     """OptionList with vim keys and stable-selection rebuilds."""
+
+    # session_row builds its rows as Rich Text with no_wrap/overflow set, but
+    # Textual converts a Text prompt to Content (visual.py: from_rich_text)
+    # and takes wrapping from CSS instead — the Text's own flags are dropped.
+    # Without these rules every row wider than the list folded in half, so a
+    # one-line row became two: title on one, "finished, unreviewed" below it.
+    DEFAULT_CSS = """
+    SessionList {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    """
 
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
@@ -171,10 +183,13 @@ class GroupedView(BaseSessionView):
             groups.setdefault(view.project_dir, []).append(view)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
+        # One set of column widths for the whole list, so rows line up across
+        # groups too.
+        widths = row_widths(snapshot.views)
         header = self.query_one("#grouped-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:
-            header.update(jira_header())
+            header.update(jira_header(widths))
         for project_dir in sorted(groups):
             views = groups[project_dir]
             options.append(
@@ -185,7 +200,10 @@ class GroupedView(BaseSessionView):
             views.sort(key=attention_sort_key)
             for view in views:
                 options.append(
-                    Option(session_row(view, now, compact=compact, show_jira=show_jira), id=view.session_id)
+                    Option(
+                        session_row(view, now, compact=compact, show_jira=show_jira, widths=widths),
+                        id=view.session_id,
+                    )
                 )
         options = self._pending_options() + options
         if not options:
@@ -221,13 +239,16 @@ class QueueView(BaseSessionView):
         ordered = sorted(snapshot.views, key=attention_sort_key)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
+        widths = row_widths(ordered)
         header = self.query_one("#queue-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:
-            header.update(jira_header())
+            header.update(jira_header(widths))
         options = [
             Option(
-                session_row(view, now, show_project=not compact, compact=compact, show_jira=show_jira),
+                session_row(
+                    view, now, show_project=not compact, compact=compact, show_jira=show_jira, widths=widths
+                ),
                 id=view.session_id,
             )
             for view in ordered
@@ -272,6 +293,9 @@ class KanbanColumn(Widget):
         border-title-align: center;
     }
     KanbanColumn > SessionList { height: 1fr; }
+    /* Cards are deliberately multi-line (kanban_card) in a narrow column, so
+       they keep folding — ellipsising them would cut every title short. */
+    KanbanColumn > SessionList { text-wrap: wrap; }
     KanbanColumn.has-items { border: round $primary-darken-1; }
     """
 

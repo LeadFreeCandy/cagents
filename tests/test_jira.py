@@ -172,6 +172,17 @@ def test_session_row_jira_columns_align_with_header():
     assert plain_row[key_col : key_col + len("OWNER-721")] == "OWNER-721"
 
 
+def test_jira_header_follows_adaptive_row_widths():
+    from cagents.format import RowWidths
+
+    view = _view_with_jira("OWNER-721", "In Review", "Jamie Rivera")
+    widths = RowWidths(title=12, state=6)
+    row = session_row(view, show_jira=True, widths=widths)
+    header = jira_header(widths)
+    key_col = header.plain.index("JIRA")
+    assert row.plain[key_col : key_col + len("OWNER-721")] == "OWNER-721"
+
+
 def test_session_row_without_jira_key_shows_placeholder():
     view = _view_with_jira()
     row = session_row(view, show_jira=True)
