@@ -411,22 +411,68 @@ _FOCUS_HOOK_DIMMED = (
 #       HIDDEN -> passes through to Claude (already max)
 # From the rail, both pass through to the app (kanban columns; → also
 # does WIDE -> SMALL by focusing the session).
+#
+# ...UNLESS there is text in Claude's composer, in which case the arrow is
+# Claude's and the size control gets out of the way. Claude parks the
+# cursor at column 2 of the composer when it's empty — measured constant
+# across pane widths 72/111/171, since the box's left padding doesn't
+# change — so `cursor_x > 2` means "the human is editing a line, give them
+# their cursor keys back". This is the whole reason the size control used
+# to cost you arrow keys while typing (the `capture_left` trade-off).
+#
+# #{cursor_x} is a native tmux format, evaluated in-process: no shell, no
+# fork, nothing to parse out of Claude's UI. That matters on key-repeat —
+# holding ← to scrub a line fires this per repeat, and an if-shell here
+# would fork a process each time.
+#
+# On the other tabs it degrades the right way rather than needing a guard:
+# a shell prompt on term-1 puts the cursor well past column 2, so ← moves
+# the cursor in the shell (which is what you want); the diff tab's pager
+# behaves as it does today.
+EMPTY_COMPOSER_CURSOR_X = 2
+
+# "Not the size control" = the rail has focus, or the composer has text.
+# Both take the same action (pass the key through), so this stays one
+# `if` deep rather than a nested chain.
+_PASS_THROUGH = (
+    f"#{{||:#{{==:#{{pane_index}},0}},#{{>:#{{cursor_x}},{EMPTY_COMPOSER_CURSOR_X}}}}}"
+)
+
 _LEFT_CYCLE = [
     "bind", "-n", "Left",
-    "if", "-F", "#{==:#{pane_index},0}",
+    "if", "-F", _PASS_THROUGH,
     "send-keys Left",
     "if -F '#{window_zoomed_flag}' "
     "'resize-pane -Z -t :.1 ; select-pane -t :.1' "
     "'select-pane -t :.0'",
 ]
 
+# → also passes through when already zoomed (nothing left to grow), so all
+# three pass-through cases collapse into one condition and the else branch
+# is a bare zoom.
 _RIGHT_CYCLE = [
     "bind", "-n", "Right",
-    "if", "-F", "#{==:#{pane_index},0}",
+    "if", "-F", f"#{{||:{_PASS_THROUGH},#{{window_zoomed_flag}}}}",
     "send-keys Right",
-    "if -F '#{window_zoomed_flag}' "
-    "'send-keys Right' "
-    "'resize-pane -Z -t :.1'",
+    "resize-pane -Z -t :.1",
+]
+
+# The escape hatch: ⌥← / ⌥→ are the size control unconditionally, from
+# anywhere — including mid-sentence in the composer, where the bare arrows
+# now (correctly) belong to Claude. Bound whether or not the bare-arrow
+# capture is on, since they collide with nothing.
+_ALT_LEFT_CYCLE = [
+    "bind", "-n", "M-Left",
+    "if", "-F", "#{window_zoomed_flag}",
+    "resize-pane -Z -t :.1 ; select-pane -t :.1",
+    "select-pane -t :.0",
+]
+
+# No else branch: zoomed is already max, so there is nothing to grow.
+_ALT_RIGHT_CYCLE = [
+    "bind", "-n", "M-Right",
+    "if", "-F", "#{!=:#{window_zoomed_flag},1}",
+    "resize-pane -Z -t :.1",
 ]
 
 
@@ -442,7 +488,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size · C-d diff tab · C-t terminal tab "],
+        ["set", "-g", "status-right", " ←/→ size (⌥ always) · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -455,9 +501,16 @@ def container_setup_commands() -> list[list[str]]:
 
 
 def left_capture_commands(enable: bool) -> list[list[str]]:
+    """The setting governs the BARE arrows only. ⌥←/⌥→ stay bound either
+    way: turning the capture off means "stop taking my cursor keys", not
+    "take away the size control" — and the Alt pair never collided with
+    anything to begin with."""
     if enable:
-        return [_LEFT_CYCLE, _RIGHT_CYCLE]
-    return [["unbind", "-n", "Left"], ["unbind", "-n", "Right"]]
+        return [_LEFT_CYCLE, _RIGHT_CYCLE, _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE]
+    return [
+        ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
+        _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE,
+    ]
 
 
 def apply_left_capture(enable: bool, runner=None) -> None:

@@ -180,9 +180,40 @@ class TestCommands:
         assert right.startswith("bind -n Right")
         assert "send-keys Right" in right
         assert "resize-pane -Z -t :.1" in right
-        assert left_capture_commands(False) == [
+        assert left_capture_commands(False)[:2] == [
             ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         ]
+
+    def test_bare_arrows_yield_to_a_non_empty_composer(self):
+        """The size control used to cost you your cursor keys whenever it
+        was on (the old capture_left trade-off). Claude parks the cursor at
+        column 2 of an empty composer — constant across pane widths — so
+        anything past that means the human is editing a line and the arrow
+        is theirs. #{cursor_x} is a native format: no shell, no fork, which
+        matters because holding ← to scrub fires this per key repeat."""
+        left, right = (" ".join(c) for c in left_capture_commands(True)[:2])
+        for binding in (left, right):
+            # pass through when the rail has focus OR the composer has text
+            assert "#{>:#{cursor_x},2}" in binding
+            assert "#{==:#{pane_index},0}" in binding
+            assert "#{||:" in binding
+        # ...and the size control is still what happens otherwise
+        assert "select-pane -t :.0" in left
+        assert "resize-pane -Z -t :.1" in right
+
+    def test_alt_arrows_resize_unconditionally_from_anywhere(self):
+        """The escape hatch: mid-sentence the bare arrows belong to Claude,
+        so there has to be a way to resize that never yields. Bound whether
+        or not the bare-arrow capture is on — turning that off means "stop
+        taking my cursor keys", not "take away the size control"."""
+        for enabled in (True, False):
+            alt = [" ".join(c) for c in left_capture_commands(enabled)
+                   if "M-Left" in c or "M-Right" in c]
+            assert len(alt) == 2, enabled
+            for binding in alt:
+                assert "cursor_x" not in binding  # never yields
+                assert "pane_index" not in binding  # works from either pane
+            assert any("resize-pane -Z -t :.1" in b for b in alt)
 
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands
