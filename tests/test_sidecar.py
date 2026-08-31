@@ -184,36 +184,42 @@ class TestCommands:
             ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         ]
 
-    def test_bare_arrows_yield_to_a_non_empty_composer(self):
-        """The size control used to cost you your cursor keys whenever it
-        was on (the old capture_left trade-off). Claude parks the cursor at
-        column 2 of an empty composer — constant across pane widths — so
-        anything past that means the human is editing a line and the arrow
-        is theirs. #{cursor_x} is a native format: no shell, no fork, which
-        matters because holding ← to scrub fires this per key repeat."""
-        left, right = (" ".join(c) for c in left_capture_commands(True)[:2])
-        for binding in (left, right):
-            # pass through when the rail has focus OR the composer has text
-            assert "#{>:#{cursor_x},2}" in binding
-            assert "#{==:#{pane_index},0}" in binding
-            assert "#{||:" in binding
-        # ...and the size control is still what happens otherwise
-        assert "select-pane -t :.0" in left
-        assert "resize-pane -Z -t :.1" in right
+    def test_bare_arrows_never_guess_at_claude_s_composer(self):
+        """A previous version tried to hand the bare arrows back to Claude
+        whenever its composer had text, keyed on #{cursor_x} > 2 (an empty
+        composer parks the cursor at column 2). It does not work: column 2
+        means "start of a line", not "empty". Arrowing back to the start of
+        your own text, a soft newline, and every continuation row of a
+        wrapped line all sit at 2 with text present — and there the size
+        control silently took the key back, so ← would not go further and →
+        zoomed the pane away. Same case, no threshold separates them."""
+        for cmd in left_capture_commands(True) + left_capture_commands(False):
+            assert "cursor_x" not in " ".join(cmd)
 
-    def test_alt_arrows_resize_unconditionally_from_anywhere(self):
-        """The escape hatch: mid-sentence the bare arrows belong to Claude,
-        so there has to be a way to resize that never yields. Bound whether
-        or not the bare-arrow capture is on — turning that off means "stop
-        taking my cursor keys", not "take away the size control"."""
+    def test_alt_arrows_walk_all_three_sizes_from_either_pane(self):
+        """⌥←/⌥→ are the size control now that the bare arrows stay out of
+        Claude's way, so they have to cover the whole cycle unconditionally
+        — including WIDE -> SMALL, which is a focus change rather than a
+        resize, and which the first cut of these bindings skipped."""
         for enabled in (True, False):
-            alt = [" ".join(c) for c in left_capture_commands(enabled)
-                   if "M-Left" in c or "M-Right" in c]
-            assert len(alt) == 2, enabled
-            for binding in alt:
-                assert "cursor_x" not in binding  # never yields
-                assert "pane_index" not in binding  # works from either pane
-            assert any("resize-pane -Z -t :.1" in b for b in alt)
+            alt = {c[2]: " ".join(c) for c in left_capture_commands(enabled)
+                   if c[:3] in (["bind", "-n", "M-Left"], ["bind", "-n", "M-Right"])}
+            assert set(alt) == {"M-Left", "M-Right"}, enabled
+            # never conditioned on what is in the pane
+            assert not any("cursor_x" in b for b in alt.values())
+            # ⌥←: HIDDEN -> SMALL (unzoom) then SMALL -> WIDE (focus rail)
+            assert "resize-pane -Z -t :.1 ; select-pane -t :.1" in alt["M-Left"]
+            assert "select-pane -t :.0" in alt["M-Left"]
+            # ⌥→: WIDE -> SMALL (focus session) then SMALL -> HIDDEN (zoom)
+            assert "select-pane -t :.1" in alt["M-Right"]
+            assert "resize-pane -Z -t :.1" in alt["M-Right"]
+
+    def test_alt_arrows_stay_bound_when_bare_capture_is_off(self):
+        """Turning the setting off means "stop taking my cursor keys", not
+        "take away the size control" — and off is the default."""
+        off = [" ".join(c) for c in left_capture_commands(False)]
+        assert ["unbind", "-n", "Left"] in left_capture_commands(False)
+        assert any("M-Left" in c for c in off) and any("M-Right" in c for c in off)
 
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands

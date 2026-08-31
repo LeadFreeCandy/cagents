@@ -412,67 +412,58 @@ _FOCUS_HOOK_DIMMED = (
 # From the rail, both pass through to the app (kanban columns; → also
 # does WIDE -> SMALL by focusing the session).
 #
-# ...UNLESS there is text in Claude's composer, in which case the arrow is
-# Claude's and the size control gets out of the way. Claude parks the
-# cursor at column 2 of the composer when it's empty — measured constant
-# across pane widths 72/111/171, since the box's left padding doesn't
-# change — so `cursor_x > 2` means "the human is editing a line, give them
-# their cursor keys back". This is the whole reason the size control used
-# to cost you arrow keys while typing (the `capture_left` trade-off).
+# The size control only ever runs while the SESSION pane has focus, and it
+# is off by default, because bare arrows there are Claude's cursor keys.
 #
-# #{cursor_x} is a native tmux format, evaluated in-process: no shell, no
-# fork, nothing to parse out of Claude's UI. That matters on key-repeat —
-# holding ← to scrub a line fires this per repeat, and an if-shell here
-# would fork a process each time.
-#
-# On the other tabs it degrades the right way rather than needing a guard:
-# a shell prompt on term-1 puts the cursor well past column 2, so ← moves
-# the cursor in the shell (which is what you want); the diff tab's pager
-# behaves as it does today.
-EMPTY_COMPOSER_CURSOR_X = 2
-
-# "Not the size control" = the rail has focus, or the composer has text.
-# Both take the same action (pass the key through), so this stays one
-# `if` deep rather than a nested chain.
-_PASS_THROUGH = (
-    f"#{{||:#{{==:#{{pane_index}},0}},#{{>:#{{cursor_x}},{EMPTY_COMPOSER_CURSOR_X}}}}}"
-)
-
+# A previous attempt made the bare arrows yield to a non-empty composer by
+# testing #{cursor_x} > 2 (Claude parks the cursor at column 2 of an empty
+# composer). That does not work, and the reason is worth keeping: column 2
+# means "start of a line", not "composer is empty". Arrow back to the
+# beginning of your own text and cursor_x is 2 with text right there; a
+# soft newline puts every new line at 2; so does each continuation row of
+# a wrapped line. In all of those the size control silently took the key
+# back — ← refused to go further and → zoomed the pane away. There is no
+# threshold that separates the two cases, because they are the same case.
+# Telling them apart needs the composer's CONTENT, which means capturing
+# and grepping the pane on every key repeat. Not worth it: ⌥ arrows below
+# do the job with no guessing at all.
 _LEFT_CYCLE = [
     "bind", "-n", "Left",
-    "if", "-F", _PASS_THROUGH,
+    "if", "-F", "#{==:#{pane_index},0}",
     "send-keys Left",
     "if -F '#{window_zoomed_flag}' "
     "'resize-pane -Z -t :.1 ; select-pane -t :.1' "
     "'select-pane -t :.0'",
 ]
 
-# → also passes through when already zoomed (nothing left to grow), so all
-# three pass-through cases collapse into one condition and the else branch
-# is a bare zoom.
 _RIGHT_CYCLE = [
     "bind", "-n", "Right",
-    "if", "-F", f"#{{||:{_PASS_THROUGH},#{{window_zoomed_flag}}}}",
+    "if", "-F", "#{==:#{pane_index},0}",
     "send-keys Right",
-    "resize-pane -Z -t :.1",
+    "if -F '#{window_zoomed_flag}' "
+    "'send-keys Right' "
+    "'resize-pane -Z -t :.1'",
 ]
 
-# The escape hatch: ⌥← / ⌥→ are the size control unconditionally, from
-# anywhere — including mid-sentence in the composer, where the bare arrows
-# now (correctly) belong to Claude. Bound whether or not the bare-arrow
-# capture is on, since they collide with nothing.
+# ⌥← / ⌥→ walk the same three states, from either pane, and never yield to
+# anything — which is what makes them the default way to resize now that
+# the bare arrows stay out of Claude's way. Nothing else binds Alt+arrow,
+# so there is no case where these are ambiguous.
 _ALT_LEFT_CYCLE = [
     "bind", "-n", "M-Left",
     "if", "-F", "#{window_zoomed_flag}",
-    "resize-pane -Z -t :.1 ; select-pane -t :.1",
-    "select-pane -t :.0",
+    "resize-pane -Z -t :.1 ; select-pane -t :.1",   # HIDDEN -> SMALL
+    "select-pane -t :.0",                            # SMALL  -> WIDE (no-op at WIDE)
 ]
 
-# No else branch: zoomed is already max, so there is nothing to grow.
+# Zoomed is already max, so there is no else branch; otherwise WIDE ->
+# SMALL is a focus change and SMALL -> HIDDEN is the zoom.
 _ALT_RIGHT_CYCLE = [
     "bind", "-n", "M-Right",
     "if", "-F", "#{!=:#{window_zoomed_flag},1}",
-    "resize-pane -Z -t :.1",
+    "if -F '#{==:#{pane_index},0}' "
+    "'select-pane -t :.1' "
+    "'resize-pane -Z -t :.1'",
 ]
 
 
@@ -488,7 +479,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size (⌥ always) · C-d diff · C-t term "],
+        ["set", "-g", "status-right", " ⌥←/→ size · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
