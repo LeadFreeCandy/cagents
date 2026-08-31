@@ -664,7 +664,15 @@ def map_tmux_sessions(
 
     def match_pass(dir_matches, verify_content: bool) -> None:
         for tmux in sorted(tmux_sessions, key=lambda t: t.created, reverse=True):
-            if tmux.key in claimed:
+            # A '--term' view shares its leader's directory and carries no
+            # id, so it looks like an unclaimed shell in exactly the right
+            # place — and it's always the newest. Mapping a session onto one
+            # made the app open a terminal for THAT, spawning '--term--term'
+            # for the next refresh to grab: a runaway chain. Views host nothing.
+            # And a session tagged with an id belongs to that id whether or
+            # not tier 1 matched it (untracked, or a pending `n` shell that
+            # cd'd into a project) — never a home for anyone else.
+            if tmux.key in claimed or tmux.is_view or tmux.cagents_session_id:
                 continue
             candidates = []
             for tracked, parsed in tracked_views:
