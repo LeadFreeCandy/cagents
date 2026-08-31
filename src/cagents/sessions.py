@@ -14,6 +14,12 @@ from enum import Enum
 from pathlib import Path
 
 from .agent_status import fetch_agent_states
+
+# `claude agents --json --all` boots the whole Claude CLI (~0.3s of a core
+# per call). It's a best-effort signal layered on top of the transcript and
+# pane text, so it gets its own, slower clock rather than riding every
+# refresh — which also runs on demand after most actions, not just the tick.
+AGENT_POLL_SECONDS = 10.0
 from .claude_data import (
     DiscoveredSession,
     ParsedSession,
@@ -757,25 +763,31 @@ class SessionRegistry:
         # that used it miss the canonical path forever — without a cache
         # that's a full ~/.claude/projects scan on every refresh.
         self._file_cache: dict[str, Path] = {}
+        # Last `claude agents` answer and when it was taken (AGENT_POLL_SECONDS).
+        self._agent_states: dict[str, dict] = {}
+        self._agent_states_at: float = float("-inf")
+        # Parsed transcripts keyed by path -> ((mtime_ns, size), parsed).
+        # Almost none of them change between ticks; re-reading and
+        # re-parsing every one (head + tail, up to ~48KB of JSON each)
+        # every 2s was most of an idle refresh's CPU.
+        self._parse_cache: dict[Path, tuple[tuple[int, int], ParsedSession]] = {}
 
     def refresh(self, now: float | None = None) -> Snapshot:
         import time
 
         now = time.time() if now is None else now
         tmux_sessions = self.tmux.list_sessions()
-        agent_states = fetch_agent_states(runner=self.agents_runner)
+        if now - self._agent_states_at >= AGENT_POLL_SECONDS:
+            self._agent_states = fetch_agent_states(runner=self.agents_runner)
+            self._agent_states_at = now
+        agent_states = self._agent_states
 
         pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
         for tracked in list(self.store.sessions.values()):
             if tracked.archived:
                 continue  # hidden from views; still in the store's history
             path = self._find_session_file(tracked)
-            parsed: ParsedSession | None = None
-            if path is not None:
-                try:
-                    parsed = parse_session_file(path)
-                except OSError:
-                    parsed = None
+            parsed = self._parse(path) if path is not None else None
             pairs.append((tracked, parsed))
 
         pane_cache: dict[str, str] = {}
@@ -884,6 +896,25 @@ class SessionRegistry:
             return data if isinstance(data, dict) else None
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _parse(self, path: Path) -> ParsedSession | None:
+        """parse_session_file, reused while the file's (mtime, size) holds."""
+        try:
+            stat = path.stat()
+        except OSError:
+            self._parse_cache.pop(path, None)
+            return None
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._parse_cache.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            parsed = parse_session_file(path)
+        except OSError:
+            self._parse_cache.pop(path, None)
+            return None
+        self._parse_cache[path] = (stamp, parsed)
+        return parsed
 
     def _find_session_file(self, tracked: TrackedSession) -> Path | None:
         path = session_file_path(self.claude_dir, tracked.project_dir, tracked.session_id)

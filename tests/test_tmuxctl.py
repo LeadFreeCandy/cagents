@@ -199,3 +199,42 @@ def _proc(returncode: int, stdout: str):
     proc.stdout = stdout
     proc.stderr = ""
     return proc
+
+
+def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypatch):
+    """The CAGENTS_SESSION_ID env var is one `tmux show-environment`
+    subprocess per session per list — 28 spawns every 2s tick on a busy
+    socket, for a value that never changes while the session lives. Cache it
+    by (socket, name, created); a killed-and-recreated session (same name,
+    new created stamp) is looked up afresh."""
+    import subprocess
+
+    from cagents.tmuxctl import _FIELD_SEP, _LIST_FORMAT, TmuxClient
+
+    client = TmuxClient(sockets=("claude",), create_socket="claude")
+    fields = _LIST_FORMAT.count(_FIELD_SEP) + 1  # name, created, activity, attached, pid, path[, ...]
+    listing = [
+        ["alpha", "100", "100", "0", "11", "/proj/alpha"],
+        ["beta", "200", "200", "0", "12", "/proj/beta"],
+    ]
+    env_calls: list[str] = []
+
+    def fake_run(socket, *args, timeout=5.0):
+        if args[0] == "list-panes":
+            rows = [(row + [""] * fields)[:fields] for row in listing]
+            out = "\n".join(_FIELD_SEP.join(row) for row in rows) + "\n"
+            return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+        if args[0] == "show-environment":
+            env_calls.append(args[2])
+            return subprocess.CompletedProcess(args, 0, stdout=f"CAGENTS_SESSION_ID=id-for-{args[2]}\n", stderr="")
+        raise AssertionError(f"unexpected tmux call {args}")
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    first = client.list_sessions()
+    assert {s.name: s.cagents_session_id for s in first} == {"alpha": "id-for-=alpha", "beta": "id-for-=beta"}
+    assert len(env_calls) == 2
+    client.list_sessions()
+    assert len(env_calls) == 2, "unchanged sessions were re-queried"
+    listing[1][1] = "300"  # beta was killed and recreated under the same name
+    client.list_sessions()
+    assert env_calls[2:] == ["=beta"]
