@@ -171,6 +171,10 @@ class SessionView:
     # Lineage, resolved against the snapshot (ids of *visible* sessions):
     child_ids: list[str] = field(default_factory=list)
     sibling_ids: list[str] = field(default_factory=list)
+    # Shown while a child has no transcript of its own yet (a fork writes
+    # none until its first message). Cleared by its own title the moment
+    # one exists, so it never freezes the name the way a label would.
+    inherited_title: str = ""
     # When this session last actually *changed* state (not last_activity,
     # which ticks forward on every token while genuinely WORKING) — sort
     # keys use this instead, so a session's position among same-rank peers
@@ -212,6 +216,8 @@ class SessionView:
             return self.tracked.label
         if self.parsed and self.parsed.title:
             return self.parsed.title
+        if self.inherited_title:
+            return self.inherited_title
         return self.session_id[:8]
 
     @property
@@ -380,6 +386,14 @@ def derive_state(
         return (SessionState.NEEDS_INPUT, detail)
 
     if parsed is None:
+        if live and tracked.relation == "fork":
+            # `claude --resume X --fork-session` does NOT write the forked
+            # transcript until its first message is submitted (measured: no
+            # file at all after 20s of sitting there). The CLI is up and
+            # waiting for you, so this is neither the `n` case below nor
+            # "something went wrong" — and without this a fork drifts to
+            # STOPPED/"transcript missing" while plainly alive on screen.
+            return needs_input("forked — type to begin")
         added = tracked.added_datetime()
         if added is not None and now - added.timestamp() < NEW_TERMINAL_GRACE_SECONDS:
             return needs_input("waiting on you — run `claude` in its terminal")
@@ -864,6 +878,7 @@ class SessionRegistry:
         for view in views:
             if view.tracked.parent_id:
                 children.setdefault(view.tracked.parent_id, []).append(view.session_id)
+        by_id = {view.session_id: view for view in views}
         for view in views:
             view.child_ids = children.get(view.session_id, [])
             if view.tracked.parent_id:
@@ -871,6 +886,14 @@ class SessionRegistry:
                     sid for sid in children.get(view.tracked.parent_id, [])
                     if sid != view.session_id
                 ]
+                # A fork has no transcript until its first message, so it
+                # would otherwise sit in the list as a bare id. Borrow the
+                # parent's name for that window — it IS that conversation
+                # until it diverges, and a real label here would outrank
+                # the transcript forever.
+                parent = by_id.get(view.tracked.parent_id)
+                if view.parsed is None and parent is not None:
+                    view.inherited_title = parent.title
 
         # Attention ranks: the user can reorder state priority in settings.
         # With time_ordered_queue on, every state ranks equal, so ordering

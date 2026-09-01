@@ -47,26 +47,50 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
 
 
 async def test_fork_flow(world, monkeypatch):
+    """f branches the conversation immediately — no prompt modal. A fork IS
+    the conversation up to that point; what you do with it is the first
+    thing you type in the session itself. Handoff is the one that has to
+    ask, because it needs to know what to summarise for."""
     app, store, tmux = world
     monkeypatch.setattr(time, "sleep", lambda s: None)
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         await pilot.press("f")
-        await pilot.pause()
-        await pilot.press(*"try the async approach")
-        await pilot.press("enter")
         await pilot.pause(0.4)
         directory, args, new_id = tmux.created[-1]
         assert args[0:3] == ["--resume", SID1, "--fork-session"]
         assert args[3] == "--session-id" and args[4] == new_id
         assert "--settings" in args  # state hooks ride along
         child = store.sessions[new_id]
-        assert child.label == "try the async approach"
         assert child.parent_id == SID1 and child.relation == "fork"
         assert SID1 in store.sessions  # original untouched
-        # the typed prompt was delivered into the new session on the private socket
-        assert tmux.sent and tmux.sent[0][1] == "try the async approach"
-        assert tmux.sent[0][2] == "cagents-sessions"
+        # No prompt was asked for, so none is delivered...
+        assert tmux.sent == []
+        # ...and no label is set: a label would outrank the transcript title
+        # forever, freezing the fork's name after it diverges. Until the
+        # fork writes a transcript of its own it borrows the parent's name
+        # rather than showing a bare id.
+        assert child.label == ""
+        forked = app.snapshot.by_id(new_id)
+        assert forked.parsed is None  # claude writes none until first message
+        assert forked.title == app.snapshot.by_id(SID1).title
+        assert forked.state_detail == "forked — type to begin"
+
+
+async def test_fork_needs_no_typing_and_is_undoable(world):
+    """The modal used to double as the confirm step; without it, z is what
+    backs a fork out (untrack only — Claude's data is never touched)."""
+    app, store, tmux = world
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        before = set(store.sessions)
+        await pilot.press("f")
+        await pilot.pause(0.4)
+        new_id = (set(store.sessions) - before).pop()
+        await pilot.press("z")
+        await pilot.pause(0.3)
+        assert new_id not in store.sessions
+        assert SID1 in store.sessions
 
 
 # -------------------------------------------------------------- handoff ---

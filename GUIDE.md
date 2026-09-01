@@ -88,7 +88,7 @@ popup diff and a split shell.
 | `enter` | the session tab, focused (resuming the session first if dead, on cagents' private socket) |
 | `d` | done / un-done |
 | `w` | waiting on external (PR watch) |
-| `f` | fork: new session continuing this conversation; you type its first prompt; named after it |
+| `f` | fork: branch this conversation into a new session and open it — no prompt asked for; starts under the source's title until it diverges |
 | `h` | handoff: the old session writes a spec (on a throwaway fork), a fresh session starts on it, the old one is marked done (`d` restores) |
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |

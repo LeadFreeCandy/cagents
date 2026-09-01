@@ -198,22 +198,20 @@ class TestCommands:
             assert fast in binding  # >2 => text => Claude's, no shell out
             assert "/p/probe" in binding and "run-shell" in binding
             assert "#{pane_id}" in binding and "#{cursor_y}" in binding
+            assert "#{cursor_x}" in binding  # the probe re-checks the column
             # the size control is NOT reachable straight from cursor_x
             assert binding.index("run-shell") > binding.index(fast)
 
-    def test_probe_keys_on_the_dim_placeholder_and_defaults_to_sending(self):
-        """The placeholder's wording rotates ("Try \"fix lint errors\"",
-        "Try \"how do I log an error?\""), so the probe keys on the dim
-        attribute an empty composer draws it with — typed input carries no
-        styling. Any doubt sends the key: losing the size control on one
-        press is harmless, swallowing a keystroke while typing is not."""
-        from cagents.sidecar import COMPOSER_PROBE
+    def test_probe_script_is_the_module_under_a_shebang(self):
+        """The probe is written out as a copy of composer_probe.py so the
+        rule it applies is the one the tests exercise — same file, not a
+        second implementation embedded in a string."""
+        from cagents.sidecar import composer_probe_source
 
-        assert "capture-pane -pe" in COMPOSER_PROBE  # -e: keep the attributes
-        assert "[2m" in COMPOSER_PROBE  # SGR 2 = faint, i.e. the placeholder
-        # the grep failing (no placeholder / probe broken) must send the key
-        tail = COMPOSER_PROBE[COMPOSER_PROBE.index("else"):]
-        assert "send-keys" in tail
+        source = composer_probe_source("/x/python3")
+        assert source.startswith("#!/x/python3\n")
+        assert "def composer_is_empty(" in source
+        assert "from ." not in source  # a copy has no package to import from
 
     def test_no_probe_falls_back_to_the_unconditional_size_control(self):
         for cmd in left_capture_commands(True):

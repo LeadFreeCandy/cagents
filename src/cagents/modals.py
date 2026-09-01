@@ -328,7 +328,7 @@ HELP_TEXT = """\
                 merge marks it done automatically
   s             snooze / un-snooze for a set time (settings: default 1h) —
                 purely time-based, new activity doesn't wake it early
-  f             fork — new session from this one, prompt typed by you
+  f             fork — branch this conversation into a new session
   h             handoff — old session writes a spec, new one starts on it,
                 old is marked done (d restores)
   *             related — visit this session's forks/handoffs/parent

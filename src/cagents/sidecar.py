@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 COLLAPSED_WIDTH = 34
@@ -413,59 +414,32 @@ _FOCUS_HOOK_DIMMED = (
 # does WIDE -> SMALL by focusing the session).
 #
 # Bare arrows drive it ONLY while Claude's composer is empty; the moment
-# there is text in it they are Claude's cursor keys again.
-#
-# Deciding "is the composer empty" is the whole difficulty. A first
-# attempt tested #{cursor_x} > 2, since an empty composer parks the cursor
-# at column 2. That is wrong: column 2 means "start of a line", not
-# "empty". Arrow back to the beginning of your own text and cursor_x is 2
-# with the text right there; so is every line of a multi-line composer,
-# and every continuation row of a wrapped one. The size control then took
-# the key back mid-sentence -- left refusing to move, right zooming the
-# list away.
-#
-# What actually separates them is the placeholder: an empty composer draws
-# a DIM hint after the prompt, and typed input carries no styling at all.
-# Keying on the dim attribute rather than the hint's wording survives the
-# suggestions rotating, and it comes through the container's nested attach
-# intact (verified end to end against a real session).
+# there is text in it they are Claude's cursor keys again. Getting that
+# wrong is not a small miss in either direction: take the key while
+# someone is typing and their cursor stops moving, hand it back when the
+# composer is empty and Claude opens ITS OWN ← view (the agents list) on
+# top of the session.
 #
 # Reading pane content costs a fork, so it happens only in the ambiguous
-# case: cursor_x > 2 already proves there is text (empty is always 2), so
-# holding an arrow to scrub along a line never shells out. Only a press at
-# column 2 does, and that is a boundary you cross once.
+# case: an empty composer parks the cursor right after the two-cell
+# prompt, so cursor_x > 2 already proves there is text and holding an
+# arrow to scrub along a line never shells out. Only a press at column 2
+# does, and that is a boundary you cross once.
 #
-# COMPOSER_PROBE below owns the decision from there, rather than a third
-# level of nested tmux conditionals -- the quoting is unreadable and the
-# shell says what it means.
+# composer_probe.py owns the decision from there -- what it reads and why
+# is documented in that module, and its rule is unit-tested against real
+# captures rather than a third level of nested tmux conditionals.
 EMPTY_COMPOSER_CURSOR_X = 2
 
-# argv: <key> <pane_id> <cursor_y> <zoomed_flag>. Exit status is ignored;
-# it performs the action itself. A missing/failing probe simply means the
-# key never arrives, so the fallback is written to send the key on ANY
-# doubt -- losing the size control on that press is harmless, swallowing a
-# keystroke while someone is typing is not.
-COMPOSER_PROBE = r"""#!/bin/sh
-# cagents: decide whether a bare arrow in the session pane belongs to the
-# size control (empty composer) or to Claude (anything typed).
-key=$1 pane=$2 row=$3 zoomed=$4
-esc=$(printf '\033')
-if tmux capture-pane -pe -t "$pane" -S "$row" -E "$row" 2>/dev/null \
-     | grep -q "$esc\[2m"; then
-  case "$key" in
-    Left)
-      if [ "$zoomed" = 1 ]; then
-        tmux resize-pane -Z -t :.1 && tmux select-pane -t :.1
-      else
-        tmux select-pane -t :.0
-      fi ;;
-    Right) tmux resize-pane -Z -t :.1 ;;
-    *)     tmux send-keys -t "$pane" "$key" ;;
-  esac
-else
-  tmux send-keys -t "$pane" "$key"
-fi
-"""
+
+def composer_probe_source(interpreter: str = "") -> str:
+    """The probe script: the composer_probe module verbatim, under a
+    shebang for the interpreter cagents itself is running on (it is a
+    plain script with no intra-package imports, so a copy runs anywhere)."""
+    source = (Path(__file__).parent / "composer_probe.py").read_text("utf-8")
+    if source.startswith("#!"):
+        source = source.split("\n", 1)[1]
+    return f"#!{interpreter or sys.executable}\n{source}"
 
 
 def _gate(key: str, size_control: str, probe: str) -> str:
@@ -475,7 +449,7 @@ def _gate(key: str, size_control: str, probe: str) -> str:
         f"if -F '#{{>:#{{cursor_x}},{EMPTY_COMPOSER_CURSOR_X}}}' "
         f"'send-keys {key}' "
         f"'run-shell \"{probe} {key} #{{pane_id}} #{{cursor_y}} "
-        f"#{{window_zoomed_flag}}\"'"
+        f"#{{cursor_x}} #{{window_zoomed_flag}}\"'"
     )
 
 

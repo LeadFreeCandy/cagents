@@ -787,12 +787,12 @@ class CagentsApp(App):
         """Write the arrow-key composer probe and return its path (empty on
         failure, which drops the bare arrows back to the unconditional size
         control rather than leaving a binding pointing at nothing)."""
-        from .sidecar import COMPOSER_PROBE
+        from .sidecar import composer_probe_source
 
         try:
             path = self._shim_dir() / "composer-probe"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(COMPOSER_PROBE, "utf-8")
+            path.write_text(composer_probe_source(), "utf-8")
             path.chmod(0o755)
             return str(path)
         except OSError as error:
@@ -1459,49 +1459,43 @@ exec {real!r} "$@"
     # -- fork / handoff / lineage --------------------------------------------------
 
     def action_fork(self) -> None:
+        """f: branch this conversation and walk into it. No prompt asked
+        for — a fork IS the conversation up to here, and what you do with
+        it is the first thing you type in the session itself. (Handoff is
+        the one that needs a prompt: it has to be told what to summarise
+        FOR.) Cheap and reversible — z untracks it; Claude's data and the
+        source session are untouched either way."""
         view = self.selected_view()
         if view is None or view.missing or view.parsed is None:
             self.notify("Select a session with a transcript to fork.", severity="warning")
             return
-        self.push_screen(
-            InputModal(
-                f"Fork '{view.title}' — first prompt for the new session",
-                placeholder="what should the fork work on?",
-            ),
-            lambda prompt: self._fork_confirmed(view.session_id, prompt),
-        )
-
-    def _fork_confirmed(self, source_id: str, prompt: str | None) -> None:
-        if not prompt or not prompt.strip():
-            return
-        prompt = prompt.strip()
-        view = self.snapshot.by_id(source_id)
-        if view is None:
-            self.notify("Source session vanished.", severity="error")
-            return
-        claude_bin = self._claude_bin()
-        if not claude_bin:
+        if not self._claude_bin():
             self.notify("claude CLI not found.", severity="error")
             return
         new_id = str(uuid.uuid4())
         try:
             name = self._spawn_session(
                 view.project_dir,
-                ["--resume", source_id, "--fork-session", "--session-id", new_id],
+                ["--resume", view.session_id, "--fork-session", "--session-id", new_id],
                 new_id,
             )
         except Exception as error:
             self.notify(f"Fork failed: {error}", severity="error", timeout=10)
             return
         self._checkpoint("fork")
+        # No label: the fork opens on a copy of the source's transcript, so
+        # it starts out showing the source's title, which is honest — it is
+        # the same conversation. A label would take precedence over the
+        # transcript FOREVER (see SessionView.title), freezing that name
+        # even after the fork diverges and Claude titles it for itself.
         self.store.track(
-            new_id, view.project_dir, utcnow().isoformat(), label=prompt[:60],
-            parent_id=source_id, relation="fork",
+            new_id, view.project_dir, utcnow().isoformat(),
+            parent_id=view.session_id, relation="fork",
         )
         self.selected_session_id = new_id
         self._pending_highlight = new_id
         self._show_new_session(name)
-        self._send_prompt_later(name, prompt, "Forked — prompt sent to the new session.")
+        self.notify(f"Forked '{view.title}' — z to undo.")
         self.refresh_data()
 
     @work(thread=True, group="send", exit_on_error=False)
