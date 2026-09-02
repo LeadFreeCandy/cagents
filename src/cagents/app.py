@@ -517,6 +517,10 @@ class CagentsApp(App):
         session_id: once we've decided to attempt it, we wait for the
         next snapshot to reflect the result rather than retrying on every
         subsequent settle."""
+        if not self.store.get_setting("resume_on_browse"):
+            # Checked before the once-per-id guard, so flipping the setting
+            # on later still resumes on the next settle.
+            return
         if view.session_id in self._resumed_for_preview:
             return
         self._resumed_for_preview.add(view.session_id)

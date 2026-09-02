@@ -485,6 +485,14 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Off: attaching takes the whole terminal (come back with ctrl-b d).",
     ),
     (
+        "resume_on_browse",
+        "Resume on browse",
+        "Settling on a stopped session resumes its real CLI so the viewer "
+        "shows the live conversation. Each resume is a full claude process "
+        "that stays resident — browsing a long list can quietly start "
+        "dozens. Off: stopped rows stay stopped until you press Enter.",
+    ),
+    (
         "notifications",
         "Toast notifications",
         "Bottom-right popups for routine events. Errors and warnings always show.",
