@@ -635,7 +635,7 @@ class TestShellClaude:
             import json
 
             pending_id = "99999999-9999-9999-9999-999999999999"
-            app._pending_new_terminals.add(pending_id)
+            app._pending_new_terminals[pending_id] = "pendinghere"
             store.track(pending_id, str(project), "2026-08-17T09:00:00+00:00")
             app._spawn_request_path().write_text(
                 json.dumps({"dir": str(project), "pending_id": pending_id, "args": []})
@@ -646,6 +646,37 @@ class TestShellClaude:
             assert sid == pending_id
             assert "--session-id" in args
             assert pending_id not in app._pending_new_terminals  # consumed
+
+    async def test_spawn_request_retires_the_helper_shell(self, world, tmp_path):
+        # The `n` helper shell carries the pending id; once the shim's
+        # request spawns the real session under that same id, TWO tmux
+        # sessions hold it. Seen live: kill the real one later (or let it
+        # end) and the leftover shell becomes the id's only host — the row
+        # reads "live", Enter drops into a stale shell, and the resume path
+        # is unreachable. The shell's job ends the moment the spawn request
+        # is consumed: retire it right there.
+        app, store, tmux = world
+        project = tmp_path / "pendinghere"
+        project.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            import json
+
+            pending_id = "99999999-9999-9999-9999-999999999999"
+            # The real client uniquifies names, so the shell never shares
+            # one with the claude session it launches (FakeTmux doesn't).
+            shell_name = "pendinghere-shell"
+            app._pending_new_terminals[pending_id] = shell_name
+            store.track(pending_id, str(project), "2026-08-17T09:00:00+00:00")
+            app._spawn_request_path().write_text(
+                json.dumps({"dir": str(project), "pending_id": pending_id, "args": []})
+            )
+            app.apply_snapshot(app.registry.refresh())
+            await pilot.pause(0.3)
+            assert tmux.created[-1][2] == pending_id  # real session spawned
+            killed = [name for name, _socket in tmux.killed]
+            assert shell_name in killed
+            assert f"{shell_name}--term" in killed
 
     async def test_spawn_request_ignores_an_unrelated_cagents_session_id(self, world, tmp_path):
         # The env var a spawn request's pending_id rides on is ALSO present

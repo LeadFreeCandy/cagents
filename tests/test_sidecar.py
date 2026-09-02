@@ -948,3 +948,35 @@ async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
         assert "ensure-view:alpha:term" not in tmux.log
         after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
         assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"
+
+
+async def test_enter_resume_and_browse_resume_never_double_spawn(world, claude_dir, now):
+    """Seen live: one click resumed the same session TWICE — the explicit
+    attach path spawned, and the browse-sync worker (holding a snapshot
+    from before the spawn, where the row still read not-live) resumed it
+    again 200ms later: two CLIs writing one transcript. _resume_target
+    spawns unconditionally, so the explicit path must register with the
+    browse guard before it spawns."""
+    store, tmux, registry, _ = world
+    sid_dead = "99999999-9999-9999-9999-999999999999"
+    TranscriptBuilder(sid_dead, "/tmp").ai_title("Old work").user("x").assistant_text(
+        "finished"
+    ).write(claude_dir, mtime=now - 5000)
+    store.track(sid_dead, "/tmp", "2026-08-18T07:00:00+00:00")
+    # Reviewed -> ranks below the live rows, so the startup selection lands
+    # elsewhere and no browse-resume touches it before the test does.
+    store.mark_reviewed(sid_dead, "2026-08-18T08:00:00+00:00")
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        stale_view = app.snapshot.by_id(sid_dead)  # not live in this snapshot
+        assert stale_view is not None and not stale_view.live
+        app._resume_dead_session(stale_view)          # the click's attach path
+        assert len(tmux.created) == 1
+        app._resume_for_preview(stale_view)           # the worker, with its stale view
+        await pilot.pause(0.2)
+        assert len(tmux.created) == 1, "the same session was resumed twice"

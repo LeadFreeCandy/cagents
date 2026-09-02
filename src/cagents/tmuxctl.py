@@ -213,6 +213,14 @@ class TmuxClient:
         )
         return proc.returncode
 
+    def kill_session(self, name: str, socket: str | None = None) -> None:
+        """Kill one tmux session by exact name. Raises on a real tmux
+        error; a session that's already gone is not one."""
+        socket = socket or self.create_socket
+        proc = self._run(socket, "kill-session", "-t", f"={name}")
+        if proc.returncode != 0 and "can't find session" not in (proc.stderr or ""):
+            raise RuntimeError(f"tmux kill-session failed: {proc.stderr.strip()}")
+
     def send_text(
         self, session_name: str, text: str, submit: bool = True, socket: str | None = None
     ) -> None:
