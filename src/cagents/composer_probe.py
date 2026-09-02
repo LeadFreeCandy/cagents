@@ -7,35 +7,41 @@ captures) and the script the tmux binding runs: `_write_composer_probe`
 copies it next to the other shims with a `#!<interpreter>` line on top, so
 it must stay free of intra-package imports.
 
-argv: <key> <pane_id> <cursor_y> <cursor_x> <zoomed_flag>. The exit status
-is ignored; the script performs the action itself. Anything unexpected --
-a failed capture, a screen that doesn't look like the composer -- sends
-the key to Claude: losing the size control on one press is harmless,
-swallowing a keystroke mid-sentence is not.
+argv: <key> <pane_id> <zoomed_flag>, where key is whatever tmux is bound
+to (Left, C-Right, ...). The exit status is ignored; the script performs
+the action itself.
 
-WHAT SEPARATES EMPTY FROM TYPED. Not the cursor column: column 2 means
-"start of a line", and every wrapped or multi-line row starts there with
-text present. Not a dim attribute anywhere on the row either -- that was
-the previous rule and it misses the two empty composers you actually meet
-(once you have typed anything in a session the "Try ..." hint stops coming
-back, leaving a bare `❯`; a queued message and Claude's own agents view
-draw their hints in 256-colour grey, not dim).
+WHAT THIS HAS TO GET RIGHT. Claude Code binds ← on an empty composer to
+its own agents view, so a miss is not a missing feature -- it drops the
+user into another screen entirely. And taking the key while they are
+typing stops their cursor. Both directions are loud, so the rule reads the
+composer itself rather than anything about the cursor:
 
-What holds across all of them is the cell UNDER the cursor: an empty
-composer has either nothing there or a styled placeholder, while typed
-text is always drawn in the terminal's default foreground. Bash mode is
-the case that rules out "is anything on this row styled" -- it colours the
-`!` prompt pink and resets before your text.
+  * The composer is the block between the last two ──── rules at the
+    bottom of the pane. Rules are matched loosely (mostly dashes), because
+    Claude draws transient chips into the top one -- a background agent's
+    title, for instance. Demanding a pure run of dashes there is what made
+    an earlier version hand ← to Claude every so often, seemingly at
+    random: it only failed while a chip happened to be on screen.
+  * Inside it, TYPED TEXT IS UNSTYLED and every placeholder is styled --
+    dim for "Try ...", 256-colour grey for "Press up to edit queued
+    messages" and for the agents view's own prompt. So the composer is
+    empty when no row holds an unstyled, non-blank character after the
+    prompt. (A composer holding nothing but a highlighted @mention reads
+    as empty by this rule. That costs a trip to the rail, with the text
+    still there; ⌥→ or → walks straight back.)
+  * Nothing here depends on cursor_x/cursor_y beyond the binding's own
+    fast path, so a redraw between tmux evaluating the format and this
+    script capturing can no longer flip the answer.
 
-The two horizontal rules above and below are required as well: they frame
-the composer, and their absence is what keeps a permission prompt or the
-/model picker (where ←/→ adjust effort) from being mistaken for it.
+Anything unexpected -- a failed capture, a screen with no composer in it
+(a permission prompt, the /model picker, where ←/→ adjust effort) -- sends
+the key to Claude.
 """
 
 import re
 import subprocess
 import sys
-import unicodedata
 
 SGR = re.compile(r"\033\[([0-9;]*)m")
 
@@ -43,12 +49,15 @@ SGR = re.compile(r"\033\[([0-9;]*)m")
 # (`❯ ` / `! `). Anything further right is text, so the binding never even
 # calls us there.
 EMPTY_COMPOSER_CURSOR_X = 2
+PROMPT_WIDTH = 2
+PROMPTS = ("❯", ">", "!", "#")
+ROWS_TO_READ = 16  # enough for a composer several lines tall plus its footer
 
 
-def cells(raw):
-    """[(char, styled)] indexed by display column, styled meaning the cell
-    carries a foreground colour or dim/italic — anything Claude paints and
-    the user's own typing doesn't."""
+def styled_cells(raw):
+    """[(char, styled)] for one captured row. `styled` means the cell
+    carries a foreground colour or dim/italic — anything Claude paints,
+    and nothing the user's own typing has."""
     out, i, fg, attrs = [], 0, None, set()
     while i < len(raw):
         match = SGR.match(raw, i)
@@ -73,68 +82,95 @@ def cells(raw):
                 k += 1
             i = match.end()
             continue
-        char = raw[i]
-        if char == "\n":
+        if raw[i] == "\n":
             break
-        styled = fg is not None or bool(attrs)
-        out.append((char, styled))
-        if unicodedata.east_asian_width(char) in ("W", "F"):
-            out.append(("", styled))  # a wide glyph owns two columns
+        out.append((raw[i], fg is not None or bool(attrs)))
         i += 1
     return out
 
 
 def is_rule(raw):
-    """One of the ──── lines that frame the composer."""
+    """One of the lines framing the composer. Loose on purpose: Claude
+    writes into the top rule (an agent's title, right-aligned), so this
+    asks for a long run of dashes, not a row made of nothing else."""
     text = SGR.sub("", raw).strip()
-    return len(text) > 10 and set(text) <= {"─"}
+    dashes = text.count("─")
+    solid = len(text.replace(" ", ""))
+    return dashes >= 20 and solid and dashes / solid >= 0.6
 
 
-def composer_is_empty(above, cur, below, cursor_x):
-    if cursor_x > EMPTY_COMPOSER_CURSOR_X:
+def composer_rows(rows):
+    """The rows between the last two rules, or None if the bottom of the
+    screen doesn't look like a composer at all."""
+    marks = [i for i, row in enumerate(rows) if is_rule(row)]
+    if len(marks) < 2:
+        return None
+    bottom, top = marks[-1], marks[-2]
+    block = rows[top + 1 : bottom]
+    if not block:
+        return None
+    head = SGR.sub("", block[0])
+    if not head[:1] in PROMPTS:
+        return None  # a framed dialog, not the composer
+    return block
+
+
+def composer_is_empty(rows):
+    """rows: the bottom of the session pane, `capture-pane -pe`, top-down."""
+    block = composer_rows(rows)
+    if block is None:
         return False
-    if not (is_rule(above) and is_rule(below)):
-        return False
-    row = cells(cur)
-    if cursor_x >= len(row):
-        return True  # nothing drawn under or after the cursor at all
-    if not "".join(char for char, _ in row[cursor_x:]).strip():
-        return True
-    return row[cursor_x][1]
+    for line in block:
+        for char, styled in styled_cells(line)[PROMPT_WIDTH:]:
+            if not styled and char.strip():
+                return False
+    return True
 
 
-def capture(pane, top, bottom):
+def capture(pane, rows=ROWS_TO_READ):
+    """The bottom `rows` lines of the visible pane, attributes kept."""
     out = subprocess.run(
-        ["tmux", "capture-pane", "-pe", "-t", pane, "-S", str(top), "-E", str(bottom)],
+        ["tmux", "capture-pane", "-pe", "-t", pane, "-S", "0", "-E", "-"],
         capture_output=True, text=True, timeout=3,
     )
     if out.returncode != 0:
         raise RuntimeError(out.stderr)
-    # capture-pane drops trailing blank cells, so short rows come back
-    # short and a blank row comes back empty; pad to the range asked for.
     lines = out.stdout.split("\n")
-    return (lines + [""] * 3)[: bottom - top + 1]
+    if lines and lines[-1] == "":
+        lines.pop()  # capture-pane ends with a newline, not a blank row
+    return lines[-rows:]
 
 
 def tmux(*args):
     subprocess.run(["tmux", *args], capture_output=True, timeout=3)
 
 
+def decide(pane, attempts=3):
+    """Two reads that agree, or a third to break the tie: a capture taken
+    mid-redraw can show a composer that isn't finished being drawn."""
+    votes = []
+    for _ in range(attempts):
+        votes.append(composer_is_empty(capture(pane)))
+        if len(votes) >= 2 and votes[-1] == votes[-2]:
+            return votes[-1]
+    return max(set(votes), key=votes.count)
+
+
 def main(argv):
-    key, pane, cursor_y, cursor_x, zoomed = argv[1], argv[2], int(argv[3]), int(argv[4]), argv[5]
+    key, pane, zoomed = argv[1], argv[2], argv[3]
+    arrow = key.rsplit("-", 1)[-1]  # "Left" / "C-Left" -> Left
     try:
-        above, cur, below = capture(pane, cursor_y - 1, cursor_y + 1)
-        ours = composer_is_empty(above, cur, below, cursor_x)
+        ours = decide(pane)
     except Exception:
         ours = False
     if not ours:
         tmux("send-keys", "-t", pane, key)
-    elif key == "Left" and zoomed == "1":       # HIDDEN -> SMALL
+    elif arrow == "Left" and zoomed == "1":     # HIDDEN -> SMALL
         tmux("resize-pane", "-Z", "-t", ":.1")
         tmux("select-pane", "-t", ":.1")
-    elif key == "Left":                          # SMALL  -> WIDE
+    elif arrow == "Left":                        # SMALL  -> WIDE
         tmux("select-pane", "-t", ":.0")
-    elif key == "Right":                         # SMALL  -> HIDDEN
+    elif arrow == "Right":                       # SMALL  -> HIDDEN
         tmux("resize-pane", "-Z", "-t", ":.1")
     else:
         tmux("send-keys", "-t", pane, key)

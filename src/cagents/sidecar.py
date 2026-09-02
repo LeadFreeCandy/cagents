@@ -32,8 +32,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .sockets import socket_name
+
 COLLAPSED_WIDTH = 34
-WORK_SOCKET = "cagents-work"  # the tabbed workspace behind the right pane
+WORK_SOCKET = socket_name("cagents-work")  # tabbed workspace behind the right pane
 TABS = ("session", "diff", "term-1", "+term")  # left-to-right (display names)
 # Real window name for the "+term" tab. Not "+term" itself: tmux's target
 # parser can't reliably select a window whose name starts with "+" (see
@@ -374,7 +376,7 @@ def program_invocation(extra_args: list[str]) -> list[str]:
 
 # ------------------------------------------------------- the container --
 
-CONTAINER_SOCKET = "cagents-ui"
+CONTAINER_SOCKET = socket_name("cagents-ui")
 CONTAINER_SESSION = "cagents"
 
 # Focus-driven rail width: wide while choosing, slim while working.
@@ -443,13 +445,15 @@ def composer_probe_source(interpreter: str = "") -> str:
 
 
 def _gate(key: str, size_control: str, probe: str) -> str:
+    """Without a probe the captured key is unconditionally the size
+    control (the default). With one, it yields to a composer that has
+    text in it -- see composer_probe.py."""
     if not probe:
-        return size_control  # no probe: the old all-in behaviour
+        return size_control
     return (
         f"if -F '#{{>:#{{cursor_x}},{EMPTY_COMPOSER_CURSOR_X}}}' "
         f"'send-keys {key}' "
-        f"'run-shell \"{probe} {key} #{{pane_id}} #{{cursor_y}} "
-        f"#{{cursor_x}} #{{window_zoomed_flag}}\"'"
+        f"'run-shell \"{probe} {key} #{{pane_id}} #{{window_zoomed_flag}}\"'"
     )
 
 
@@ -461,42 +465,63 @@ _LEFT_SIZE = (
 _RIGHT_SIZE = "resize-pane -Z -t :.1"
 
 
-def _left_cycle(probe: str = "") -> list[str]:
+def _left_cycle(modifier: str = "", probe: str = "") -> list[str]:
+    key = f"{modifier}Left"
     return [
-        "bind", "-n", "Left",
+        "bind", "-n", key,
         "if", "-F", "#{==:#{pane_index},0}",
-        "send-keys Left",
-        _gate("Left", _LEFT_SIZE, probe),
+        f"send-keys {key}",
+        _gate(key, _LEFT_SIZE, probe),
     ]
 
 
-def _right_cycle(probe: str = "") -> list[str]:
+def _right_cycle(modifier: str = "", probe: str = "") -> list[str]:
     # Already zoomed is already max, so right passes through there too.
+    key = f"{modifier}Right"
     return [
-        "bind", "-n", "Right",
+        "bind", "-n", key,
         "if", "-F", "#{||:#{==:#{pane_index},0},#{window_zoomed_flag}}",
-        "send-keys Right",
-        _gate("Right", _RIGHT_SIZE, probe),
+        f"send-keys {key}",
+        _gate(key, _RIGHT_SIZE, probe),
     ]
 
 
-# Alt+arrows walk the same three states from either pane and never yield
-# to anything -- the guaranteed path while the composer has text, or if
-# the probe ever stops recognising Claude's placeholder.
-_ALT_LEFT_CYCLE = [
-    "bind", "-n", "M-Left",
-    "if", "-F", "#{window_zoomed_flag}",
-    "resize-pane -Z -t :.1 ; select-pane -t :.1",   # HIDDEN -> SMALL
-    "select-pane -t :.0",                            # SMALL  -> WIDE
-]
+# ⌥ and ⇧ arrows walk the same three states from either pane and never
+# yield to anything -- the guaranteed path while the composer has text, or
+# if the probe ever stops recognising Claude's screen.
+#
+# Two modifiers rather than one because they cost different things.
+# Measured against a real session: ⌥← and ⌃← are Claude's word-wise cursor
+# movement, so binding either takes an editing key away; ⇧← is just its
+# plain ← (one character), so taking it costs nothing the bare arrow
+# doesn't already do. ⇧ is therefore the pair to reach for, and ⌥ stays
+# bound only because it is what the statusline has always advertised.
+_UNCONDITIONAL_MODIFIERS = ("M-", "S-")
 
-_ALT_RIGHT_CYCLE = [
-    "bind", "-n", "M-Right",
-    "if", "-F", "#{!=:#{window_zoomed_flag},1}",
-    "if -F '#{==:#{pane_index},0}' "
-    "'select-pane -t :.1' "
-    "'resize-pane -Z -t :.1'",
-]
+
+def _left_unconditional(modifier: str) -> list[str]:
+    return [
+        "bind", "-n", f"{modifier}Left",
+        "if", "-F", "#{window_zoomed_flag}",
+        "resize-pane -Z -t :.1 ; select-pane -t :.1",   # HIDDEN -> SMALL
+        "select-pane -t :.0",                            # SMALL  -> WIDE
+    ]
+
+
+def _right_unconditional(modifier: str) -> list[str]:
+    return [
+        "bind", "-n", f"{modifier}Right",
+        "if", "-F", "#{!=:#{window_zoomed_flag},1}",
+        "if -F '#{==:#{pane_index},0}' "
+        "'select-pane -t :.1' "
+        "'resize-pane -Z -t :.1'",
+    ]
+
+
+def _unconditional_cycles() -> list[list[str]]:
+    return [command(modifier)
+            for modifier in _UNCONDITIONAL_MODIFIERS
+            for command in (_left_unconditional, _right_unconditional)]
 
 
 def container_setup_commands() -> list[list[str]]:
@@ -511,7 +536,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size (⌥ any time) · C-d diff · C-t term "],
+        ["set", "-g", "status-right", " ←/→ size (⇧⌥ any time) · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -523,27 +548,42 @@ def container_setup_commands() -> list[list[str]]:
     ]
 
 
-def left_capture_commands(enable: bool, probe: str = "") -> list[list[str]]:
-    """The setting governs the BARE arrows only. ⌥←/⌥→ stay bound either
-    way: turning the capture off means "stop taking my cursor keys", not
-    "take away the size control" — and the Alt pair never collided with
-    anything to begin with."""
-    if enable:
-        return [_left_cycle(probe), _right_cycle(probe), _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE]
-    return [
-        ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
-        _ALT_LEFT_CYCLE, _ALT_RIGHT_CYCLE,
-    ]
+def arrow_capture_commands(
+    bare: bool = True, ctrl: bool = False, probe: str = ""
+) -> list[list[str]]:
+    """Which arrows cagents takes, and on what terms.
+
+    `bare` and `ctrl` are the two capture settings; each captured pair
+    drives the size control. `probe` is the composer check (empty unless
+    composer_aware_arrows is on), and it applies to the BARE pair only:
+    those are the keys you type with, so with the check on they go back to
+    being Claude's cursor keys the moment there is text in the composer.
+    A captured ⌃ arrow always resizes -- that is the point of turning it
+    on, and it is what leaves you a working layout key mid-sentence.
+
+    ⌥ and ⇧ arrows stay bound whatever the settings say: turning a capture
+    off means "give me that key back", not "take away the size control".
+    """
+    commands: list[list[str]] = []
+    for modifier, capture, gate in (("", bare, probe), ("C-", ctrl, "")):
+        if capture:
+            commands += [_left_cycle(modifier, gate), _right_cycle(modifier, gate)]
+        else:
+            commands += [["unbind", "-n", f"{modifier}Left"],
+                         ["unbind", "-n", f"{modifier}Right"]]
+    return commands + _unconditional_cycles()
 
 
-def apply_left_capture(enable: bool, runner=None, probe: str = "") -> None:
-    """Set/unset the ← layout binding on the enclosing container server."""
+def apply_arrow_capture(
+    bare: bool = True, ctrl: bool = False, runner=None, probe: str = ""
+) -> None:
+    """Set/unset the arrow bindings on the enclosing container server."""
     run = runner or _outer_tmux
-    for command in left_capture_commands(enable, probe):
+    for command in arrow_capture_commands(bare, ctrl, probe):
         try:
             run(command)
         except RuntimeError:
-            if enable:
+            if command[0] != "unbind":
                 raise  # failing to bind is worth surfacing; unbind noise isn't
 
 

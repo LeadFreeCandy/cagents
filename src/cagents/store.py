@@ -45,11 +45,20 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "sidebar": True,
     # Toast notifications (bottom-left). Errors always show regardless.
     "notifications": False,
-    # Left arrow drives the layout cycle / returns to the list.
-    # Bare arrows drive the pane size control, but only while Claude's
-    # composer is empty — type anything and they are cursor keys again.
-    # ⌥←/⌥→ resize unconditionally either way.
+    # Bare ←/→ drive the pane size control (the layout cycle / back to
+    # the list). ⇧ and ⌥ arrows do too, always, whatever these say.
     "capture_left": True,
+    # ⌃←/⌃→ drive it as well, and unconditionally: they stay the size
+    # control even with text in the composer, which is what makes them
+    # the pair to reach for mid-sentence. Off by default because they are
+    # Claude's word-wise cursor movement — measured, same as ⌥ (§11).
+    "capture_ctrl_arrows": False,
+    # Before a bare arrow acts, read Claude's composer: if there is text
+    # in it the key goes to Claude as a cursor key instead, and only an
+    # empty composer drives the layout. Off by default: it is
+    # a screen scrape, it costs a fork on the press at the prompt column,
+    # and an empty composer then stops reaching Claude's own ← view.
+    "composer_aware_arrows": False,
     # Dim the chat pane a bit while the rail is at its wide/max size
     # (choosing a session) — a visual cue for "not what you're doing
     # right now", cleared once the session pane is focused again.

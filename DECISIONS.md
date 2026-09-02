@@ -213,3 +213,53 @@ long quiet tool, and stop. Heuristics remain only for wrapper-socket sessions.
 Also: the diff tab's base is now resolved remote-first (origin/HEAD, origin/main,
 origin/master, then local) because linked worktrees often lack a local main; a
 diff_mode setting ("branch" default / "uncommitted") rides in context.json.
+
+## 11. Bare ← , root-caused against a real session (Sep 1, isolated-instance replication)
+
+Two independent things wanted the same key. Claude Code v2.1.25x binds ← on an
+empty composer to **its own agents view** (its footer says so: "· ← 2 agents"),
+which is where every miss by cagents' "is the composer empty" check landed the
+user — not a missing feature, a different screen.
+
+Replicated by running a SECOND cagents beside the real one:
+`CAGENTS_SOCKET_SUFFIX` (see sockets.py) moves container, workspace, spawned
+sessions and the discovered `claude` socket onto their own servers; `--store`
+gives the instance its own state file and shim dir. (Isolating via
+XDG_DATA_HOME instead is a trap, learned the hard way: Claude Code keeps its
+installed versions there and repoints ~/.local/bin/claude at them, so deleting
+the throwaway dir breaks the real `claude`.) A client
+attached from another tmux server presses the keys, so the real root bindings
+fire — `send-keys` into the pane would bypass them and prove nothing.
+
+What the two earlier rules got wrong, both failing toward "Claude gets the key":
+- **any dim cell on the cursor row**: the "Try ..." hint stops coming back once
+  you have typed anything in a session, so the everyday empty composer is a bare
+  `❯` with no dim anywhere; the queued-message and agents-view hints are
+  256-colour grey. 4 of 15 captured states wrong.
+- **the rows above and below the cursor are pure ──── rules**: Claude writes
+  transient chips into the top rule (a background agent's title). Live: 1 leak in
+  10 presses, "sometimes" exactly as reported.
+
+The rule now reads the composer as a block — the rows between the last two
+rule-ish lines — and calls it empty when no row holds an unstyled non-blank
+character after the prompt (typed text is unstyled; every placeholder Claude
+draws is styled). Nothing depends on cursor_y, so a redraw between tmux
+evaluating the format and the probe capturing cannot flip the answer. Verified
+live: 114 presses across idle, mid-response, queued-message and rapid-fire, zero
+leaks; 20 presses with text parked at column 2, zero stolen.
+
+Modifier arrows, measured against a real composer: **⌥←/→ and ⌃←/→ are Claude's
+word-wise cursor movement** — binding either takes an editing key away — while
+**⇧←/→ are just its plain ←/→**. So ⇧ is the guaranteed pair that costs nothing,
+and it is now bound alongside ⌥.
+
+Shipped as settings rather than as a new default, because each answer here is a
+preference about which key you'd rather lose:
+- `capture_left` (on, unchanged): bare ←/→ resize, unconditionally — Claude never
+  sees them. This is the behaviour that predates any of the composer gating.
+- `capture_ctrl_arrows` (off): ⌃←/⌃→ resize as well, and unconditionally, at the
+  cost of the word jump.
+- `composer_aware_arrows` (off): the BARE pair reads the composer first and only
+  resizes while it is empty, handing your cursor keys back. It deliberately does
+  not gate ⌃: run both and you get bare arrows that stay out of the way while you
+  type plus a layout key that still works mid-sentence.

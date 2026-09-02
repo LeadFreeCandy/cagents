@@ -52,7 +52,7 @@ from .sidecar import (
     Sidecar,
     apply_ctx_binds,
     apply_dim_chat,
-    apply_left_capture,
+    apply_arrow_capture,
     nested_attach_command,
 )
 from .store import Store
@@ -234,10 +234,7 @@ class CagentsApp(App):
         _ctx._log(f"app started: {_ctx.version_stamp()} sidecar={self.sidecar is not None}")
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
-                apply_left_capture(
-                    bool(self.store.get_setting("capture_left")),
-                    probe=self._write_composer_probe(),
-                )
+                self._apply_arrow_settings()
                 apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
                 apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
             except Exception as error:
@@ -782,6 +779,18 @@ class CagentsApp(App):
 
     def _shim_dir(self) -> Path:
         return self.store.path.parent / "bin"
+
+    def _apply_arrow_settings(self) -> None:
+        """Bind the arrows the three settings describe. The probe is only
+        written (and only pointed at) when composer_aware_arrows is on —
+        off, a captured arrow is the size control unconditionally, which
+        is the default and needs no screen reading at all."""
+        aware = bool(self.store.get_setting("composer_aware_arrows"))
+        apply_arrow_capture(
+            bool(self.store.get_setting("capture_left")),
+            bool(self.store.get_setting("capture_ctrl_arrows")),
+            probe=self._write_composer_probe() if aware else "",
+        )
 
     def _write_composer_probe(self) -> str:
         """Write the arrow-key composer probe and return its path (empty on
@@ -1961,11 +1970,14 @@ exec {real!r} "$@"
         if key == "diff_mode":
             self._write_context()  # the ctx keys read the mode from context
             return
-        if key == "capture_left" and os.environ.get("CAGENTS_SIDECAR") == "1":
+        if key in ("capture_left", "capture_ctrl_arrows", "composer_aware_arrows") and (
+            os.environ.get("CAGENTS_SIDECAR") == "1"
+        ):
+            # all three describe one set of bindings, so re-apply the lot
             try:
-                apply_left_capture(bool(value), probe=self._write_composer_probe())
+                self._apply_arrow_settings()
             except Exception as error:
-                self.notify(f"Could not apply ← binding: {error}", severity="error")
+                self.notify(f"Could not apply arrow bindings: {error}", severity="error")
             return
         if key == "dim_chat_preview" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:

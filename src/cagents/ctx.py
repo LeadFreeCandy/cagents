@@ -33,10 +33,12 @@ import sys
 import time
 from pathlib import Path
 
+from .sockets import socket_name
+
 CONTEXT_FILE = "context.json"
 # Override for verifying this actual binary against an isolated tmux
 # server instead of the real workspace — never set by cagents itself.
-WORK_SOCKET = os.environ.get("CAGENTS_WORK_SOCKET_OVERRIDE") or "cagents-work"
+WORK_SOCKET = os.environ.get("CAGENTS_WORK_SOCKET_OVERRIDE") or socket_name("cagents-work")
 
 
 def read_context(path: Path) -> dict:

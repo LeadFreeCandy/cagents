@@ -21,8 +21,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-CREATE_SOCKET = "cagents-sessions"
-DISCOVER_SOCKETS = ("claude", CREATE_SOCKET)
+from .sockets import socket_name
+
+CREATE_SOCKET = socket_name("cagents-sessions")
+# the wrapper's own socket, suffixed too: an isolated instance must not
+# pick up the real one's sessions (see sockets.py)
+DISCOVER_SOCKETS = (socket_name("claude"), CREATE_SOCKET)
 _FIELD_SEP = "\x1f"
 
 _LIST_FORMAT = _FIELD_SEP.join(

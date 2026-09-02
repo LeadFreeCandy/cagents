@@ -23,9 +23,30 @@ Three states, ordered by Claude's width; `←` shrinks one step, `→` grows one
 WIDE (50/50, you're in the list)  ←→  SMALL (slim rail, you're in the session)  ←→  HIDDEN (full width)
 ```
 
-Clicking a pane also moves focus; the rail auto-sizes to follow. The trade-off, as
-accepted: the arrows don't move the text cursor while editing in the Claude prompt
-(toggle off in settings if it bites; you lose the layout keys).
+Clicking a pane also moves focus; the rail auto-sizes to follow.
+
+Which keys do this is three settings (`,`), because every choice here trades
+against a key Claude wants:
+
+| key | who gets it | setting |
+|---|---|---|
+| `←` `→` | cagents, always — Claude never sees them | **Arrow layout keys** (on) |
+| `⇧←` `⇧→` | cagents, always | always bound, not a setting |
+| `⌥←` `⌥→` | cagents, always | always bound, not a setting |
+| `⌃←` `⌃→` | Claude's word jump, until you turn it on — then cagents, always | **⌃←/⌃→ resize too** (off) |
+
+`⇧` is the pair to reach for mid-sentence: inside Claude `⇧←` is only a duplicate
+of `←`, so taking it costs nothing, while `⌥←` and `⌃←` are its word-wise cursor
+movement (measured — DECISIONS §11).
+
+**Arrows yield to typed text** (off) changes the terms for the **bare** pair:
+cagents reads Claude's composer first, and `←`/`→` only resize while it is empty
+— type anything and they are cursor keys again. A captured `⌃` pair is untouched
+by it and always resizes, which is the combination to run if you want both: bare
+arrows that get out of your way while you type, and a layout key that still works
+mid-sentence. The check is a screen scrape, so it costs a read on the press at
+the start of a line, and it hands `←` on an empty composer to cagents rather than
+to Claude's own agents view.
 
 ## The right side is tabbed
 

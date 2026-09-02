@@ -1,184 +1,238 @@
-"""The bare-arrow gate, against rows captured from a real Claude Code
-session (v2.1.252) inside the container's session pane.
+"""The bare-arrow gate, against the bottom of the session pane captured
+from a real Claude Code session (v2.1.258) running inside a real cagents
+container.
 
-Each case is what `tmux capture-pane -pe` handed the probe for the row the
-cursor was on and its two neighbours, plus the cursor column, plus who the
+Each case is what `tmux capture-pane -pe` hands the probe, plus who the
 key belongs to there: SIZE = cagents' pane-size control, CLAUDE = the
-session's own arrow key. The long ──── rules are the real capture with
-their dash run written as a repeat, and the runs of typed x's are trimmed
-to keep the file readable; nothing else is edited.
+session's own arrow key. Long ──── rules are written as a repeat and long
+runs of typed x's are trimmed; nothing else is edited.
 
-The rule these pin down was written after the previous one (any dim cell
-anywhere on the cursor row) failed four of them -- every failure in the
-direction that hands ← back to Claude, which opens ITS agents view over
-the session.
+The rule these pin down replaced two earlier ones, both of which failed in
+the direction that hands ← to Claude — which opens ITS agents view over
+the session:
+
+  * "any dim cell on the cursor row" missed the empty composer you are in
+    almost always (once you have typed in a session the "Try ..." hint
+    stops coming back) and the grey placeholders (queued message, agents
+    view).
+  * "the row above and below the cursor are pure ──── rules" failed at
+    random, roughly one press in ten, because Claude writes transient
+    chips into the top rule — see test_a_chip_in_the_divider.
 """
 
-from cagents.composer_probe import composer_is_empty
+from cagents.composer_probe import composer_is_empty, is_rule
 
 RULE = "\x1b[38;5;244m" + "\u2500" * 165
 
-# label, whose key it is, cursor_x, row above, cursor row, row below
+# label, whose key it is, the bottom of the pane top-down
 CASES = [
     (
-        'empty composer, no placeholder',
+        'empty, placeholder',
         'SIZE',
-        2,
-        RULE,
-        '❯\xa0',
-        RULE,
+        [
+            RULE,
+            '\x1b[39m❯\xa0\x1b[2mTry "edit test_flows.py to..."\x1b[0m',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle) · ← 2 agents\x1b[39m',
+        ],
     ),
     (
         'text, cursor at end',
         'CLAUDE',
-        13,
-        RULE,
-        '❯\xa0hello world',
-        RULE,
+        [
+            RULE,
+            '\x1b[39m❯\xa0hello world',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
         'text, cursor at column 2',
         'CLAUDE',
-        2,
-        RULE,
-        '❯\xa0hello world',
-        RULE,
+        [
+            RULE,
+            '\x1b[39m❯\xa0hello world',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
-        'text, cursor mid-word',
+        'wrapped text',
         'CLAUDE',
-        11,
-        RULE,
-        '❯\xa0hello world',
-        RULE,
+        [
+            RULE,
+            '\x1b[39m❯\xa0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+            '  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+            '  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
-        'wrapped text, cursor at start of a wrapped row',
+        'multi-line',
         'CLAUDE',
-        2,
-        '  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-        '  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-        RULE,
+        [
+            '                                                                                                                                                        \x1b[38;5;246mctrl+g to edit in Vim\x1b[39m',
+            RULE,
+            '\x1b[39m❯\xa0line one',
+            '  line two',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
-        'multi-line, cursor at start of line 2',
+        'slash menu open',
         'CLAUDE',
-        2,
-        '❯\xa0line one',
-        '  line two',
-        RULE,
+        [
+            '  \x1b[38;5;153m/\x1b[1mmod\x1b[0m\x1b[38;5;153mel                        Set the AI \x1b[1mmod\x1b[0m\x1b[38;5;153mel for Claude Code (currently Opus 5 (1M context))\x1b[39m',
+            '  \x1b[38;5;246m/claude-api                   Reference for the Claude API / Anthropic SDK — \x1b[1m\x1b[39mmod\x1b[0m\x1b[38;5;246mel ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model\x1b[39m',
+            '                                \x1b[38;5;246mmigration. TRIGGER — read BEFORE opening the target file; don\'t skip because it "looks like a one-liner" — whenever: the prompt names Claude…\x1b[39m',
+            '  \x1b[38;5;246m/auto-\x1b[1m\x1b[39mmod\x1b[0m\x1b[38;5;246me-setup              Teach auto \x1b[1m\x1b[39mmod\x1b[0m\x1b[38;5;246me about your environment, plus optional rule tweaks\x1b[39m',
+            RULE,
+            '\x1b[39m❯\xa0/mod',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
-        'multi-line, cursor on line 1',
+        'file picker open',
         'CLAUDE',
-        2,
-        RULE,
-        '❯\xa0line one',
-        '  line two',
+        [
+            '  \x1b[38;5;246m+ src/cagents/app.py\x1b[39m',
+            '  \x1b[38;5;246m+ src/cagents/ctx.py\x1b[39m',
+            '  \x1b[38;5;246m+ src/cagents/jira.py\x1b[39m',
+            '  \x1b[38;5;246m+ src/cagents/sessions.py\x1b[39m',
+            RULE,
+            '\x1b[39m❯\xa0@src/cag',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ rl - │ done -%\x1b[0m                                                                                                                           \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;220m⏵⏵ auto mode on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m',
+        ],
     ),
     (
-        'slash menu open, cursor at column 2',
+        'bash mode with text',
         'CLAUDE',
-        2,
-        RULE,
-        '❯\xa0/mod',
-        RULE,
-    ),
-    (
-        'file picker open, cursor at column 2',
-        'CLAUDE',
-        2,
-        RULE,
-        '❯\xa0@src/cag',
-        RULE,
-    ),
-    (
-        'bash mode with text, cursor at column 2',
-        'CLAUDE',
-        2,
-        '\x1b[38;5;211m────────────────────────────────────────',
-        '\x1b[38;5;211m!\xa0\x1b[39mls -la',
-        '\x1b[38;5;211m────────────────────────────────────────',
+        [
+            '                                                                                                                                                 \x1b[38;5;246mCtrl+Y to paste deleted text\x1b[39m',
+            '\x1b[38;5;211m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '!\xa0\x1b[39mls -la',
+            '\x1b[38;5;211m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '\x1b[39m  \x1b[38;5;211m! for shell mode\x1b[39m                                                                                                                                                        \x1b[38;5;114m/rc\x1b[39m',
+        ],
     ),
     (
         'bash mode, empty',
         'SIZE',
-        2,
-        '\x1b[38;5;211m────────────────────────────────────────',
-        '\x1b[38;5;211m!\xa0\x1b[39m',
-        '\x1b[38;5;211m────────────────────────────────────────',
+        [
+            '\x1b[38;5;211m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '!\xa0\x1b[2m\x1b[39mTry "edit test_flows.py to..."\x1b[0m',
+            '\x1b[38;5;211m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '\x1b[39m  \x1b[38;5;211m! for shell mode\x1b[39m                                                                                                                                                        \x1b[38;5;114m/rc\x1b[39m',
+        ],
     ),
     (
-        'leading-space text, cursor at column 2',
-        'CLAUDE',
-        2,
-        RULE,
-        '❯\xa0   indented',
-        RULE,
+        'mode cycled, empty (no placeholder)',
+        'SIZE',
+        [
+            RULE,
+            '\x1b[39m❯\xa0\x1b[2mTry "edit test_flows.py to..."\x1b[0m',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ 5h 3%/7d 1% │ done -%\x1b[0m                                                                                                                    \x1b[38;5;114m/rc\x1b[39m',
+            '  \x1b[38;5;246m⏸ manual mode on · ← 2 agents\x1b[39m',
+        ],
     ),
     (
-        '/model dialog (arrows adjust effort)',
+        '/model dialog',
         'CLAUDE',
-        3,
-        '     \x1b[38;5;246m5. \x1b[39mHaiku                  \x1b[38;5;246mHaiku 4.5 · Fastest for quick answers\x1b[39m',
-        '   \x1b[38;5;153m❯\x1b[39m \x1b[38;5;246m6. \x1b[38;5;114mOpus\x1b[39m \x1b[38;5;114m✔\x1b[39m                 \x1b[38;5;174mOpus 5\x1b[38;5;246m · Best for everyday, complex tasks\x1b[39m',
-        '',
+        [
+            '     \x1b[38;5;246m3. \x1b[39mFable                  \x1b[38;5;174mFable 5.1\x1b[38;5;246m · Most capable for your hardest and longest-running tasks\x1b[39m',
+            '     \x1b[38;5;246m4. \x1b[39mSonnet                 \x1b[38;5;246mSonnet 5 · Efficient for routine tasks\x1b[39m',
+            '     \x1b[38;5;246m5. \x1b[39mHaiku                  \x1b[38;5;246mHaiku 4.5 · Fastest for quick answers\x1b[39m',
+            '',
+            '   \x1b[38;5;174m●\x1b[38;5;246m High effort (default)\x1b[38;5;239m ←/→ to adjust\x1b[39m',
+            '',
+            '   \x1b[38;5;246mUse \x1b[1m/fast\x1b[0m\x1b[38;5;246m to turn on Fast mode (Opus 5).\x1b[39m',
+            '',
+            '   \x1b[38;5;246mEnter to set as default · s to use this session only · Esc to cancel\x1b[39m',
+        ],
+    ),
+    (
+        'empty, no placeholder',
+        'SIZE',
+        [
+            '                                                                                                                                                             \x1b[38;5;246m● high · /effort\x1b[39m',
+            RULE,
+            '\x1b[39m❯\xa0',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ 5h 3%/7d 1% │ done -%\x1b[0m                                                                                                                    \x1b[38;5;114m\x1b]8;id=tmux1;https://claude.ai/code/session_01V3GWuqFPwFZcce7quzkDs8?from=cli\x1b\\/rc\x1b[39m\x1b]8;;\x1b\\',
+            '  \x1b[38;5;73m⏸ plan mode on\x1b[38;5;246m (shift+tab to cycle) · ← 2 agents\x1b[39m',
+        ],
     ),
     (
         'claude agents view',
         'SIZE',
-        2,
-        '\x1b[2m────────────────────────────────────────',
-        '\x1b[38;5;246m❯\x1b[39m \x1b[38;5;246mdescribe a task for a new session\x1b[39m',
-        '\x1b[2m────────────────────────────────────────',
+        [
+            '\x1b[2m\x1b[39m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '\x1b[0m\x1b[38;5;246m❯\x1b[39m \x1b[38;5;246mdescribe a task for a new session\x1b[39m',
+            '\x1b[2m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '\x1b[0m  \x1b[38;5;220m⏵⏵ auto mode\x1b[38;5;246m · enter to return · space to reply · ctrl+x to delete · ? for shortcuts\x1b[39m',
+        ],
     ),
     (
-        'empty again after the tour',
+        'back from agents view',
         'SIZE',
-        2,
-        RULE,
-        '❯\xa0',
-        RULE,
+        [
+            '                                                                                                                                                             \x1b[38;5;246m● high · /effort\x1b[39m',
+            RULE,
+            '\x1b[39m❯\xa0',
+            RULE,
+            '\x1b[39m  \x1b[2m\x1b[38;5;246mOpus 5 (1M context) │ ctx -% │ 5h 3%/7d 1% │ done -%\x1b[0m                                                                                                                    \x1b[38;5;114m\x1b]8;id=tmux1;https://claude.ai/code/session_01V3GWuqFPwFZcce7quzkDs8?from=cli\x1b\\/rc\x1b[39m\x1b]8;;\x1b\\',
+            '  \x1b[38;5;73m⏸ plan mode on\x1b[38;5;246m (shift+tab to cycle) · ← 2 agents\x1b[39m',
+        ],
     ),
 ]
 
 
 class TestComposerIsEmpty:
     def test_every_captured_state(self):
-        wrong = [
-            label for label, expect, cx, above, cur, below in CASES
-            if composer_is_empty(above, cur, below, cx) != (expect == "SIZE")
-        ]
+        wrong = [label for label, expect, rows in CASES
+                 if composer_is_empty(rows) != (expect == "SIZE")]
         assert not wrong
 
-    def test_an_empty_composer_with_no_placeholder_is_still_empty(self):
-        """The "Try ..." hint stops coming back once you have typed
-        anything in a session, leaving a bare prompt. That is the state
-        you are in almost always, and the dim-attribute rule read it as
-        text -- so ← went to Claude and opened the agents view."""
-        assert composer_is_empty(RULE, "\u276f\xa0", RULE, 2)
+    def test_a_chip_in_the_divider(self):
+        """The bug this rule exists for: Claude draws a background agent's
+        title into the composer's top rule, and a check that wanted a pure
+        run of dashes there handed ← to Claude — reproduced live at about
+        one press in ten, which is exactly what "sometimes" looked like.
+        (Row reconstructed from the capture logged at the failure.)"""
+        chip = "\x1b[38;5;244m" + "\u2500" * 155 + " Left arrow logic \u2500"
+        assert is_rule(chip)
+        assert composer_is_empty([chip, "\u276f\xa0", RULE, "  ready"])
 
-    def test_a_grey_placeholder_counts_too(self):
-        """Not every hint is dim: the agents view and a queued message
-        draw theirs in 256-colour grey."""
-        cur = "\x1b[38;5;246m\u276f\x1b[39m \x1b[38;5;246mdescribe a task\x1b[39m"
-        assert composer_is_empty(RULE, cur, RULE, 2)
+    def test_a_screen_with_no_composer_is_claudes(self):
+        """A framed dialog (the /model picker, where ←/→ adjust effort;
+        Rewind; a permission prompt) must never read as an empty
+        composer."""
+        rewind = ["\u2594" * 80, "   Rewind", "", "   Nothing to rewind to yet.",
+                  "", "   Esc to cancel"]
+        assert not composer_is_empty(rewind)
+        assert not composer_is_empty([RULE, "   \u276f 6. Opus", RULE])
 
-    def test_bash_mode_colours_the_prompt_not_your_text(self):
-        """Why the rule reads the cell UNDER the cursor rather than asking
-        whether anything on the row is styled: `!` mode paints the prompt
-        pink and resets before the text."""
-        assert composer_is_empty(RULE, "\x1b[38;5;211m!\xa0\x1b[39m", RULE, 2)
-        assert not composer_is_empty(RULE, "\x1b[38;5;211m!\xa0\x1b[39mls -la", RULE, 2)
+    def test_the_placeholder_may_be_dim_or_grey_or_absent(self):
+        """Three empty composers Claude actually draws."""
+        for cur in ("\x1b[39m\u276f\xa0\x1b[2mTry \"fix lint\"\x1b[0m",   # dim hint
+                    "\x1b[38;5;246m\u276f\x1b[39m \x1b[38;5;246mdescribe a task\x1b[39m",  # grey
+                    "\x1b[39m\u276f\xa0"):                                  # bare prompt
+            assert composer_is_empty([RULE, cur, RULE, "  footer"]), cur
 
-    def test_the_framing_rules_are_required(self):
-        """A dialog can park the cursor on styled text too (the /model
-        picker, where ←/→ adjust effort). Without the composer's two
-        ──── rules around the row, the key is Claude's."""
-        cur = "   \x1b[38;5;246m\u276f 6. Opus\x1b[39m"
-        assert not composer_is_empty("   1. Default", cur, "", 2)
-
-    def test_past_the_prompt_column_is_always_claude(self):
-        """The binding only shells out at column 2, but the probe repeats
-        the check rather than trusting its caller."""
-        assert not composer_is_empty(RULE, "\u276f\xa0", RULE, 9)
+    def test_typed_text_is_never_empty_however_it_is_reached(self):
+        for cur in ("\u276f\xa0hello world",            # plain
+                    "  line two",                      # a continuation row
+                    "\x1b[38;5;211m!\xa0\x1b[39mls -la"):  # bash mode: pink prompt
+            assert not composer_is_empty([RULE, cur, RULE, "  footer"]), cur

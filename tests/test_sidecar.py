@@ -24,7 +24,7 @@ from cagents.sidecar import (
     Sidecar,
     container_setup_commands,
     ctx_bind_commands,
-    left_capture_commands,
+    arrow_capture_commands,
     nested_attach_command,
     self_command,
     should_bootstrap,
@@ -162,13 +162,13 @@ class TestCommands:
         flat = [" ".join(c) for c in container_setup_commands()]
         assert not any(" Escape " in f" {c} " for c in flat)  # Esc stays Claude's
         # No key bindings in static setup — the ← cycle comes from
-        # left_capture_commands (toggleable); C-t/C-d from ctx binds.
+        # arrow_capture_commands (toggleable); C-t/C-d from ctx binds.
         assert not any(c.startswith("bind") for c in flat)
         assert any("after-select-pane" in c for c in flat)
         assert any("status-right" in c for c in flat)  # the statusline
 
     def test_arrow_bindings_are_a_size_control(self):
-        on = left_capture_commands(True)
+        on = arrow_capture_commands()
         left = " ".join(on[0])
         right = " ".join(on[1])
         # ← shrinks: HIDDEN -> SMALL (unzoom) or SMALL -> WIDE (focus rail)
@@ -180,9 +180,43 @@ class TestCommands:
         assert right.startswith("bind -n Right")
         assert "send-keys Right" in right
         assert "resize-pane -Z -t :.1" in right
-        assert left_capture_commands(False)[:2] == [
+        assert arrow_capture_commands(bare=False)[:2] == [
             ["unbind", "-n", "Left"], ["unbind", "-n", "Right"],
         ]
+
+    def test_a_captured_arrow_is_the_size_control_unconditionally_by_default(self):
+        """The default takes the bare pair outright — no probe, no screen
+        read, Claude never sees them. Everything else is opt-in."""
+        for command in arrow_capture_commands():
+            assert "run-shell" not in " ".join(command)
+            assert "cursor_x" not in " ".join(command)
+
+    def test_ctrl_arrows_are_a_second_capture_off_by_default(self):
+        """⌃←/⌃→ are Claude's word jump, so capturing them is a setting.
+        Captured, they drive the same three states as the bare pair and
+        pass through to the pane the same way."""
+        default = {c[2] for c in arrow_capture_commands() if c[0] == "unbind"}
+        assert default == {"C-Left", "C-Right"}
+        with_ctrl = {c[2]: " ".join(c)
+                     for c in arrow_capture_commands(ctrl=True) if c[0] == "bind"}
+        assert {"Left", "Right", "C-Left", "C-Right"} <= set(with_ctrl)
+        assert "send-keys C-Left" in with_ctrl["C-Left"]      # rail: to the app
+        assert "select-pane -t :.0" in with_ctrl["C-Left"]    # session: resize
+        assert "resize-pane -Z -t :.1" in with_ctrl["C-Right"]
+
+    def test_the_composer_check_gates_the_bare_pair_only(self):
+        """The bare arrows are the ones you type with, so the check hands
+        those back to Claude while there is text in the composer. A ⌃
+        arrow you have deliberately captured always resizes — that is what
+        leaves you a working layout key mid-sentence."""
+        gated = {c[2]: " ".join(c)
+                 for c in arrow_capture_commands(ctrl=True, probe="/p/probe")
+                 if c[0] == "bind"}
+        for key in ("Left", "Right"):
+            assert f"/p/probe {key} " in gated[key]
+        for key in ("C-Left", "C-Right", "M-Left", "S-Right"):
+            assert "run-shell" not in gated[key]
+            assert "cursor_x" not in gated[key]
 
     def test_bare_arrows_gate_on_the_composer_via_the_probe(self):
         """cursor_x is a FAST PATH, never the decision. An empty composer
@@ -192,13 +226,14 @@ class TestCommands:
         there with text present), so that case defers to the probe. The
         earlier version treated 2 as "empty" and stole the key mid-line."""
         left, right = (" ".join(c) for c in
-                       left_capture_commands(True, "/p/probe")[:2])
+                       arrow_capture_commands(probe="/p/probe")[:2])
         for key, binding in (("Left", left), ("Right", right)):
             fast = f"if -F '#{{>:#{{cursor_x}},2}}' 'send-keys {key}'"
             assert fast in binding  # >2 => text => Claude's, no shell out
             assert "/p/probe" in binding and "run-shell" in binding
-            assert "#{pane_id}" in binding and "#{cursor_y}" in binding
-            assert "#{cursor_x}" in binding  # the probe re-checks the column
+            assert "#{pane_id}" in binding and "#{window_zoomed_flag}" in binding
+            # the probe reads the composer itself; it is handed no cursor
+            assert "#{cursor_y}" not in binding
             # the size control is NOT reachable straight from cursor_x
             assert binding.index("run-shell") > binding.index(fast)
 
@@ -214,24 +249,31 @@ class TestCommands:
         assert "from ." not in source  # a copy has no package to import from
 
     def test_no_probe_falls_back_to_the_unconditional_size_control(self):
-        for cmd in left_capture_commands(True):
+        for cmd in arrow_capture_commands():
             assert "run-shell" not in " ".join(cmd)
 
-    def test_alt_arrows_walk_all_three_sizes_from_either_pane(self):
-        """⌥←/⌥→ never yield — the guaranteed path while the composer has
-        text, or if the probe ever stops recognising Claude's placeholder.
-        They cover the whole cycle including WIDE -> SMALL, which is a
-        focus change rather than a resize and which the first cut missed."""
+    def test_modifier_arrows_walk_all_three_sizes_from_either_pane(self):
+        """⌥ and ⇧ arrows never yield — the guaranteed path while the
+        composer has text, or if the probe ever stops recognising Claude's
+        screen. They cover the whole cycle including WIDE -> SMALL, which
+        is a focus change rather than a resize and which the first cut
+        missed. ⇧ is the one that costs nothing: measured against a real
+        session, ⇧← is Claude's plain ← while ⌥←/⌃← are its word-wise
+        movement."""
         for enabled in (True, False):
-            alt = {c[2]: " ".join(c) for c in left_capture_commands(enabled)
-                   if c[:3] in (["bind", "-n", "M-Left"], ["bind", "-n", "M-Right"])}
-            assert set(alt) == {"M-Left", "M-Right"}, enabled
-            for binding in alt.values():
+            keys = [f"{modifier}{arrow}"
+                    for modifier in ("M-", "S-") for arrow in ("Left", "Right")]
+            bound = {c[2]: " ".join(c) for c in arrow_capture_commands(bare=enabled)
+                     if len(c) > 2 and c[2] in keys}
+            assert set(bound) == set(keys), enabled
+            for binding in bound.values():
                 assert "cursor_x" not in binding and "run-shell" not in binding
-            assert "resize-pane -Z -t :.1 ; select-pane -t :.1" in alt["M-Left"]
-            assert "select-pane -t :.0" in alt["M-Left"]
-            assert "select-pane -t :.1" in alt["M-Right"]
-            assert "resize-pane -Z -t :.1" in alt["M-Right"]
+            for modifier in ("M-", "S-"):
+                left, right = bound[f"{modifier}Left"], bound[f"{modifier}Right"]
+                assert "resize-pane -Z -t :.1 ; select-pane -t :.1" in left
+                assert "select-pane -t :.0" in left
+                assert "select-pane -t :.1" in right
+                assert "resize-pane -Z -t :.1" in right
 
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands

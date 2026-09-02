@@ -740,3 +740,42 @@ async def test_typing_a_message_never_trips_the_invariant_check(world, monkeypat
         await pilot.pause()
 
         assert not any("STATE-INVARIANT-VIOLATION" in m for m in logged)
+
+
+class TestArrowSettings:
+    """The three settings describe one set of bindings, so the app hands
+    all of them to sidecar at once — and only writes the composer probe
+    for the setting that actually uses it."""
+
+    def _applied(self, monkeypatch, tmp_path, **settings):
+        from cagents import app as app_module
+
+        store = Store.load(tmp_path / "state.json")
+        for key, value in settings.items():
+            store.set_setting(key, value)
+        calls = []
+        monkeypatch.setattr(app_module, "apply_arrow_capture",
+                            lambda *a, **kw: calls.append((a, kw)))
+        stub = type("Stub", (), {
+            "store": store,
+            "_write_composer_probe": lambda self: "/probe",
+        })()
+        CagentsApp._apply_arrow_settings(stub)
+        return calls[0]
+
+    def test_default_captures_the_bare_pair_with_no_probe(self, monkeypatch, tmp_path):
+        args, kwargs = self._applied(monkeypatch, tmp_path)
+        assert args == (True, False)      # bare captured, ⌃ not
+        assert kwargs["probe"] == ""      # nothing reads the screen
+
+    def test_ctrl_setting_captures_the_second_pair(self, monkeypatch, tmp_path):
+        args, _ = self._applied(monkeypatch, tmp_path, capture_ctrl_arrows=True)
+        assert args == (True, True)
+
+    def test_composer_setting_is_what_wires_the_probe(self, monkeypatch, tmp_path):
+        _, kwargs = self._applied(monkeypatch, tmp_path, composer_aware_arrows=True)
+        assert kwargs["probe"] == "/probe"
+
+    def test_both_captures_off_still_reapplies(self, monkeypatch, tmp_path):
+        args, _ = self._applied(monkeypatch, tmp_path, capture_left=False)
+        assert args == (False, False)     # sidecar unbinds them
