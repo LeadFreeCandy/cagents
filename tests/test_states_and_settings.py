@@ -546,12 +546,16 @@ class TestNewStates:
         state, _ = derive_state(parsed, tracked, live=False, now=now)
         assert state == SessionState.NEEDS_REVIEW
 
-    def test_external_update_outranks_plain_review(self):
+    def test_review_outranks_external_update(self):
+        """Both are "a human should look", but review is your move on your
+        own work and an external update is a move someone else already
+        made. Reversed on the user's call; the earlier ranking put
+        external first."""
         from cagents.sessions import ATTENTION_ORDER
 
         order = ATTENTION_ORDER
-        assert order[SessionState.NEEDS_INPUT] < order[SessionState.EXTERNAL_UPDATE]
-        assert order[SessionState.EXTERNAL_UPDATE] < order[SessionState.NEEDS_REVIEW]
+        assert order[SessionState.NEEDS_INPUT] < order[SessionState.NEEDS_REVIEW]
+        assert order[SessionState.NEEDS_REVIEW] < order[SessionState.EXTERNAL_UPDATE]
 
 
 class TestDebounce:
@@ -936,8 +940,8 @@ class TestStatePriority:
         assert rank[SessionState.NEEDS_INPUT] == 1
         # everything else appended in default order — nothing missing
         assert len(rank) == len(SessionState)
-        assert rank[SessionState.EXTERNAL_UPDATE] == 2
-        assert rank[SessionState.NEEDS_REVIEW] == 3
+        assert rank[SessionState.NEEDS_REVIEW] == 2
+        assert rank[SessionState.EXTERNAL_UPDATE] == 3
 
     def test_a_state_added_after_the_setting_was_saved_lands_in_its_canonical_slot(self):
         # Real bug, confirmed live: state_order is persisted, so a state
@@ -1008,8 +1012,8 @@ async def test_priority_tab_reorders_and_persists(claude_dir, tmp_path):
         await pilot.press("J")  # move it down one
         await pilot.pause(0.1)
         saved = store.get_setting("state_order")
-        assert saved[0] == "external update" and saved[1] == "needs input"
-        assert Store.load(store.path).get_setting("state_order")[0] == "external update"
+        assert saved[0] == "needs review" and saved[1] == "needs input"
+        assert Store.load(store.path).get_setting("state_order")[0] == "needs review"
         await pilot.press("0")  # reset to default
         await pilot.pause(0.1)
         assert store.get_setting("state_order")[0] == "needs input"

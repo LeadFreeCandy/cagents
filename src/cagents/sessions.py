@@ -53,21 +53,26 @@ class SessionState(Enum):
     STOPPED = "stopped"  # ended without completing normally
 
 
-# Lower number = needs the human sooner. Used by the queue view and for
-# sorting within groups. Monitoring/background/waiting are all "Claude (or
-# the world) is on it" — lower priority than a genuine needs-review.
-# external_update outranks a plain needs-review: something specific
-# happened on the PR (a comment, a review, a push), not just "Claude
-# happened to finish quietly".
+# Lower number = needs the human sooner, and format.STATE_STYLE paints this
+# same ladder as a red -> purple rainbow, so the two must be kept in step
+# (as must SETTINGS_DEFAULTS["state_order"], which is this list by name).
+#
+# needs_review outranks external_update: both are "a human should look", but
+# review is YOUR move on your own work, while a PR update is a move someone
+# else already made. (This is the user's call and reverses the earlier
+# ranking, which put external first on the grounds that something specific
+# had happened on the PR.)
 # shell_running outranks monitoring: a shell Claude left running is more
 # directly "your problem" than an automated Monitor watch.
+# monitoring/background/waiting are all "Claude (or the world) is on it" —
+# lower priority than a genuine needs-review.
 # snoozed sits below working (an explicit, timed "leave me alone" always
 # loses to something actually happening right now) but above waiting (a
 # deliberate defer is still more "yours" than a PR parked on someone else).
 ATTENTION_ORDER = {
     SessionState.NEEDS_INPUT: 0,
-    SessionState.EXTERNAL_UPDATE: 1,
-    SessionState.NEEDS_REVIEW: 2,
+    SessionState.NEEDS_REVIEW: 1,
+    SessionState.EXTERNAL_UPDATE: 2,
     SessionState.SHELL_RUNNING: 3,
     SessionState.MONITORING: 4,
     SessionState.BACKGROUND: 5,

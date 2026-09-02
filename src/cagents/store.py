@@ -97,7 +97,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Queue/list priority of the states, most-urgent first. Reorder in the
     # settings panel's Priority tab.
     "state_order": [
-        "needs input", "external update", "needs review", "shell running", "monitoring",
+        "needs input", "needs review", "external update", "shell running", "monitoring",
         "background", "working", "snoozed", "waiting", "stopped", "done",
     ],
 }

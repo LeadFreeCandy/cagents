@@ -63,6 +63,14 @@ popup diff and a split shell.
 
 ## Session states
 
+The colours are the priority: a rainbow from red through purple, in the same
+order the list sorts, so a glance down the rail reads as a heat map. Warm =
+your move (`◉ needs you`, `◆ review`, `✉ external update`), green = something
+is still running for you (`◍ shell running`, `◎ monitoring`, `◌ background`),
+blue = Claude has it (`● working`), purple = parked or finished (`☾ snoozed`,
+`⧖ waiting`, `✓ done`). `■ stopped` sits outside it, in plain dim — an anomaly
+rather than a rung. Reorder any of it in the settings panel's Priority tab.
+
 - `● working` — a real turn in flight (pane markers or a conversation record in the
   last ~20s). Also shown, with "active outside cagents' tmux", when the transcript is
   being written by a host cagents can't see (cmux, bare terminal) — Enter refuses to
