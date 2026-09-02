@@ -779,3 +779,22 @@ class TestArrowSettings:
     def test_both_captures_off_still_reapplies(self, monkeypatch, tmp_path):
         args, _ = self._applied(monkeypatch, tmp_path, capture_left=False)
         assert args == (False, False)     # sidecar unbinds them
+async def test_search_finds_a_session_by_its_r_label(world, claude_dir):
+    """End to end through the modal: an R label lives only in cagents'
+    store, so the search must be handed it — typing it and pressing Enter
+    has to surface the session, title shown as the label."""
+    app, store, tmux, _ = world
+    store.set_setting("conversation_search", True)
+    store.set_label(SID1, "zebra-quest")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("slash")
+        await pilot.pause()
+        from cagents.modals import SearchModal
+
+        assert isinstance(app.screen, SearchModal)
+        app.screen.query_one("#query").value = "zebra-quest"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        titles = [r.title for r in app.screen.results]
+        assert "zebra-quest" in titles

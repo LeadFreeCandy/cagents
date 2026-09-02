@@ -204,9 +204,10 @@ class SearchModal(ModalScreen["object | None"]):
     SearchModal OptionList { height: 1fr; }
     """
 
-    def __init__(self, claude_dir: Path) -> None:
+    def __init__(self, claude_dir: Path, labels: dict[str, str] | None = None) -> None:
         super().__init__()
         self.claude_dir = claude_dir
+        self.labels = labels or {}  # session_id -> R label (see search_all_sessions)
         self.results: list = []
 
     def compose(self) -> ComposeResult:
@@ -237,7 +238,7 @@ class SearchModal(ModalScreen["object | None"]):
     def _run_search(self, query: str) -> None:
         from .search import search_all_sessions
 
-        results = search_all_sessions(self.claude_dir, query)
+        results = search_all_sessions(self.claude_dir, query, labels=self.labels)
         self.app.call_from_thread(self._show_results, results)
 
     def _show_results(self, results: list) -> None:

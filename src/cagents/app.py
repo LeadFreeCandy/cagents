@@ -1816,7 +1816,8 @@ exec {real!r} "$@"
                 severity="warning",
             )
             return
-        self.push_screen(SearchModal(self.claude_dir), self._search_chosen)
+        labels = {sid: t.label for sid, t in self.store.sessions.items() if t.label}
+        self.push_screen(SearchModal(self.claude_dir, labels=labels), self._search_chosen)
 
     def _search_chosen(self, result) -> None:
         if result is None:
