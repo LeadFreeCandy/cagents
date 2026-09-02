@@ -161,3 +161,33 @@ def test_search_skips_unreadable_transcript_without_raising(claude_dir: Path, tm
         mtime=0.0, size=1,
     )
     assert search_all_sessions(claude_dir, "anything", sessions=[ghost]) == []
+
+
+def test_scan_title_is_the_rename_not_the_ai_title(claude_dir: Path):
+    """/rename writes a custom-title record; the search's own transcript
+    reader only ever looked at aiTitle, so the names people actually use
+    (and search for) were invisible to the 'title outranks body' ranking."""
+    b = TranscriptBuilder(SID1, "/proj/alpha")
+    b.ai_title("Review the osg converter project")
+    b.raw({"type": "custom-title", "customTitle": "osg-converter", "sessionId": SID1})
+    b.user("hello there")
+    b.ai_title("Review the osg converter project")  # re-emitted after the rename
+    b.write(claude_dir)
+    results = search_all_sessions(claude_dir, "osg-converter")
+    assert results and results[0].kind == MatchKind.TITLE_EXACT
+    assert results[0].title == "osg-converter"
+
+
+def test_tracked_labels_outrank_scanned_titles(claude_dir: Path):
+    """An R label is cagents bookkeeping — it never appears in the
+    transcript, so name search must be handed it explicitly."""
+    b = TranscriptBuilder(SID1, "/proj/alpha").ai_title("Plan the trip").user("hi")
+    b.write(claude_dir)
+    results = search_all_sessions(claude_dir, "rick-sweep", labels={SID1: "rick-sweep"})
+    assert results and results[0].kind == MatchKind.TITLE_EXACT
+    assert results[0].title == "rick-sweep"
+    # And the label REPLACES the title (same precedence the list uses).
+    assert not search_all_sessions(claude_dir, "Plan the trip", labels={SID1: "rick-sweep"}) or (
+        search_all_sessions(claude_dir, "Plan the trip", labels={SID1: "rick-sweep"})[0].kind
+        != MatchKind.TITLE_EXACT
+    )

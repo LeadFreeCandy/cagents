@@ -1816,7 +1816,11 @@ exec {real!r} "$@"
                 severity="warning",
             )
             return
-        self.push_screen(SearchModal(self.claude_dir), self._search_chosen)
+        labels = {sid: t.label for sid, t in self.store.sessions.items() if t.label}
+        names = [(v.session_id, v.project_dir, v.title) for v in self.snapshot.views]
+        self.push_screen(
+            SearchModal(self.claude_dir, labels=labels, names=names), self._search_chosen
+        )
 
     def _search_chosen(self, result) -> None:
         if result is None:

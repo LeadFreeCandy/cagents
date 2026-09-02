@@ -130,10 +130,13 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
     """(project_dir, title, text_lines) — a genuinely full read, every
     line, never head/tail-truncated. project_dir comes straight off the
     records' own "cwd" field (authoritative — no lossy path decoding);
-    title prefers the latest ai-title record, falling back to the first
+    title matches the display precedence: the latest custom-title record
+    (a /rename — the name the human actually knows the conversation by)
+    beats any aiTitle, then the latest ai-title record, then the first
     user message."""
     project_dir = ""
     title = ""
+    custom_title = ""
     first_user_text = ""
     lines: list[str] = []
     try:
@@ -151,9 +154,21 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
                     if isinstance(cwd, str) and cwd:
                         project_dir = cwd
                 rtype = record.get("type")
+                if rtype == "custom-title":
+                    custom = record.get("customTitle")
+                    if isinstance(custom, str) and custom.strip():
+                        title = custom_title = custom.strip()
+                    continue
                 if rtype == "ai-title":
+                    # Some builds carry customTitle on this record too; a
+                    # plain aiTitle never overrides a seen rename (Claude
+                    # re-emits both on every save, custom first).
+                    custom = record.get("customTitle")
+                    if isinstance(custom, str) and custom.strip():
+                        title = custom_title = custom.strip()
+                        continue
                     ai_title = record.get("aiTitle")
-                    if isinstance(ai_title, str) and ai_title.strip():
+                    if isinstance(ai_title, str) and ai_title.strip() and not custom_title:
                         title = ai_title.strip()
                     continue
                 if rtype not in ("user", "assistant"):
@@ -179,7 +194,11 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
 
 
 def search_all_sessions(
-    claude_dir: Path, query: str, limit: int = 50, sessions: list[DiscoveredSession] | None = None
+    claude_dir: Path,
+    query: str,
+    limit: int = 50,
+    sessions: list[DiscoveredSession] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> list[SearchResult]:
     """Every session transcript under claude_dir, fully read (not just
     discovered), scored against `query`, best matches first. Slow by
@@ -189,14 +208,21 @@ def search_all_sessions(
     Ranking is tiered, not a single flat score: a conversation's own name
     matching always outranks a body hit, and within either, an exact
     substring always outranks a fuzzy one — see MatchKind. Only within
-    the same tier does score break the tie."""
+    the same tier does score break the tie.
+
+    `labels` is cagents' own R-label bookkeeping ({session_id: label}):
+    a label never appears in the transcript, yet it's the name the human
+    knows the session by — it replaces the scanned title for name
+    matching and display, the same precedence the session list uses."""
     if not query.strip():
         return []
     if sessions is None:
         sessions = discover_sessions(claude_dir, min_size=1)
     results: list[SearchResult] = []
+    labels = labels or {}
     for discovered in sessions:
         project_dir, title, lines = _scan_transcript(discovered.path)
+        title = labels.get(discovered.session_id) or title
         best: tuple[MatchKind, float, str] | None = None
 
         def consider(text: str, exact_kind: MatchKind, fuzzy_kind: MatchKind) -> None:

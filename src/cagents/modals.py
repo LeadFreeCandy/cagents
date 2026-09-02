@@ -204,16 +204,26 @@ class SearchModal(ModalScreen["object | None"]):
     SearchModal OptionList { height: 1fr; }
     """
 
-    def __init__(self, claude_dir: Path) -> None:
+    def __init__(
+        self,
+        claude_dir: Path,
+        labels: dict[str, str] | None = None,
+        names: list[tuple[str, str, str]] | None = None,
+    ) -> None:
+        """`names`: (session_id, project_dir, display title) for every
+        TRACKED session — the instant, zero-I/O tier. Typing filters these
+        by name; Enter runs the full-history scan."""
         super().__init__()
         self.claude_dir = claude_dir
+        self.labels = labels or {}  # session_id -> R label (see search_all_sessions)
+        self.names = names or []
         self.results: list = []
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Search all conversation history")
             yield Static(
-                "Enter to search (full scan — can take a while) · Esc to cancel",
+                "Type to filter tracked names · Enter for the full-history scan · Esc to cancel",
                 classes="hint",
             )
             yield Input(placeholder="fuzzy search…", id="query")
@@ -222,6 +232,34 @@ class SearchModal(ModalScreen["object | None"]):
 
     def on_mount(self) -> None:
         self.query_one("#query", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """The instant tier: filter the tracked sessions by display name on
+        every keystroke. Pure in-memory matching against names the app
+        already holds — the disk-scanning tier stays behind Enter."""
+        from .search import MatchKind, SearchResult, _match
+
+        query = event.value.strip()
+        if not query:
+            self.results = []
+            self.query_one("#results", OptionList).clear_options()
+            self.query_one("#status", Static).update("")
+            return
+        scored = []
+        for session_id, project_dir, title in self.names:
+            match = _match(query, title)
+            if match is None:
+                continue
+            score, is_exact = match
+            kind = MatchKind.TITLE_EXACT if is_exact else MatchKind.TITLE_FUZZY
+            scored.append(
+                SearchResult(
+                    session_id=session_id, project_dir=project_dir, title=title,
+                    score=score, kind=kind, snippet="tracked session",
+                )
+            )
+        scored.sort(key=lambda r: (r.kind, -r.score))
+        self._show_results(scored, live=True)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
@@ -237,10 +275,19 @@ class SearchModal(ModalScreen["object | None"]):
     def _run_search(self, query: str) -> None:
         from .search import search_all_sessions
 
-        results = search_all_sessions(self.claude_dir, query)
+        results = search_all_sessions(self.claude_dir, query, labels=self.labels)
         self.app.call_from_thread(self._show_results, results)
 
-    def _show_results(self, results: list) -> None:
+    def on_key(self, event) -> None:
+        # Arrow down from the filter drops into the live result list.
+        if event.key == "down" and self.query_one("#query", Input).has_focus:
+            if self.results:
+                self.query_one("#results", OptionList).focus()
+
+    def _show_results(self, results: list, live: bool = False) -> None:
+        """`live`: the instant name tier — refreshed per keystroke, so it
+        must never steal focus from the input, and its status says what
+        Enter adds rather than pretending the search already ran."""
         from rich.text import Text
 
         from .search import MatchKind
@@ -250,19 +297,26 @@ class SearchModal(ModalScreen["object | None"]):
         option_list.clear_options()
         status = self.query_one("#status", Static)
         if not results:
-            status.update("No matches.")
+            status.update("No name matches — Enter searches the full history." if live else "No matches.")
             return
-        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
+        if live:
+            status.update(
+                f"{len(results)} tracked name match{'es' if len(results) != 1 else ''}"
+                " · ↓ to pick · Enter for the full-history scan"
+            )
+        else:
+            status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
         for i, result in enumerate(results):
             is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
             row = Text(no_wrap=True, overflow="ellipsis")
             row.append(f"{result.title[:60]:<60}", style="bold cyan" if is_title_match else "bold")
-            row.append(f"  [{result.kind.label}]\n", style="dim italic")
+            row.append(f"  [{'name' if live else result.kind.label}]\n", style="dim italic")
             row.append(f"  {result.project_dir}\n", style="dim cyan")
             row.append(f"  {result.snippet}", style="italic dim")
             option_list.add_option(Option(row, id=str(i)))
         option_list.highlighted = 0
-        option_list.focus()
+        if not live:
+            option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(self.results[int(event.option.id)])
