@@ -15,18 +15,34 @@ from rich.text import Text
 from .sessions import SessionState, SessionView
 
 # state -> (glyph, style, short label)
+#
+# The colours ARE the priority: a rainbow running red -> orange -> yellow ->
+# green -> blue -> purple, in the same order as ATTENTION_ORDER, so a glance
+# down the list reads as a heat map and you never have to learn which hue
+# means what. Warm = your move, green = something is running for you, blue =
+# Claude has it, purple = parked or finished.
+#
+# Where several states share a hue they are separated by weight rather than
+# by colour (bold > plain > dim), since three greens a shade apart are not
+# something a terminal palette can be trusted to render distinguishably.
+# Everything but needs-you is a fixed 256-colour index rather than an ANSI
+# name, so the ramp keeps its spacing whatever the terminal theme does with
+# "yellow" and "green"; needs-you keeps plain red on purpose, because the
+# alarm colour should be the red the user's own theme has taught them.
+# stopped stays outside the rainbow, in plain dim: it is an anomaly, not a
+# rung on the ladder.
 STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
-    SessionState.WORKING: ("●", "bold green", "working"),
     SessionState.NEEDS_INPUT: ("◉", "bold red", "needs you"),
-    SessionState.NEEDS_REVIEW: ("◆", "bold yellow", "review"),
-    SessionState.EXTERNAL_UPDATE: ("✉", "bold orange3", "external update"),
-    SessionState.SHELL_RUNNING: ("◍", "bold cyan", "shell running"),
-    SessionState.MONITORING: ("◎", "cyan", "monitoring"),
-    SessionState.BACKGROUND: ("◌", "cyan", "background"),
-    SessionState.SNOOZED: ("☾", "bold blue", "snoozed"),
-    SessionState.WAITING_EXTERNAL: ("⧖", "blue", "waiting"),
-    SessionState.DONE: ("✓", "bright_blue", "done"),
+    SessionState.NEEDS_REVIEW: ("◆", "bold orange1", "review"),
+    SessionState.EXTERNAL_UPDATE: ("✉", "bold gold1", "external update"),
+    SessionState.SHELL_RUNNING: ("◍", "bold green3", "shell running"),
+    SessionState.MONITORING: ("◎", "green3", "monitoring"),
+    SessionState.BACKGROUND: ("◌", "dim green3", "background"),
+    SessionState.WORKING: ("●", "bold dodger_blue1", "working"),
+    SessionState.SNOOZED: ("☾", "royal_blue1", "snoozed"),
+    SessionState.WAITING_EXTERNAL: ("⧖", "medium_purple", "waiting"),
     SessionState.STOPPED: ("■", "dim", "stopped"),
+    SessionState.DONE: ("✓", "medium_purple4", "done"),
 }
 
 PREVIEW_KIND_STYLE = {
