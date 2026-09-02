@@ -181,7 +181,10 @@ class CagentsApp(App):
         # terminal — consumed by _handle_spawn_request the moment the shim
         # reports one, so that spawn reuses this exact id (already tracked,
         # already the list row waiting on it) instead of minting a new one.
-        self._pending_new_terminals: set[str] = set()
+        # id -> the `n` helper shell's tmux name, until its spawn request
+        # consumes it (the shell is retired at that moment — see
+        # _handle_spawn_request; two tmux sessions must never keep one id).
+        self._pending_new_terminals: dict[str, str] = {}
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
@@ -655,6 +658,11 @@ class CagentsApp(App):
         """Explicit attach (Enter) on a dead session: resume its real
         `claude --resume` CLI for real and walk in. Loud on failure —
         this is a deliberate user action."""
+        # Register with the browse guard BEFORE spawning: the viewer-sync
+        # worker can fire with a snapshot from before this spawn (the row
+        # still not-live there) and resume the same id a second time —
+        # seen live as two CLIs writing one transcript, 200ms apart.
+        self._resumed_for_preview.add(view.session_id)
         name, reason, severity = self._resume_target(view)
         if name is None:
             self.notify(reason, severity=severity, timeout=10)
@@ -889,14 +897,15 @@ exec {real!r} "$@"
         # reuse it rather than minting a second, orphaned one. Anything
         # else gets a genuinely fresh id.
         session_id = ""
+        helper_shell = None
         if "--resume" in args:
             candidate = args[args.index("--resume") + 1] if args.index("--resume") + 1 < len(args) else ""
             if len(candidate) == 36:
                 session_id = candidate
         if not session_id:
-            if pending_id in self._pending_new_terminals:
+            helper_shell = self._pending_new_terminals.pop(pending_id, None)
+            if helper_shell is not None:
                 session_id = pending_id
-                self._pending_new_terminals.discard(pending_id)
             else:
                 session_id = str(uuid.uuid4())
             args = args + ["--session-id", session_id]
@@ -905,6 +914,18 @@ exec {real!r} "$@"
         except Exception as error:
             self.notify(f"Shell claude failed: {error}", severity="error", timeout=10)
             return
+        if helper_shell is not None and helper_shell != name:
+            # The real session now owns this id. The helper shell that
+            # launched it still carries the same CAGENTS_SESSION_ID; left
+            # alive, it becomes the id's only host the moment the real
+            # session ends — the row reads "live", Enter lands in a stale
+            # shell, and the resume path is unreachable (seen live, twice).
+            # Its purpose ended with this request: retire it.
+            for target in (helper_shell, f"{helper_shell}--term"):
+                try:
+                    self.tmux.kill_session(target)
+                except Exception:
+                    pass  # already gone is fine
         self._checkpoint("new session")
         self.store.track(session_id, directory, utcnow().isoformat())
         self.selected_session_id = session_id
@@ -1755,7 +1776,7 @@ exec {real!r} "$@"
         except Exception as error:
             self.notify(f"Could not open a terminal: {error}", severity="error", timeout=10)
             return
-        self._pending_new_terminals.add(session_id)
+        self._pending_new_terminals[session_id] = name
         try:
             self.tmux.send_shell_command(
                 name, _new_terminal_seed_command(directory, self._recent_directories())
