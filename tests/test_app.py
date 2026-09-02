@@ -798,3 +798,52 @@ async def test_search_finds_a_session_by_its_r_label(world, claude_dir):
         await pilot.pause(0.5)
         titles = [r.title for r in app.screen.results]
         assert "zebra-quest" in titles
+
+
+async def test_search_filters_tracked_names_live_while_typing(world, claude_dir):
+    """Typing in the search field filters the TRACKED sessions by display
+    name instantly — no Enter, no disk scan. Enter still runs the deep
+    full-history search; Esc from the live list still cancels."""
+    from cagents.modals import SearchModal
+
+    app, store, tmux, _ = world
+    store.set_setting("conversation_search", True)
+    store.set_label(SID1, "zebra-quest")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("slash")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, SearchModal)
+        modal.query_one("#query").value = "zeb"
+        await pilot.pause(0.2)
+        # A name match appeared with no scan (results filled synchronously)
+        titles = [r.title for r in modal.results]
+        assert titles == ["zebra-quest"]
+        # ...and typing kept focus in the input (nothing stole it away).
+        assert modal.query_one("#query").has_focus
+        # Narrowing to a non-match empties the list again.
+        modal.query_one("#query").value = "zebraz"
+        await pilot.pause(0.2)
+        assert modal.results == []
+
+
+async def test_search_live_name_match_opens_the_session(world, claude_dir):
+    from cagents.modals import SearchModal
+    from cagents.views import SessionList
+
+    app, store, tmux, _ = world
+    store.set_setting("conversation_search", True)
+    store.set_label(SID3, "zebra-quest")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("slash")
+        await pilot.pause()
+        modal = app.screen
+        modal.query_one("#query").value = "zebra"
+        await pilot.pause(0.2)
+        await pilot.press("down")   # focus list
+        await pilot.press("enter")  # pick the name match
+        await pilot.pause(0.4)
+        assert not isinstance(app.screen, SearchModal)
+        assert app.selected_session_id == SID3
