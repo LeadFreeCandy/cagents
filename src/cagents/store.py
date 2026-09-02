@@ -67,6 +67,13 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # extra columns: key, board status, assignee. Off by default — needs
     # JIRA_SITE / JIRA_EMAIL / JIRA_API_TOKEN in the environment.
     "jira_integration": False,
+    # Settling on a stopped session while browsing resumes its real CLI
+    # so the viewer always shows the live conversation. Every resume is a
+    # full claude process that stays resident until killed — browsing a
+    # long list can quietly start dozens (seen live: 47 processes, 7.7GB,
+    # machine swapping). Off: a stopped row stays stopped, with a
+    # placeholder pane, until an explicit Enter resumes it.
+    "resume_on_browse": True,
     # Fuzzy full-text search across every conversation transcript on disk
     # (the complete history, not just titles). Off by default — a full
     # scan can be slow across many/large transcripts.

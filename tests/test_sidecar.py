@@ -948,3 +948,34 @@ async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
         assert "ensure-view:alpha:term" not in tmux.log
         after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
         assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"
+
+
+async def test_browsing_stays_hands_off_when_resume_on_browse_is_off(world, claude_dir, now):
+    """The lazy resume is a real process per row you settle on (~200MB+ of
+    claude each). With resume_on_browse off, browsing must not start
+    anything — a stopped session stays stopped until an explicit Enter."""
+    store, tmux, registry, _ = world
+    store.set_setting("resume_on_browse", False)
+    sid_dead = "99999999-9999-9999-9999-999999999999"
+    TranscriptBuilder(sid_dead, "/tmp").ai_title("Old work").user("x").assistant_text(
+        "finished"
+    ).write(claude_dir, mtime=now - 5000)
+    store.track(sid_dead, "/tmp", "2026-08-18T07:00:00+00:00")
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, sid_dead)
+        await pilot.pause(0.5)  # the same debounce that would have resumed it
+        assert tmux.created == []
+        # Turning the setting on mid-session works without a restart: the
+        # one-shot "tried once" guard must not have been consumed.
+        store.set_setting("resume_on_browse", True)
+        select_session(app, SID1)
+        await pilot.pause(0.3)
+        select_session(app, sid_dead)
+        await pilot.pause(0.5)
+        assert tmux.created and tmux.created[-1][1][:2] == ["--resume", sid_dead]
