@@ -111,3 +111,18 @@ def test_timestamps_with_a_trailing_z_parse(tmp_path: Path):
     # Still None for genuine junk, rather than raising.
     store.mark_reviewed(SID1, "not a timestamp")
     assert store.sessions[SID1].reviewed_datetime() is None
+
+
+def test_hibernated_at_survives_a_reload(tmp_path):
+    """H must still mean H after a cagents restart: the flag that keeps
+    browsing from resuming a hibernated session lives in the store."""
+    from cagents.store import Store
+
+    path = tmp_path / "state.json"
+    store = Store.load(path)
+    store.track("11111111-1111-1111-1111-111111111111", "/proj/a", "2026-08-18T09:00:00+00:00")
+    store.set_hibernated("11111111-1111-1111-1111-111111111111", "2026-09-09T10:00:00+00:00")
+    again = Store.load(path)
+    assert again.sessions["11111111-1111-1111-1111-111111111111"].hibernated_at == "2026-09-09T10:00:00+00:00"
+    again.clear_hibernated("11111111-1111-1111-1111-111111111111")
+    assert Store.load(path).sessions["11111111-1111-1111-1111-111111111111"].hibernated_at == ""

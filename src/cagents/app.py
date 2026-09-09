@@ -424,10 +424,20 @@ class CagentsApp(App):
         if view is None:
             return
         if not view.live:
-            # Never a fake/static rendering of a dead session — resume the
-            # real CLI right then, lazily (only the one you've actually
-            # settled on, via the debounce that got us here).
-            self._resume_for_preview(view)
+            # A dead session is either resumed right here (the real CLI,
+            # lazily, only the one you've settled on) or the pane says so
+            # — it must never keep showing the previous session. Hibernated
+            # ones are never resumed by browsing; that's what Enter is for.
+            hibernated = bool(view.tracked.hibernated_at)
+            if not hibernated and self._resume_for_preview(view):
+                return
+            from .sidecar import _placeholder
+
+            label = "▯ hibernated" if hibernated else "■ stopped"
+            command = _placeholder(f"{label} — press Enter to resume '{view.title[:48]}'")
+            if command != self._viewer_target:
+                self.sidecar.show_viewer(command)
+                self._viewer_target = command
             return
         # The tmux round-trips run OFF the UI thread: doing them inline in
         # the event handler blocked Textual's redraw exactly while the ←
@@ -515,7 +525,7 @@ class CagentsApp(App):
         except Exception:
             pass
 
-    def _resume_for_preview(self, view: SessionView) -> None:
+    def _resume_for_preview(self, view: SessionView) -> bool:
         """Lazily resume a dead session's real CLI the moment you settle
         on it while browsing. Silent on the expected edge cases (running
         elsewhere, missing transcript, no project dir) — those get loud
@@ -525,11 +535,11 @@ class CagentsApp(App):
         next snapshot to reflect the result rather than retrying on every
         subsequent settle."""
         if view.session_id in self._resumed_for_preview:
-            return
+            return False
         self._resumed_for_preview.add(view.session_id)
         name, _reason, _severity = self._resume_target(view)
         if name is None:
-            return
+            return False
         self.refresh_data()  # so the list picks up "live" as soon as possible
         command = nested_attach_command(self.tmux.create_socket, name)
         try:
@@ -537,6 +547,7 @@ class CagentsApp(App):
             self._viewer_target = command
         except Exception as error:
             self.notify(f"Viewer failed: {error}", severity="error")
+        return True
 
     def _update_preview(self) -> None:
         """The in-app preview — only rendered when there is no sidecar."""
@@ -666,6 +677,7 @@ class CagentsApp(App):
         if name is None:
             self.notify(reason, severity=severity, timeout=10)
             return
+        self.store.clear_hibernated(view.session_id)
         self._show_new_session(name)
 
     def _resume_target(self, view: SessionView) -> tuple[str | None, str, str]:
@@ -1216,6 +1228,9 @@ exec {real!r} "$@"
         socket = view.tmux_socket or None
         self.tmux.kill_session(f"{view.tmux_name}--term", socket=socket)
         self.tmux.kill_session(view.tmux_name, socket=socket)
+        # Remembered in the store, so browsing never quietly resumes it —
+        # not now, not after a cagents restart. Enter clears it.
+        self.store.set_hibernated(view.session_id, utcnow().isoformat())
 
     @staticmethod
     def _recorded_pr_url(view: SessionView) -> str:

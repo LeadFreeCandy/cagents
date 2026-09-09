@@ -170,6 +170,10 @@ class TrackedSession:
     # not a flag, so it self-expires the moment `now` passes it — no
     # explicit clearing needed on the happy path (see _finished_state).
     snoozed_until: str = ""  # ISO 8601
+    # Set when H / x / auto-hibernate stopped this session's Claude on
+    # purpose; cleared by an explicit resume (Enter). While set, browsing
+    # onto the row shows a placeholder instead of quietly resuming it.
+    hibernated_at: str = ""  # ISO 8601
 
     def added_datetime(self) -> datetime | None:
         return _parse_iso(self.added_at)
@@ -205,6 +209,7 @@ class TrackedSession:
             "parent_id": self.parent_id,
             "relation": self.relation,
             "snoozed_until": self.snoozed_until,
+            "hibernated_at": self.hibernated_at,
         }
 
     @classmethod
@@ -230,6 +235,7 @@ class TrackedSession:
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
             snoozed_until=str(data.get("snoozed_until", "")),
+            hibernated_at=str(data.get("hibernated_at", "")),
         )
 
 
@@ -384,6 +390,18 @@ class Store:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
             tracked.snoozed_until = until
+            self.save()
+
+    def set_hibernated(self, session_id: str, when: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.hibernated_at = when
+            self.save()
+
+    def clear_hibernated(self, session_id: str) -> None:
+        tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.hibernated_at:
+            tracked.hibernated_at = ""
             self.save()
 
     def clear_snooze(self, session_id: str) -> None:

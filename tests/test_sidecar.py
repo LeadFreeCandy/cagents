@@ -3,6 +3,8 @@ bootstrap (incl. orphan detection), and the ctx keybinds."""
 
 from __future__ import annotations
 
+import time
+
 from pathlib import Path
 
 import pytest
@@ -948,3 +950,102 @@ async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
         assert "ensure-view:alpha:term" not in tmux.log
         after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
         assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"
+
+
+# ------------------------------------------------------ dormant rows + pane --
+
+
+def _sidecar_app(world, tmp_path=None):
+    store, tmux, registry, claude_dir = world
+    # The fixture's SID1 was written 1s ago (WORKING); age it so it's a
+    # finished, reviewable session — the kind H/x are allowed to touch —
+    # and tag its tmux home so liveness doesn't depend on transcript age.
+    cwd = str(tmp_path) if tmp_path is not None else "/proj/alpha"  # real dir: resumable
+    TranscriptBuilder(SID1, cwd).ai_title("Alpha: fix auth").user(
+        "go", ts=ts_ago(900)
+    ).assistant_text("done", ts=ts_ago(880)).write(claude_dir, mtime=time.time() - 880)
+    tmux.sessions[0].cagents_session_id = SID1
+    if tmp_path is not None:
+        store.sessions[SID1].project_dir = cwd
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    return app, work
+
+
+def _second_live_session(store, tmux, claude_dir, now, sid=SID2, name="beta", path="/proj/beta"):
+    TranscriptBuilder(sid, path).ai_title("Beta").user("go", ts=ts_ago(1)).write(claude_dir, mtime=now - 1)
+    store.track(sid, path, "2026-08-18T09:05:00+00:00")
+    tmux.sessions.append(
+        TmuxSession(name=name, created=now - 60, activity=now, attached=False,
+                    pane_pid=2, pane_path=path, socket="claude", cagents_session_id=sid)
+    )
+
+
+def _session_pane_targets(work):
+    return [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:session" in c]
+
+
+async def test_browsing_onto_a_hibernated_session_shows_a_placeholder_not_a_resume(world, claude_dir, now):
+    """H stops a session; scrolling back over it must not quietly start it
+    again (resume-on-browse would), and must not leave the previous
+    session's pane on screen either — the pane names the hibernated
+    session and says Enter resumes it."""
+    store, tmux, registry, claude_dir = world
+    _second_live_session(store, tmux, claude_dir, now)
+    app, work = _sidecar_app(world)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.4)
+        await pilot.press("H")
+        await pilot.pause(0.5)
+        assert app.snapshot.by_id(SID1).live is False
+        spawned_before = len(tmux.created)
+        select_session(app, SID2)
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.5)
+        assert len(tmux.created) == spawned_before, "browsing resurrected a hibernated session"
+        last = _session_pane_targets(work)[-1]
+        assert "hibernated" in last and "Alpha: fix auth" in last, last
+
+
+async def test_enter_on_a_hibernated_session_resumes_it(world, claude_dir, now, tmp_path):
+    store, tmux, registry, claude_dir = world
+    app, work = _sidecar_app(world, tmp_path)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.4)
+        await pilot.press("H")
+        await pilot.pause(0.5)
+        spawned_before = len(tmux.created)
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        assert len(tmux.created) == spawned_before + 1
+        assert "--resume" in tmux.created[-1][1] and SID1 in tmux.created[-1][1]
+
+
+async def test_a_dormant_row_never_shows_the_previous_sessions_pane(world, claude_dir, now):
+    """The once-per-id guard on resume-on-browse meant a stopped row whose
+    resume had already been attempted got NO pane update at all — you'd
+    scroll onto it and keep looking at whatever was there before. When we
+    don't resume, we say so in the pane."""
+    store, tmux, registry, claude_dir = world
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/proj/gamma").ai_title("Gamma stopped").user("go").write(claude_dir, mtime=now - 5000)
+    store.track(sid, "/proj/gamma", "2026-08-18T09:00:00+00:00")
+    app, work = _sidecar_app(world)
+    app._resumed_for_preview.add(sid)  # already tried once this run
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        select_session(app, SID1)
+        await pilot.pause(0.4)
+        assert "'=alpha'" in _session_pane_targets(work)[-1]
+        select_session(app, sid)
+        await pilot.pause(0.5)
+        last = _session_pane_targets(work)[-1]
+        assert "'=alpha'" not in last and "Gamma stopped" in last, last
