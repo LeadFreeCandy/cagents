@@ -417,6 +417,19 @@ class CagentsApp(App):
         if view is None:
             return
         if not view.live:
+            if not self.store.get_setting("resume_on_browse"):
+                # Hands-off mode: no process gets started for browsing, and
+                # the pane must SAY so — leaving the previous session's
+                # content up reads as showing the wrong conversation.
+                from .sidecar import _placeholder
+
+                command = _placeholder(
+                    f"■ stopped — press Enter to resume '{view.title[:48]}'"
+                )
+                if command != self._viewer_target:
+                    self.sidecar.show_viewer(command)
+                    self._viewer_target = command
+                return
             # Never a fake/static rendering of a dead session — resume the
             # real CLI right then, lazily (only the one you've actually
             # settled on, via the debounce that got us here).

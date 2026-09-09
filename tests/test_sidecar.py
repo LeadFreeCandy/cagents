@@ -971,6 +971,10 @@ async def test_browsing_stays_hands_off_when_resume_on_browse_is_off(world, clau
         select_session(app, sid_dead)
         await pilot.pause(0.5)  # the same debounce that would have resumed it
         assert tmux.created == []
+        # ...and the pane says so, instead of silently keeping whatever the
+        # previous selection showed (a stale conversation reads as a bug).
+        shown = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:session" in c]
+        assert shown and "stopped" in shown[-1] and "enter" in shown[-1].lower()
         # Turning the setting on mid-session works without a restart: the
         # one-shot "tried once" guard must not have been consumed.
         store.set_setting("resume_on_browse", True)
