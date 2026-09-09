@@ -477,6 +477,7 @@ class PlanConfirmModal(ModalScreen[bool]):
 SETTING_CHOICES: dict[str, list[str]] = {
     "diff_mode": ["branch", "uncommitted"],
     "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
+    "auto_hibernate": ["off", "6h", "12h", "1d", "3d", "1w"],
 }
 
 SETTINGS_META: list[tuple[str, str, str]] = [
@@ -535,6 +536,16 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "How long `s` parks a session for by default. Enter cycles. Snoozing is "
         "purely time-based — new transcript activity doesn't wake it early, only "
         "the deadline (or pressing `s` again) does.",
+    ),
+    (
+        "auto_hibernate",
+        "Auto-hibernate idle sessions",
+        "Stop the Claude process of a session that has been idle this long and is "
+        "calm — done, snoozed, or parked on a PR. Its row stays (▮ → ▯) and Enter "
+        "resumes it from the transcript; nothing is lost, since an idle CLI's prompt "
+        "cache expires within minutes anyway. Never touches a session that is "
+        "working, needs you, is unreviewed, or is the one you're looking at. "
+        "Enter cycles; off by default.",
     ),
     (
         "desktop_notifications",

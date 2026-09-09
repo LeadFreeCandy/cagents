@@ -89,6 +89,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "diff_mode": "branch",
     # How long `s` (snooze) parks a session for by default.
     "snooze_duration": "1h",
+    # Stop the Claude process of a resident session that has been idle this
+    # long and is calm (done / snoozed / waiting on a PR). The row stays and
+    # Enter resumes it; attention rows are never touched. Off by default.
+    "auto_hibernate": "off",
     # What re-alerts a session parked "waiting on PR" (w) back out of
     # that state, as an EXTERNAL_UPDATE — each independently toggleable.
     # A merge always marks it done, and a close-without-merge always
@@ -116,6 +120,11 @@ SETTINGS_DEFAULTS: dict[str, object] = {
 # math) need the same mapping.
 SNOOZE_MINUTES: dict[str, int] = {
     "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "1d": 1440,
+}
+
+# auto_hibernate's allowed values -> minutes of idleness (0 = off).
+AUTO_HIBERNATE_MINUTES: dict[str, int] = {
+    "off": 0, "6h": 360, "12h": 720, "1d": 1440, "3d": 4320, "1w": 10080,
 }
 
 

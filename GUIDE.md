@@ -159,6 +159,12 @@ Sidebar rail (on) · toast notifications (off; errors always show) · arrow layo
 (on) · desktop notifications (off; with terminal-notifier installed, clicking one
 selects the task).
 
+Auto-hibernate (off): stop the Claude of any resident session that has been idle
+past the chosen threshold (6h … 1w) and is calm — done, snoozed, or waiting on a
+PR. The row stays (`▮` → `▯`) and Enter resumes it. Rows that need attention, are
+working, are unreviewed, are attached, or are the one you're looking at are never
+touched. The memory-bound way to keep dozens of conversations on the list.
+
 ## Modes
 
 - No tmux, plain terminal → auto-wraps in the container (the default experience).

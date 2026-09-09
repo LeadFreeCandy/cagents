@@ -67,6 +67,11 @@ REFRESH_SECONDS = 2.0
 VIEWER_COALESCE = 0.15
 PR_POLL_SECONDS = 300.0
 JIRA_POLL_SECONDS = 300.0
+AUTO_HIBERNATE_POLL_SECONDS = 300.0
+# The states in which a session is asking nothing of anyone — the only ones
+# auto-hibernate may ever stop. Everything else is either Claude at work or
+# a row waiting on a human.
+CALM_STATES = (SessionState.DONE, SessionState.SNOOZED, SessionState.WAITING_EXTERNAL)
 COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 
 VIEW_IDS = ["queue", "grouped", "kanban"]
@@ -228,6 +233,7 @@ class CagentsApp(App):
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
         self.set_interval(JIRA_POLL_SECONDS, self._poll_jira_prs)
+        self.set_interval(AUTO_HIBERNATE_POLL_SECONDS, self._auto_hibernate)
         self.query_one("#queue", QueueView).focus_list()
         from . import ctx as _ctx
 
@@ -1159,6 +1165,48 @@ exec {real!r} "$@"
             return
         self.notify(f"Hibernated '{view.title}' — Enter resumes it.")
         self.refresh_data()
+
+    def _auto_hibernate(self) -> None:
+        """Every AUTO_HIBERNATE_POLL_SECONDS: stop the Claude of resident
+        sessions that are calm (CALM_STATES) and have been idle past the
+        `auto_hibernate` setting. Skips anything attached, and the row you're
+        looking at — the pane must never go blank under you. Off by default."""
+        from datetime import timedelta
+
+        from .store import AUTO_HIBERNATE_MINUTES
+
+        minutes = AUTO_HIBERNATE_MINUTES.get(str(self.store.get_setting("auto_hibernate")), 0)
+        if minutes <= 0:
+            return
+        cutoff = utcnow() - timedelta(minutes=minutes)
+        victims = [
+            view for view in self.snapshot.views
+            if view.live
+            and view.state in CALM_STATES
+            and not view.attached
+            and view.session_id != self.selected_session_id
+            and view.last_activity is not None
+            and view.last_activity <= cutoff
+        ]
+        if victims:
+            self._auto_hibernate_worker(victims)
+
+    @work(thread=True, exclusive=True, group="autohibernate", exit_on_error=False)
+    def _auto_hibernate_worker(self, victims: list[SessionView]) -> None:
+        stopped: list[str] = []
+        for view in victims:
+            try:
+                self._hibernate(view)
+                stopped.append(view.title)
+            except Exception as error:
+                self.call_from_thread(
+                    self.notify, f"Auto-hibernate failed for '{view.title}': {error}",
+                    severity="warning", timeout=10,
+                )
+        if stopped:
+            names = ", ".join(stopped[:3]) + ("…" if len(stopped) > 3 else "")
+            self.call_from_thread(self.notify, f"Hibernated {len(stopped)} idle: {names}")
+            self.call_from_thread(self.refresh_data)
 
     def _hibernate(self, view: SessionView) -> None:
         """Kill the session's tmux session: the Claude CLI and its terminal

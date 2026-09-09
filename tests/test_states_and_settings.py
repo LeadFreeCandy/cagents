@@ -1497,3 +1497,59 @@ async def test_untrack_leaves_an_in_flight_claude_running(world, claude_dir, now
         await pilot.pause(0.3)
         assert sid not in store.sessions
         assert tmux.killed == []  # never kill mid-turn; the row is just gone
+
+
+# ----------------------------------------------------------- auto-hibernate --
+
+
+def _resident_session(store, tmux, claude_dir, now, sid, name, path, idle_seconds, reviewed):
+    b = TranscriptBuilder(sid, path).ai_title(name).user("go", ts=ts_ago(idle_seconds + 5))
+    b.assistant_text("done", ts=ts_ago(idle_seconds))
+    b.write(claude_dir, mtime=now - idle_seconds)
+    store.track(sid, path, "2026-08-18T09:00:00+00:00")
+    if reviewed:
+        from cagents.claude_data import utcnow
+
+        store.mark_reviewed(sid, utcnow().isoformat())
+    _make_resident(tmux, name, sid, path, now)
+
+
+async def test_auto_hibernate_stops_calm_idle_sessions_and_nothing_else(world, claude_dir, now):
+    """The days-long calm: with auto_hibernate set, a resident session that
+    is done (or snoozed / parked on a PR) and idle past the threshold has its
+    Claude stopped; the row stays and Enter resumes it. Anything asking for
+    attention — review, needs you, working — is never touched, however old,
+    and neither is a fresh one."""
+    app, store, tmux = world
+    store.set_setting("auto_hibernate", "1d")
+    day = 86400
+    old_done = "88888888-8888-8888-8888-888888888888"
+    fresh_done = "99999999-9999-9999-9999-999999999999"
+    old_review = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    _resident_session(store, tmux, claude_dir, now, old_done, "delta", "/proj/delta", 3 * day, reviewed=True)
+    _resident_session(store, tmux, claude_dir, now, fresh_done, "eps", "/proj/eps", 3600, reviewed=True)
+    _resident_session(store, tmux, claude_dir, now, old_review, "zeta", "/proj/zeta", 3 * day, reviewed=False)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        by = app.snapshot.by_id
+        assert by(old_done).state == SessionState.DONE and by(old_done).live
+        assert by(fresh_done).state == SessionState.DONE and by(fresh_done).live
+        assert by(old_review).state == SessionState.NEEDS_REVIEW and by(old_review).live
+        app._auto_hibernate()
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.3)
+        assert tmux.killed == ["delta--term", "delta"]
+        assert old_done in store.sessions and app.snapshot.by_id(old_done).live is False
+
+
+async def test_auto_hibernate_is_off_by_default(world, claude_dir, now):
+    app, store, tmux = world
+    old_done = "88888888-8888-8888-8888-888888888888"
+    _resident_session(store, tmux, claude_dir, now, old_done, "delta", "/proj/delta", 30 * 86400, reviewed=True)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.snapshot.by_id(old_done).state == SessionState.DONE
+        app._auto_hibernate()
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.2)
+        assert tmux.killed == []
