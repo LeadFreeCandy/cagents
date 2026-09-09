@@ -110,6 +110,17 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 - `✓ done` — accepted (`d`). Claude doing more work re-alerts it automatically.
 - `■ stopped` — not running, transcript ends mid-turn.
 
+Every row also carries a second, independent mark right after the state glyph —
+**residency**, i.e. whether a Claude process is currently running for it:
+
+- `▮` resident — a live CLI, holding memory (~200MB); Enter walks straight in.
+- `▯` dormant — nothing running; Enter resumes it from the transcript (`claude --resume`).
+
+The two axes don't imply each other: a `✓ done` row can be `▮` (you reviewed it,
+Claude is still sitting at its prompt) or `▯` (you exited it). Marking done, snoozing
+and untracking never change residency; only ending the session (`/exit` inside it)
+or resuming it does.
+
 ## List keys
 
 | key | action |

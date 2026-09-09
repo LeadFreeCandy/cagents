@@ -115,7 +115,26 @@ def test_session_rows_align_the_state_column_across_title_lengths(claude_dir: Pa
 
 def test_row_widths_default_keeps_the_original_layout(claude_dir: Path):
     row = session_row(_view(claude_dir), NOW)
-    assert row.plain.index("working") == 3 + 44 + 2
+    assert row.plain.index("working") == 5 + 44 + 2  # ' ● ▮ ' + title field + 2
+
+
+def test_rows_show_residency_next_to_the_state_glyph(claude_dir: Path):
+    """Two independent facts per row: attention state (◆ review, ✓ done, …)
+    and whether a Claude process is currently resident for it. The second
+    was only ever hinted at (bold title when live) — invisible in practice,
+    so a done row gave no clue it was still holding 200MB. ▮ resident, ▯ not."""
+    from cagents.format import DORMANT_GLYPH, RESIDENT_GLYPH
+
+    resident = _view(claude_dir, state=SessionState.DONE)
+    dormant = _view(claude_dir, state=SessionState.DONE)
+    dormant.live = False
+    assert session_row(resident, NOW).plain.startswith(f" ✓ {RESIDENT_GLYPH} Fix the login bug")
+    assert session_row(dormant, NOW).plain.startswith(f" ✓ {DORMANT_GLYPH} Fix the login bug")
+    # the rail (compact) and the kanban card carry it too
+    assert session_row(resident, NOW, compact=True).plain.startswith(f" ✓ {RESIDENT_GLYPH} ")
+    assert session_row(dormant, NOW, compact=True).plain.startswith(f" ✓ {DORMANT_GLYPH} ")
+    assert kanban_card(resident, NOW).plain.startswith(f"✓ {RESIDENT_GLYPH} Fix")
+    assert kanban_card(dormant, NOW).plain.startswith(f"✓ {DORMANT_GLYPH} Fix")
 
 
 def test_preview_shows_compaction_hint(claude_dir: Path):

@@ -45,6 +45,20 @@ STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
     SessionState.DONE: ("✓", "medium_purple4", "done"),
 }
 
+# Residency — the other axis a row carries, independent of the state above:
+# is a Claude process resident for this session right now (holding memory,
+# reachable by Enter) or not (Enter resumes it from the transcript)?
+RESIDENT_GLYPH = "▮"
+DORMANT_GLYPH = "▯"
+
+
+def residency_mark(view: SessionView) -> tuple[str, str]:
+    """(glyph, style) for the residency column."""
+    if view.live:
+        return RESIDENT_GLYPH, "green3"
+    return DORMANT_GLYPH, "dim"
+
+
 PREVIEW_KIND_STYLE = {
     "user": ("you", "bold cyan"),
     "assistant": ("claude", "bold magenta"),
@@ -119,9 +133,9 @@ def row_widths(views: Iterable[SessionView]) -> RowWidths:
 
 
 def _jira_prefix_width(widths: RowWidths) -> int:
-    """Width of the prefix before the jira columns start: " {glyph} " (3) +
-    title field (+ 2 trailing) + state field + age field (4 + 1)."""
-    return 3 + widths.title + 2 + widths.state + 5
+    """Width of the prefix before the jira columns start: " {glyph} {res} "
+    (5) + title field (+ 2 trailing) + state field + age field (4 + 1)."""
+    return 5 + widths.title + 2 + widths.state + 5
 
 
 def session_row(
@@ -137,14 +151,17 @@ def session_row(
     rail): glyph, short title, age — nothing else. `widths` comes from
     row_widths() over the whole list so every row's columns line up."""
     glyph, style, label = STATE_STYLE[view.state]
+    res_glyph, res_style = residency_mark(view)
     if compact:
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(f" {glyph} ", style=style)
+        row.append(f"{res_glyph} ", style=res_style)
         row.append(f"{_truncate(view.title, 22):<22} ", style="bold" if view.live else "")
         row.append(f"{human_age(view.last_activity, now):>3}", style="dim")
         return row
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append(f" {glyph} ", style=style)
+    row.append(f"{res_glyph} ", style=res_style)
     row.append(
         f"{_truncate(view.title, widths.title):<{widths.title}}  ",
         style="bold" if view.live else "",
@@ -203,8 +220,10 @@ def group_header(project_dir: str, count: int, compact: bool = False) -> Text:
 
 def kanban_card(view: SessionView, now: datetime | None = None) -> Text:
     glyph, style, _ = STATE_STYLE[view.state]
+    res_glyph, res_style = residency_mark(view)
     card = Text()
     card.append(f"{glyph} ", style=style)
+    card.append(f"{res_glyph} ", style=res_style)
     card.append(_truncate(view.title, 60), style="bold")
     card.append("\n  ")
     card.append(view.project_name, style="dim cyan")

@@ -73,6 +73,10 @@ Derived fresh on every refresh (~2s), never stored:
 | done | a human accepted the result | reviewed at/after the last activity |
 | stopped | ended without completing | no live tmux session and the transcript ends mid-turn |
 
+Next to the state glyph every row shows **residency**: `▮` a Claude process is running for
+this session (Enter attaches), `▯` nothing is running (Enter resumes it from the transcript).
+State and residency are independent — a `done` row may still be resident.
+
 Liveness comes from tmux: sessions started through `cagents` carry a `CAGENTS_SESSION_ID`
 tmux environment variable and map back exactly; sessions started outside it are matched by
 working directory + transcript recency.

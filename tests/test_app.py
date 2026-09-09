@@ -394,7 +394,7 @@ async def test_list_columns_size_to_the_visible_titles(world):
                 re.search(r"needs you|working|review|done|stopped|background", row).start()
                 for row in rows
             }
-            assert state_cols == {3 + max(longest, TITLE_MIN) + 2}
+            assert state_cols == {5 + max(longest, TITLE_MIN) + 2}  # ' ● ▮ ' + title + 2
 
 
 async def test_kanban_cards_still_wrap(world):
