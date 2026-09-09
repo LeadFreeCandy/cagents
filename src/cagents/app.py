@@ -131,6 +131,7 @@ class CagentsApp(App):
         Binding("d", "toggle_done", "Done"),
         Binding("w", "toggle_waiting", "Waiting"),
         Binding("s", "toggle_snooze", "Snooze"),
+        Binding("H", "hibernate", "Hibernate", show=False),
         Binding("f", "fork", "Fork"),
         Binding("h", "handoff", "Handoff"),
         Binding("D", "show_diff", "Diff"),
@@ -1136,6 +1137,38 @@ exec {real!r} "$@"
         self._notify_undoable(f"Snoozed for {duration} (until {until.strftime('%H:%M')}).")
         self.refresh_data()
 
+    def action_hibernate(self) -> None:
+        """H: end the resident Claude for this session — the memory comes
+        back, the row and its review state stay, and Enter resumes it from
+        the transcript (nothing is lost: an idle CLI's prompt cache is long
+        gone anyway, so resuming costs what continuing would have). Refused
+        while in flight, same guard as snooze/done."""
+        view = self.selected_view()
+        if view is None:
+            return
+        if not view.live:
+            self.notify("Nothing is running for this session — Enter resumes it.")
+            return
+        if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+            self.notify("Still in flight — hibernate it once Claude is finished.", severity="warning")
+            return
+        try:
+            self._hibernate(view)
+        except Exception as error:
+            self.notify(f"Hibernate failed: {error}", severity="error", timeout=10)
+            return
+        self.notify(f"Hibernated '{view.title}' — Enter resumes it.")
+        self.refresh_data()
+
+    def _hibernate(self, view: SessionView) -> None:
+        """Kill the session's tmux session: the Claude CLI and its terminal
+        tab. The '--term' view shares those windows and would keep the CLI
+        alive after the leader died, so it goes first. The transcript is
+        Claude's own and untouched."""
+        socket = view.tmux_socket or None
+        self.tmux.kill_session(f"{view.tmux_name}--term", socket=socket)
+        self.tmux.kill_session(view.tmux_name, socket=socket)
+
     @staticmethod
     def _recorded_pr_url(view: SessionView) -> str:
         """The PR this session is actually tied to: what Claude itself
@@ -1853,23 +1886,47 @@ exec {real!r} "$@"
         view = self.selected_view()
         if view is None:
             return
-        self.push_screen(
-            ConfirmModal(
+        if view.live and view.state not in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+            message = (
+                f"Untrack '{view.title}'?\n\nIts Claude is still running and will be "
+                "stopped too. The transcript stays — 'a' can track it again."
+            )
+        else:
+            message = (
                 f"Untrack '{view.title}'?\n\nOnly removes it from cagents — "
                 "Claude's own session data is untouched."
-            ),
+            )
+        self.push_screen(
+            ConfirmModal(message),
             lambda yes: self._untrack_confirmed(view.session_id, bool(yes)),
         )
 
     def _untrack_confirmed(self, session_id: str, yes: bool) -> None:
         if not yes:
             return
+        # "I'm finished with this" also means its Claude: an invisible CLI
+        # left holding memory behind an untracked row is the worst outcome.
+        # Never mid-turn, though — that's the one case the row just goes.
+        view = self.snapshot.by_id(session_id)
+        note = "Untracked."
+        if view is not None and view.live:
+            if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+                note = "Untracked — its Claude is mid-turn and still running."
+            else:
+                try:
+                    self._hibernate(view)
+                    note = "Untracked and its Claude stopped."
+                except Exception as error:
+                    self.notify(
+                        f"Untracked, but could not stop its Claude: {error}",
+                        severity="warning", timeout=10,
+                    )
         self._checkpoint("untrack")
         self.store.untrack(session_id)
         if self.selected_session_id == session_id:
             self.selected_session_id = None
         self.refresh_data()
-        self._notify_undoable("Untracked.")
+        self._notify_undoable(note)
 
     # -- links / palette / settings ------------------------------------------------
 

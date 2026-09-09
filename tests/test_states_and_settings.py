@@ -1377,3 +1377,123 @@ class TestTimeOrderedQueue:
             app.refresh_data()
             await pilot.pause(0.3)
             assert any(v.attention_rank != 0 for v in app.snapshot.views)
+
+
+# ---------------------------------------------------------------- hibernate --
+
+
+def _make_resident(tmux, name, sid, path, now):
+    """Give a tracked session a live tmux home (tier-1 tagged)."""
+    from cagents.tmuxctl import TmuxSession
+
+    tmux.sessions.append(
+        TmuxSession(name=name, created=now - 60, activity=now, attached=False,
+                    pane_pid=7, pane_path=path, socket="claude", cagents_session_id=sid)
+    )
+
+
+def _live_working_session(store, tmux, claude_dir, now, sid="66666666-6666-6666-6666-666666666666"):
+    """A tracked session that is both resident (tmux) and mid-work."""
+    TranscriptBuilder(sid, "/proj/beta").ai_title("Live work").user("go", ts=ts_ago(2)).write(
+        claude_dir, mtime=now - 2
+    )
+    store.track(sid, "/proj/beta", "2026-08-18T09:00:00+00:00")
+    _make_resident(tmux, "beta", sid, "/proj/beta", now)
+    return sid
+
+
+async def test_hibernate_key_ends_the_resident_claude_but_keeps_the_row(world, now):
+    """H: the memory comes back, the row and its review state stay, and
+    Enter resumes it from the transcript. Residency was the one axis the
+    user had no verb for — done/snooze/untrack all left the CLI running."""
+    from conftest import select_session
+
+    app, store, tmux = world
+    _make_resident(tmux, "alpha", SID1, "/proj/alpha", now)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)
+        await pilot.pause()
+        view = app.snapshot.by_id(SID1)
+        assert view.live and view.state == SessionState.NEEDS_REVIEW
+        await pilot.press("H")
+        await pilot.pause(0.3)
+        # the '--term' view shares the session's windows, so it goes first —
+        # otherwise it would keep the Claude pane alive after the leader dies
+        assert tmux.killed == ["alpha--term", "alpha"]
+        assert SID1 in store.sessions
+        after = app.snapshot.by_id(SID1)
+        assert after.live is False
+        assert after.state == SessionState.NEEDS_REVIEW  # attention state untouched
+
+
+async def test_hibernate_key_refuses_a_session_still_in_flight(world, claude_dir, now):
+    from conftest import select_session
+
+    app, store, tmux = world
+    sid = _live_working_session(store, tmux, claude_dir, now)
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause()
+        select_session(app, sid)
+        await pilot.pause()
+        view = app.snapshot.by_id(sid)
+        assert view.live and view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT)
+        await pilot.press("H")
+        await pilot.pause(0.2)
+        assert tmux.killed == []
+        assert sid in store.sessions
+
+
+async def test_hibernate_key_on_a_dormant_session_only_explains(world, claude_dir, now):
+    from conftest import select_session
+
+    app, store, tmux = world
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/proj/gamma").ai_title("Old").user("go").write(claude_dir, mtime=now - 5000)
+    store.track(sid, "/proj/gamma", "2026-08-18T09:00:00+00:00")
+    async with app.run_test(size=(120, 40), notifications=True) as pilot:
+        await pilot.pause()
+        select_session(app, sid)
+        await pilot.pause()
+        assert app.snapshot.by_id(sid).live is False
+        await pilot.press("H")
+        await pilot.pause(0.2)
+        assert tmux.killed == []
+
+
+async def test_untrack_also_ends_a_resident_claude(world, now):
+    """x means "I'm finished with this". Leaving an invisible CLI behind was
+    the worst of both worlds — memory held by something no longer listed."""
+    from conftest import select_session
+
+    app, store, tmux = world
+    _make_resident(tmux, "alpha", SID1, "/proj/alpha", now)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)
+        await pilot.pause()
+        assert app.snapshot.by_id(SID1).live
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause(0.3)
+        assert SID1 not in store.sessions
+        assert tmux.killed == ["alpha--term", "alpha"]
+
+
+async def test_untrack_leaves_an_in_flight_claude_running(world, claude_dir, now):
+    from conftest import select_session
+
+    app, store, tmux = world
+    sid = _live_working_session(store, tmux, claude_dir, now)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, sid)
+        await pilot.pause()
+        assert app.snapshot.by_id(sid).state in (SessionState.WORKING, SessionState.NEEDS_INPUT)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause(0.3)
+        assert sid not in store.sessions
+        assert tmux.killed == []  # never kill mid-turn; the row is just gone

@@ -122,7 +122,8 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |
 | `o` | open the session's PR/artifact link — if none is recorded, prompts you to paste one (remembered for next time and for `w`) |
-| `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
+| `H` | hibernate: stop this session's Claude, keep the row (`▮` → `▯`); Enter resumes it from the transcript. Refused while in flight |
+| `R` / `x` | rename (display name) / untrack — and stop its Claude if one is running (never mid-turn). The transcript stays; `a` re-tracks it |
 | `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association, fleet plans — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
 | `n` / `a` | new session via the dialog (launch-dir default, tab completes, `ctrl+t` shell-pick) / track existing |
 | `N` | **the shell way to start sessions**: jumps to the terminal tab. `cd`/`z`/`mkdir` around like always, then type `claude` — it opens as a managed cagents session in that directory (tracked, selected, session tab focused). `claude --resume <id>` works too. If cagents isn't running, the shim falls back to real claude |

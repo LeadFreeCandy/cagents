@@ -328,13 +328,15 @@ HELP_TEXT = """\
                 merge marks it done automatically
   s             snooze / un-snooze for a set time (settings: default 1h) —
                 purely time-based, new activity doesn't wake it early
+  H             hibernate — stop its Claude, keep the row (▮ → ▯); enter
+                resumes it from the transcript. Refused while in flight
   f             fork — branch this conversation into a new session
   h             handoff — old session writes a spec, new one starts on it,
                 old is marked done (d restores)
   *             related — visit this session's forks/handoffs/parent
   D             diff review screen — comment on lines, send comments to Claude
   o             open the newest recorded link (PR, artifact)
-  R             rename       x  untrack       z  undo the last change
+  R             rename       x  untrack (stops its Claude too)       z  undo
 
 [bold cyan]Sessions[/bold cyan]
   n             new conversation — opens a shell (launch dir default; numbered

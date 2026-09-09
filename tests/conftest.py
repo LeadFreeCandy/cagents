@@ -276,9 +276,14 @@ class FakeTmux:
         self.shell_created: list[tuple[str, str]] = []  # (directory, session_id)
         self.shell_commands: list[tuple[str, str]] = []  # (name, command)
         self.log: list[str] = []
+        self.killed: list[str] = []  # kill_session targets, in order
 
     def available(self) -> bool:
         return True
+
+    def kill_session(self, name: str, socket: str | None = None) -> None:
+        self.killed.append(name)
+        self.sessions = [s for s in self.sessions if s.name != name]
 
     def list_sessions(self):
         return self.sessions
