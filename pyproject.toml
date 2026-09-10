@@ -1,10 +1,11 @@
 [project]
 name = "cagents"
 version = "0.1.0"
-description = "A lightweight terminal supervisor for Claude Code sessions"
+description = "A lightweight terminal supervisor for Claude Code and Codex sessions"
 requires-python = ">=3.10"
 dependencies = [
     "textual>=8.0",
+    "websockets>=14.0",
 ]
 
 [project.optional-dependencies]

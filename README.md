@@ -1,6 +1,6 @@
 # cagents
 
-A lightweight terminal supervisor for Claude Code sessions. Claude owns execution; `cagents`
+A lightweight terminal supervisor for Claude Code and Codex sessions. The agent owns execution; `cagents`
 owns visibility and human review state. See `SPEC.md` for what this must do and why; this
 file describes what's actually implemented. `OPEN_QUESTIONS.md` records where the
 implementation makes judgment calls.
@@ -11,7 +11,9 @@ Requirements (mandatory):
 
 - **macOS** with **tmux** ≥ 3.2 and **git** — sessions live in tmux; cagents is a tmux supervisor.
 - **Python 3.10+**.
-- **Claude Code CLI** (`claude`) on your PATH.
+- **Claude Code CLI** (`claude`) and/or **Codex CLI** (`codex`) on your PATH, signed in.
+  Creating and forking Codex sessions requires the current standalone Codex installation
+  with `codex app-server daemon start` support.
 - **terminal-notifier** — desktop notifications (on by default). Without it cagents falls
   back to `osascript`, which is unreliable, unbranded, and can't do click-to-select:
 
@@ -44,7 +46,7 @@ be toggled there.
 
 ## What it does
 
-- Shows the Claude Code sessions **you chose to track** — never everything on the machine.
+- Shows the Claude Code and Codex sessions **you chose to track** — never everything on the machine.
 - Three views over the same sessions:
   - **Grouped** (`1`) — sessions grouped by project directory, with a live preview pane
     showing the real conversation tail (parsed straight from Claude's own transcript, never a
@@ -83,7 +85,7 @@ On top of v0.1.0 (which lives on `main`, runnable as `cagents`; this branch is
 `cagents-feature` with its own store):
 
 - **Peek** (`space`), **badges** (`⇗` links / `Δ` files touched / `⑂` agents, `o` opens),
-  **fleet palette** (`:`) — promoted from the cagents-next prototypes.
+  and a command prompt (`:`).
 - **Todos (view `4`)** — units of intent. `A` add; `n` starts a session for the selected
   todo (linked, prefilled); `W` grows it a dedicated **git worktree** (branch
   `todo/<slug>`, sibling `<repo>-worktrees/<slug>` dir) with a session inside; `enter`
@@ -114,11 +116,52 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 Options: `--claude-dir` (default `$CLAUDE_CONFIG_DIR` or `~/.claude`), `--store`
 (default `~/.local/share/cagents/state.json`).
 
+## Using Codex
+
+After updating, run `.venv/bin/pip install -e .` and restart cagents.
+
+- Press `n`, choose your directory in the shell, then type `codex`. Model and other
+  CLI options work, for example `codex --model <model-name>` or `codex --cd ../project`.
+- Press `a` to track an existing conversation. The picker labels each provider.
+- Enter attaches to the native Codex terminal, resuming the exact conversation when
+  needed. `codex resume <UUID>` also works in a cagents shell.
+- `f` forks through Codex's local app server. `h` lets you choose Claude or Codex
+  and a model for the successor. A Codex source supplies the spec using a bounded
+  transcript excerpt and a separate read-only Codex invocation. Review, snooze,
+  PR watching, diff comments, and optional full-history search also work with Codex.
+- Use `--codex-dir /path/to/codex-home` to override `$CODEX_HOME` or `~/.codex`.
+  New/fork operations require a standalone installation under that home too.
+
+cagents reads Codex's rollout files without modifying them. It uses explicit turn
+events and, when available, the local daemon's status to detect work and approval
+requests. New threads come from the app server; cagents never guesses their IDs.
+Before opening an empty thread's terminal, cagents asks Codex to persist a short
+integration context note. This prevents an immediate resume failure and starts no
+model turn.
+Codex retains its configured model and permissions unless you supply CLI overrides.
+Managed resumes require an explicit UUID; use `a` to pick a conversation by title.
+Utility commands such as `codex login`, `codex exec`, and `codex --help` stay in the shell.
+
+Codex tracking is local to cagents; the existing cagents2 bridge continues to share
+Claude conversations. Claude-specific hook and background-task signals remain
+Claude-specific. The composer-aware arrow probe recognizes Claude's composer; with
+Codex it passes through unfamiliar layouts, and the explicit layout shortcuts still work.
+
+Integration references: [Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+and [Codex app server](https://learn.chatgpt.com/docs/app-server).
+
+Conversation rows show a one-column provider icon after the state: `✳` Claude or `›` Codex.
+Settings (`,`) → **Conversation title width** controls the queue/grouped/sidebar
+title limit, now **22** columns by default (previously 44; configurable from 8–120).
+The proposed, default-off **Recap line** feature is described in
+[the recap design](RECAP_DESIGN.md); it remains pending in [TODO.md](TODO.md).
+
 ## What it stores
 
 One small JSON file (`~/.local/share/cagents/state.json`): tracked session ids, the project
 directory each was added from, an optional label/note, and the reviewed-at timestamp.
-Nothing else. Claude's own data is strictly read-only to cagents.
+Codex keys use `codex:<thread-id>`; existing Claude IDs and bookkeeping remain compatible.
+Agent transcript data is strictly read-only to cagents; native agents own conversation changes.
 
 ## Development
 
@@ -131,3 +174,36 @@ Layout: `claude_data.py` (read-only parsing of Claude's store), `tmuxctl.py` (tm
 `claude` socket), `store.py` (cagents' own state), `sessions.py` (state derivation +
 tmux↔session mapping), `format.py` (pure renderables), `views.py` / `modals.py` / `app.py`
 (Textual UI).
+`codex_data.py` reads Codex rollouts; `codex_rpc.py` handles local thread creation,
+forking, status reads, and explicitly requested one-shot generation.
+
+## Idle conversations and restarts
+
+Settings (`,`) includes **Auto done duration**, default **7d**. Conversations
+without UI interaction or new conversation activity become **Done (auto)**.
+Existing timestamps are used on the first launch after updating, so old
+conversations qualify immediately. Choose off, 1d, 3d, 7d, 14d, or 30d; custom
+positive durations such as `12h` also work in `auto_done_duration` in state.json.
+Actively working and explicitly snoozed conversations are left alone.
+
+Manual and automatic done conversations share the Done group, newest completion
+first. Hovering or selecting an automatic one resets its inactivity timer; `d`
+can also return it to the queue. New conversation activity reopens it.
+
+Done conversations with no interaction for **one hour** suspend their native
+Claude/Codex process (checked every 30 seconds). Their history and terminal tabs
+remain available. A **☾** marks a suspended conversation; hovering or selecting
+it resumes the same conversation. Background refreshes leave it suspended.
+
+**Ctrl+R** in the list stops and restarts the selected agent with its saved
+conversation. **`:restart`**, then Enter, restarts running tracked agents and
+reloads the cagents dashboard. Both interrupt in-flight work and reload the
+installed CLI. Suspended conversations stay asleep during `:restart`. Shell tabs
+and conversations outside cagents' tracked tmux panes are preserved.
+
+For Codex terminals connected to a shared local app server, cagents interrupts
+only that thread and stops its background terminals before closing the TUI.
+The shared daemon stays running; server-side thread memory follows
+[Codex's own idle-unload policy](https://learn.chatgpt.com/docs/app-server).
+Restarts of saved conversations use a fresh local Codex runtime. A new thread
+without a saved first message retains its existing server connection.

@@ -145,6 +145,8 @@ class ParsedSession:
     # error.
     compact_count: int = 0
     compacted_tokens: int = 0
+    # Codex emits explicit lifecycle events rather than Claude stop reasons.
+    turn_state: str = ""  # running | completed | interrupted
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -596,6 +598,10 @@ class DiscoveredSession:
     encoded_project: str
     mtime: float
     size: int
+
+    @property
+    def provider(self) -> str:
+        return "codex" if self.session_id.startswith("codex:") else "claude"
 
 
 def discover_sessions(claude_dir: Path, min_size: int = 1) -> list[DiscoveredSession]:

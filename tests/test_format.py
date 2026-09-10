@@ -16,6 +16,7 @@ from cagents.format import (
     human_age,
     kanban_card,
     preview_renderable,
+    provider_icon,
     row_widths,
     session_row,
 )
@@ -113,9 +114,36 @@ def test_session_rows_align_the_state_column_across_title_lengths(claude_dir: Pa
     assert long_row.plain.index("working") == long_row.plain.index("oep-sightlab-selection") + widths.title + 2
 
 
-def test_row_widths_default_keeps_the_original_layout(claude_dir: Path):
+def test_row_widths_default_halves_the_original_title_limit(claude_dir: Path):
     row = session_row(_view(claude_dir), NOW)
-    assert row.plain.index("working") == 3 + 44 + 2
+    assert row.plain.index("working") == 3 + 22 + 2
+
+
+def test_provider_icons_use_one_cell_in_full_compact_and_kanban_rows(claude_dir: Path):
+    from rich.cells import cell_len
+
+    view = _view(claude_dir)
+    for provider, glyph in (("claude", "✳"), ("codex", "›")):
+        view.tracked.session_id = ("codex:" if provider == "codex" else "") + SID1
+        assert cell_len(provider_icon(provider).plain) == 1
+        row = session_row(view, NOW).plain
+        assert row.index(glyph) > row.index("working")
+        assert session_row(view, NOW, compact=True).plain.startswith(f" ● {glyph} ")
+        assert kanban_card(view, NOW).plain.startswith(f"● {glyph} ")
+
+
+def test_configured_title_width_aligns_wide_characters_and_sidebar_ages(claude_dir: Path):
+    from rich.cells import cell_len
+
+    views = [_view(claude_dir, label=title) for title in ("東京駅の問題を修正する" * 5, "x" * 100, "small")]
+    for limit in (8, 22, 44, 80):
+        widths = row_widths(views, limit)
+        assert widths.title == limit
+        for view in views:
+            row = session_row(view, NOW, widths=widths).plain
+            assert cell_len(row.split("working")[0]) == 3 + limit + 2
+            compact = session_row(view, NOW, widths=widths, compact=True).plain
+            assert cell_len(compact) == 5 + limit + 1 + 3
 
 
 def test_preview_shows_compaction_hint(claude_dir: Path):

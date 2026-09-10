@@ -32,20 +32,19 @@ from .claude_data import default_claude_dir, utcnow
 from .ctx import CONTEXT_FILE, write_context
 from .diffview import DiffResult, DiffScreen
 from .format import header_summary, preview_renderable
-from .handoff import first_message, summary_prompt
+from .handoff import CliClaudeRunner, HandoffRequest, first_message, model_choices, summary_prompt
 from .modals import (
     ConfirmModal,
     HelpModal,
+    HandoffModal,
     InputModal,
-    PaletteModal,
-    PlanConfirmModal,
+    CommandModal,
     RelatedModal,
     SearchModal,
     SettingsModal,
     TrackModal,
 )
 from .notifier import notify_desktop, read_select_request
-from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import (
     CONTAINER_SOCKET,
@@ -57,7 +56,7 @@ from .sidecar import (
 )
 from .store import Store
 from .tmuxctl import TmuxClient
-from .views import GroupedView, KanbanView, QueueView, SelectionChanged
+from .views import GroupedView, KanbanView, QueueView, SelectionChanged, SessionInteracted
 
 REFRESH_SECONDS = 2.0
 # Viewer sync is leading-edge: a selection change attaches IMMEDIATELY (any
@@ -92,9 +91,9 @@ def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
             commands.append(f"alias {i}={_shquote(f'cd {_shquote(recent)}')}")
             menu.append(f"  {i}) {recent}")
         menu.append("")
-        menu.append("Type a number to jump there, then run: claude")
+        menu.append("Type a number to jump there, then run: claude or codex")
     else:
-        menu.append("Run: claude")
+        menu.append("Run: claude or codex")
     commands.extend(f"echo {_shquote(line)}" for line in menu)
     return "; ".join(commands)
 
@@ -148,9 +147,9 @@ class CagentsApp(App):
         Binding("R", "rename", "Rename", show=False),
         Binding("z", "undo", "Undo", show=False),
         Binding("x", "untrack", "Untrack", show=False),
-        Binding("colon", "palette", "Fleet", show=False),
+        Binding("colon", "command", "Command", show=False),
         Binding("slash", "search", "Search", show=False),
-        Binding("R", "refresh_now", "Refresh", show=False),
+        Binding("ctrl+r", "restart_session", "Restart", show=False),
         Binding("comma", "settings", "Settings", show=False),
         Binding("question_mark", "help", "Help"),
         Binding("q", "quit", "Quit"),
@@ -162,20 +161,21 @@ class CagentsApp(App):
         registry: SessionRegistry | None = None,
         tmux: TmuxClient | None = None,
         claude_dir: Path | None = None,
-        claude_runner=None,
         sidecar: Sidecar | None = None,
         gh_runner=None,
         jira_fetch=None,
+        codex_dir: Path | None = None,
     ):
         super().__init__()
         self.store = store or Store.load()
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
+        from .codex_data import default_codex_dir
+        self.codex_dir = (codex_dir or (registry.codex_dir if registry else default_codex_dir())).expanduser().resolve()
         self.registry = registry or SessionRegistry(
-            self.store, tmux=self.tmux, claude_dir=self.claude_dir
+            self.store, tmux=self.tmux, claude_dir=self.claude_dir, codex_dir=self.codex_dir
         )
         self.sidecar = sidecar if sidecar is not None else (Sidecar() if Sidecar.enabled() else None)
-        self.claude_runner = claude_runner  # lazy CliClaudeRunner if None
         self._pending_handoffs: dict[str, str] = {}  # source_id -> source title
         # Session ids `n` tracked before `claude` was ever typed in their
         # terminal — consumed by _handle_spawn_request the moment the shim
@@ -204,6 +204,12 @@ class CagentsApp(App):
         # to resume — at most once each, until the next snapshot reflects
         # the result. See _resume_for_preview.
         self._resumed_for_preview: set[str] = set()
+        self.restart_requested = False
+        self._restart_all_pending = False
+        self._lifecycle_busy: set[str] = set()
+        self._wake_after_stop: set[str] = set()
+        self._interaction_dirty = False
+        self._idle_poll_running = False
 
     # -- layout --------------------------------------------------------------
 
@@ -227,6 +233,7 @@ class CagentsApp(App):
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
         self.set_interval(JIRA_POLL_SECONDS, self._poll_jira_prs)
+        self.set_interval(30, self._poll_idle_sessions)
         self.query_one("#queue", QueueView).focus_list()
         from . import ctx as _ctx
 
@@ -275,6 +282,7 @@ class CagentsApp(App):
         whatever structural tab actually died. Real claude sessions live
         on an entirely separate socket (cagents-sessions / claude) and are
         never touched here either way."""
+        self._flush_interactions()
         if os.environ.get("CAGENTS_SIDECAR") == "1":
             self._teardown_container()
         self.exit()
@@ -326,6 +334,21 @@ class CagentsApp(App):
     # -- data flow -----------------------------------------------------------
 
     def refresh_data(self) -> None:
+        try:
+            self.store.sync_shared()
+            from .shared import bridge_path
+            if self.store.get_setting("share_conversations") and bridge_path(self.store.path, "cagents"):
+                import hashlib
+                base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+                sibling = base / "cagents2/state.sqlite3"
+                socket = "cagents2-sessions-" + hashlib.sha256(str(sibling.resolve()).encode()).hexdigest()[:10]
+                if socket not in self.tmux.sockets:
+                    self.tmux.sockets = (*self.tmux.sockets, socket)
+        except Exception as error:
+            self._dbg(f"Conversation sharing: {error}")
+            if str(error) != getattr(self, "_sharing_error", ""):
+                self.notify(f"Conversation sharing: {error}", severity="warning")
+            self._sharing_error = str(error)
         self._refresh_worker()
 
     @work(thread=True, exclusive=True, group="refresh", exit_on_error=False)
@@ -356,6 +379,7 @@ class CagentsApp(App):
         if snapshot.generated_at < self.snapshot.generated_at:
             return
         self.snapshot = snapshot
+        self._persist_lifecycle(snapshot)
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
@@ -367,10 +391,15 @@ class CagentsApp(App):
             self._highlight_session(self._pending_highlight)
             self._pending_highlight = None
         self._update_preview()
+        self._write_context()
+        self._schedule_viewer_sync()
         self._notify_transitions(snapshot)
         self._handle_select_request()
         self._handle_spawn_request()
         self._handle_toast_requests()
+        if not getattr(self, "_idle_started", False):
+            self._idle_started = True
+            self._poll_idle_sessions()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -381,27 +410,89 @@ class CagentsApp(App):
         return self.snapshot.by_id(self.selected_session_id)
 
     def on_selection_changed(self, event: SelectionChanged) -> None:
-        if event.view_id != self.active_view_id:
+        if event.view_id != self.active_view_id or self.restart_requested:
+            return
+        if event.session_id != self.current_view().selected_id:
+            return
+        if event.session_id == self.selected_session_id:
             return
         self.selected_session_id = event.session_id
         self._update_preview()
         self._write_context()
         self._schedule_viewer_sync()
 
+    def _record_interaction(self, session_id: str, when: float | None = None) -> None:
+        import time
+        from .lifecycle import timestamp
+
+        tracked = self.store.sessions.get(session_id)
+        when = time.time() if when is None else when
+        if tracked and when > timestamp(tracked.last_interacted_at):
+            tracked.last_interacted_at = datetime.fromtimestamp(when, timezone.utc).isoformat()
+            self._interaction_dirty = True
+
+    def _flush_interactions(self) -> None:
+        if self._interaction_dirty:
+            self.store.save()
+            self._interaction_dirty = False
+
+    def _persist_lifecycle(self, snapshot: Snapshot) -> None:
+        from .lifecycle import last_interaction
+        changed = False
+        for view in snapshot.views:
+            tracked = self.store.sessions.get(view.session_id)
+            if tracked is None:
+                continue
+            # A hover can arrive while the snapshot is being built.
+            if view.auto_done and last_interaction(view) > view.done_at:
+                from .lifecycle import apply_auto_done
+                view.state = SessionState.NEEDS_REVIEW
+                apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at)
+            value = datetime.fromtimestamp(view.done_at, timezone.utc).isoformat() if view.auto_done else ""
+            if tracked.auto_done_at != value:
+                tracked.auto_done_at = value
+                self._interaction_dirty = True
+                changed = True
+            if view.live and not view.suspended and tracked.suspended_at:
+                tracked.suspended_at = ""
+                self._interaction_dirty = True
+                changed = True
+        # Transitions are durable immediately. Mouse motion alone is batched.
+        if changed:
+            self._flush_interactions()
+
+    def on_session_interacted(self, event: SessionInteracted) -> None:
+        self._interact_session(event.session_id)
+
+    def _interact_session(self, session_id: str) -> None:
+        self._record_interaction(session_id)
+        if self._restart_all_pending:
+            return
+        view = self.snapshot.by_id(session_id)
+        if view is None:
+            return
+        if session_id in self._lifecycle_busy:
+            self._wake_after_stop.add(session_id)
+            return
+        if view.suspended:
+            self._begin_lifecycle(view, "resume")
+        elif view.auto_done:
+            self.refresh_data()
+        elif not view.live and view.state == SessionState.DONE and self.sidecar is not None:
+            self._resumed_for_preview.discard(session_id)
+            self._resume_for_preview(view)
+
     # -- the viewer pane (sidecar) ---------------------------------------------
 
     def _schedule_viewer_sync(self) -> None:
         if self.sidecar is None:
             return
-        import time as _time
-
         if self._viewer_timer is not None:
             self._viewer_timer.stop()
             self._viewer_timer = None
-        if _time.monotonic() - self._last_viewer_sync >= VIEWER_COALESCE:
-            self._sync_viewer()
-        else:
-            self._viewer_timer = self.set_timer(VIEWER_COALESCE, self._sync_viewer)
+        # Wait for navigation to settle, including the first keypress after
+        # a pause. A leading-edge switch briefly attached intermediate rows.
+        self._viewer_timer = self.set_timer(VIEWER_COALESCE, self._sync_viewer)
 
     def _viewer_command(self, view: SessionView) -> str:
         socket = view.tmux_socket or self.tmux.create_socket
@@ -415,6 +506,15 @@ class CagentsApp(App):
         self._last_viewer_sync = _time.monotonic()
         view = self.selected_view()
         if view is None:
+            return
+        if self._restart_all_pending or view.session_id in self._lifecycle_busy:
+            return
+        if view.suspended or (view.state == SessionState.DONE and not view.live):
+            from .sidecar import _placeholder
+            command = _placeholder("Conversation suspended. Hover or select it to resume.")
+            if command != self._viewer_target:
+                self.sidecar.show_viewer(command)
+                self._viewer_target = command
             return
         if not view.live:
             # Never a fake/static rendering of a dead session — resume the
@@ -463,8 +563,9 @@ class CagentsApp(App):
                 command = self._viewer_command(view)
                 if command == self._viewer_target or stale():
                     return
-                self.sidecar.show_viewer(command)
-                self._viewer_target = command
+                self.sidecar.show_viewer(command, stale=stale)
+                if not stale():
+                    self._viewer_target = command
             except Exception as error:
                 if not worker.is_cancelled:
                     self.call_from_thread(
@@ -504,7 +605,7 @@ class CagentsApp(App):
             group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
             if stale():
                 return
-            self.sidecar.sync_terminal_tab(nested_attach_command(socket, group))
+            self.sidecar.sync_terminal_tab(nested_attach_command(socket, group), stale=stale)
         except Exception:
             pass
 
@@ -517,6 +618,8 @@ class CagentsApp(App):
         session_id: once we've decided to attempt it, we wait for the
         next snapshot to reflect the result rather than retrying on every
         subsequent settle."""
+        if view.suspended or self._restart_all_pending or view.session_id in self._lifecycle_busy:
+            return
         if view.session_id in self._resumed_for_preview:
             return
         self._resumed_for_preview.add(view.session_id)
@@ -623,6 +726,14 @@ class CagentsApp(App):
         if view is None:
             self.notify("No session selected.", severity="warning")
             return None
+        self._record_interaction(view.session_id)
+        if self._restart_all_pending:
+            return None
+        if view.suspended:
+            self._begin_lifecycle(view, "resume", focus=True)
+            return None
+        if view.session_id in self._lifecycle_busy:
+            return None
         if not self.tmux.available():
             self.notify("tmux not found on PATH — cannot attach.", severity="error")
             return None
@@ -677,15 +788,14 @@ class CagentsApp(App):
             ), "warning"
         if view.missing:
             return None, (
-                "This session's transcript is gone from Claude's store; nothing to resume."
+                "This session's transcript is gone from its agent's store; nothing to resume."
             ), "error"
         directory = view.work_dir if Path(view.work_dir).is_dir() else view.project_dir
         if not Path(directory).is_dir():
             return None, f"Project directory no longer exists: {directory}", "error"
-        claude_bin = self._claude_bin()
-        if not claude_bin:
-            return None, "claude CLI not found.", "error"
-        name = self._spawn_session(directory, ["--resume", view.session_id], view.session_id)
+        if not self._agent_bin(view.provider):
+            return None, f"{view.provider} CLI not found.", "error"
+        name = self._spawn_session(directory, self._resume_args(view), view.session_id)
         return name, "", ""
 
     def _show_new_session(self, tmux_name: str) -> None:
@@ -814,26 +924,39 @@ class CagentsApp(App):
         (~2s), spawning it properly — tracked, hooked, auto-selected, session
         tab focused. If cagents doesn't answer, it falls back to the real
         claude so the shell never dead-ends."""
-        real = self._claude_bin() or "claude"
+        for provider in ("claude", "codex"):
+            self._write_agent_shim(provider)
+        self._write_zdot(self._shim_dir() / "claude")
+
+    def _write_agent_shim(self, provider: str) -> None:
+        import shlex
+        real = self._agent_bin(provider) or provider
         request = self._spawn_request_path()
-        shim = self._shim_dir() / "claude"
+        shim = self._shim_dir() / provider
+        # Utility commands stay in the shell; only interactive Codex launches
+        # need the managed terminal and a thread identity.
+        passthrough = ""
+        if provider == "codex":
+            passthrough = f'''case "${{1:-}}" in
+  exec|e|review|login|logout|app-server|mcp|mcp-server|completion|sandbox|debug|apply|a|cloud|features|help|--help|-h|--version|-V|update|plugin|remote-control|archive|unarchive|delete)
+    exec {shlex.quote(real)} "$@" ;;
+esac
+'''
         script = f"""#!/bin/bash
-# cagents shim — `claude` here opens a managed session in cagents.
-REQUEST={str(request)!r}
-python3 -c 'import json,sys; print(json.dumps({{"dir": sys.argv[1], "pending_id": sys.argv[2], "args": sys.argv[3:]}}))' \
+{passthrough}REQUEST={shlex.quote(str(request))}
+python3 -c 'import json,sys; print(json.dumps({{"provider": "{provider}", "dir": sys.argv[1], "pending_id": sys.argv[2], "args": sys.argv[3:]}}))' \
   "$PWD" "$CAGENTS_SESSION_ID" "$@" > "$REQUEST.tmp" && mv "$REQUEST.tmp" "$REQUEST"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.4
   [ ! -e "$REQUEST" ] && {{ echo "opened in cagents → session tab"; exit 0; }}
 done
 rm -f "$REQUEST"
-echo "cagents not responding — running claude directly"
-exec {real!r} "$@"
+echo "cagents not responding — running {provider} directly"
+exec {shlex.quote(real)} "$@"
 """
         shim.parent.mkdir(parents=True, exist_ok=True)
         shim.write_text(script, "utf-8")
         shim.chmod(0o755)
-        self._write_zdot(shim)
 
     def _write_zdot(self, shim: Path) -> None:
         """The scoped `claude` override for zsh: rc files run AFTER any
@@ -852,13 +975,16 @@ exec {real!r} "$@"
         (zdot / ".zshrc").write_text(
             '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n'
             "unalias claude 2>/dev/null\n"
-            f'claude() {{ "{shim}" "$@" }}\n', "utf-8"
+            f'claude() {{ "{shim}" "$@" }}\n'
+            "unalias codex 2>/dev/null\n"
+            f'codex() {{ "{shim.parent / "codex"}" "$@" }}\n', "utf-8"
         )
 
     def _shim_env(self) -> list[str]:
         return [
             "-e", f"PATH={self._shim_dir()}:{os.environ.get('PATH', '')}",
             "-e", f"ZDOTDIR={self.store.path.parent / 'zdot'}",
+            "-e", f"CODEX_HOME={self.codex_dir}",
         ]
 
     def _handle_spawn_request(self) -> None:
@@ -877,8 +1003,15 @@ exec {real!r} "$@"
         directory = str(payload.get("dir", ""))
         pending_id = str(payload.get("pending_id", ""))
         args = [str(a) for a in payload.get("args", [])]
+        provider = payload.get("provider", "claude")
         if not directory or not Path(directory).is_dir():
             self.notify(f"Shell claude: bad directory {directory!r}", severity="error")
+            return
+        if provider == "codex":
+            self._start_codex_worker(directory, args, pending_id)
+            return
+        if provider != "claude":
+            self.notify(f"Unknown agent: {provider}", severity="error")
             return
         # An explicit resume keeps its id. Otherwise: if this shell is one
         # `n` opened (tagged with CAGENTS_SESSION_ID, still pending — the
@@ -993,6 +1126,12 @@ exec {real!r} "$@"
     def _spawn_session(self, directory: str, claude_args: list[str], session_id: str) -> str:
         """Every session cagents starts goes through here: private socket,
         state hooks attached."""
+        if session_id.startswith("codex:"):
+            binary = self._agent_bin("codex")
+            if not binary:
+                raise RuntimeError("codex CLI not found. Install Codex and run codex login first.")
+            return self.tmux.new_codex_session(directory, claude_args, session_id,
+                                               self.codex_dir, binary)
         return self.tmux.new_claude_session(
             directory, claude_args + self._hook_args(session_id),
             session_id=session_id, claude_bin=self._claude_bin(),
@@ -1005,12 +1144,97 @@ exec {real!r} "$@"
         fallback = Path.home() / ".local" / "bin" / "claude"
         return str(fallback) if fallback.exists() else ""
 
+    def _agent_bin(self, provider: str) -> str:
+        return self._claude_bin() if provider == "claude" else (shutil.which("codex") or "")
+
+    @staticmethod
+    def _resume_args(view: SessionView) -> list[str]:
+        if view.provider == "codex":
+            return ["resume", view.native_session_id, "-C", view.work_dir]
+        return ["--resume", view.session_id]
+
+    @work(thread=True, group="codex-start", exit_on_error=False)
+    def _start_codex_worker(self, directory: str, args: list[str], pending_id: str = "",
+                            parent_id: str = "") -> None:
+        try:
+            from .codex_rpc import CodexClient
+            binary = self._agent_bin("codex")
+            if not binary:
+                raise RuntimeError("codex CLI not found. Install Codex and run codex login first.")
+            # Managed resumes require an explicit ID; the dashboard's `a`
+            # picker resolves names without guessing which thread was opened.
+            native_id = ""
+            if args and args[0] in ("resume", "fork"):
+                if len(args) < 2:
+                    raise RuntimeError("Use codex resume <session-id> or track a conversation with a.")
+                try:
+                    native_id = str(uuid.UUID(args[1]))
+                except ValueError:
+                    raise RuntimeError("Use a Codex session UUID, or track the conversation with a.") from None
+                if args[0] == "fork":
+                    parent_id = "codex:" + native_id
+                    native_id = ""
+                args = args[2:]
+            # Honor a shell user's explicit working-directory override before
+            # thread creation as well as when the TUI attaches.
+            base = Path(directory)
+            remaining = []
+            it = iter(args)
+            for arg in it:
+                if arg in ("-C", "--cd"):
+                    value = next(it, "")
+                    if not value:
+                        raise RuntimeError(f"{arg} requires a directory")
+                    directory = str((base / Path(value).expanduser()).resolve())
+                elif arg.startswith("--cd="):
+                    directory = str((base / Path(arg.partition("=")[2]).expanduser()).resolve())
+                else:
+                    remaining.append(arg)
+            args = remaining
+            if not Path(directory).is_dir():
+                raise RuntimeError(f"Project directory no longer exists: {directory}")
+            created = not native_id
+            if created:
+                client = CodexClient(self.codex_dir, binary)
+                native_id = client.create(
+                    directory, parent_id.removeprefix("codex:"))
+            sid = "codex:" + native_id
+            existing = self.snapshot.by_id(sid)
+            if existing and existing.live:
+                self.call_from_thread(self._codex_opened, sid, directory, existing.tmux_name,
+                                      pending_id, parent_id, existing.tmux_socket)
+                return
+            if existing and existing.state == SessionState.WORKING:
+                raise RuntimeError("This Codex conversation is active outside cagents; wait for it to finish.")
+            remote = ["--remote", "unix://" + str(client.socket_path)] if created else []
+            name = self._spawn_session(directory, ["resume", native_id, "-C", directory, *remote, *args], sid)
+            self.call_from_thread(self._codex_opened, sid, directory, name, pending_id, parent_id)
+        except Exception as error:
+            self.call_from_thread(self.notify, f"Codex launch failed: {error}", severity="error", timeout=10)
+
+    def _codex_opened(self, sid: str, directory: str, name: str, pending_id: str,
+                      parent_id: str, socket: str = "") -> None:
+        self._checkpoint("fork" if parent_id else "new session")
+        if pending_id in self._pending_new_terminals:
+            self._pending_new_terminals.discard(pending_id)
+            self.store.untrack(pending_id)
+        self.store.track(sid, directory, utcnow().isoformat(), parent_id=parent_id,
+                         relation="fork" if parent_id else "")
+        self.selected_session_id = self._pending_highlight = sid
+        if socket and socket != self.tmux.create_socket:
+            self.refresh_data()
+        else:
+            self._show_new_session(name)
+        self.refresh_data()
+
     # -- undo ---------------------------------------------------------------------
 
     def _checkpoint(self, label: str) -> None:
         """Snapshot the session bookkeeping before a mutation, so `z` can
         take it back. Only cagents' own state — never Claude's data, and
         never processes (undoing a fork untracks it; the session lives on)."""
+        if self.selected_session_id:
+            self._record_interaction(self.selected_session_id)
         self._undo_stack.append((label, self.store.export_sessions()))
         del self._undo_stack[:-20]
 
@@ -1020,6 +1244,8 @@ exec {real!r} "$@"
             return
         label, payload = self._undo_stack.pop()
         self.store.restore_sessions(payload)
+        if self.selected_session_id:
+            self._record_interaction(self.selected_session_id)
         self.notify(f"Undid: {label}")
         self.refresh_data()
 
@@ -1059,6 +1285,9 @@ exec {real!r} "$@"
             return
         view.state = state
         view.state_detail = detail
+        view.auto_done = False
+        from .lifecycle import timestamp
+        view.done_at = timestamp(view.tracked.reviewed_at) if state == SessionState.DONE else 0.0
         if self.store.get_setting("time_ordered_queue"):
             view.attention_rank = 0
         else:
@@ -1070,6 +1299,7 @@ exec {real!r} "$@"
         view = self.selected_view()
         if view is None:
             return
+        self._record_interaction(view.session_id)
         self._checkpoint("done change")
         if view.state == SessionState.DONE:
             self.store.clear_reviewed(view.session_id)
@@ -1455,6 +1685,7 @@ exec {real!r} "$@"
         if self.active_view_id == "kanban":
             self.action_switch_view("queue")
         self._highlight_session(session_id)
+        self._interact_session(session_id)
 
     def _highlight_session(self, session_id: str) -> None:
         from .views import SessionList
@@ -1477,6 +1708,9 @@ exec {real!r} "$@"
         view = self.selected_view()
         if view is None or view.missing or view.parsed is None:
             self.notify("Select a session with a transcript to fork.", severity="warning")
+            return
+        if view.provider == "codex":
+            self._start_codex_worker(view.work_dir, [], parent_id=view.session_id)
             return
         if not self._claude_bin():
             self.notify("claude CLI not found.", severity="error")
@@ -1527,25 +1761,39 @@ exec {real!r} "$@"
         if view is None or view.missing or view.parsed is None:
             self.notify("Select a session with a transcript to hand off.", severity="warning")
             return
-        self.push_screen(
-            InputModal(
-                f"Handoff '{view.title}' — what should the successor focus on?",
-                placeholder="the new session's task",
-            ),
-            lambda prompt: self._handoff_confirmed(view.session_id, prompt),
-        )
+        models = {
+            provider: model_choices(provider, self.codex_dir, [
+                v.parsed.model for v in self.snapshot.views if v.provider == provider and v.parsed
+            ]) for provider in ("claude", "codex")
+        }
+        self.push_screen(HandoffModal(view.title, view.provider, models),
+                         lambda request: self._handoff_confirmed(view.session_id, request))
 
-    def _handoff_confirmed(self, source_id: str, prompt: str | None) -> None:
-        if not prompt or not prompt.strip():
+    def _handoff_confirmed(self, source_id: str, request: HandoffRequest | None) -> None:
+        if request is None or not request.prompt.strip():
             return
         # Show the successor-to-be in the list immediately: the spec turn can
         # take a minute and otherwise nothing visibly happens.
         view = self.snapshot.by_id(source_id)
-        title = view.title if view is not None else source_id[:8]
-        self._pending_handoffs[source_id] = title
+        if view is None or view.missing:
+            self.notify("Source session is no longer available.", severity="warning")
+            return
+        if request.provider not in ("claude", "codex"):
+            self.notify("Choose Claude or Codex for the handoff.", severity="error")
+            return
+        if request.model.startswith("-") or any(c.isspace() or ord(c) < 32 for c in request.model):
+            self.notify("Use a model ID or alias without spaces or option flags.", severity="error")
+            return
+        if not self._agent_bin(request.provider):
+            self.notify(f"{request.provider} CLI not found — cannot start the handoff.", severity="error")
+            return
+        if source_id in self._pending_handoffs:
+            self.notify("This conversation already has a handoff in progress.", severity="warning")
+            return
+        self._pending_handoffs[source_id] = view.title
         self._push_pending_rows()
         self.notify("Asking the session to write its handoff spec… (can take a minute)", timeout=10)
-        self._handoff_worker(source_id, prompt.strip())
+        self._handoff_worker(source_id, request.prompt.strip(), request.provider, request.model)
 
     def _push_pending_rows(self) -> None:
         rows = [
@@ -1568,13 +1816,27 @@ exec {real!r} "$@"
     def _handoff_runner(self, source_id: str):
         # Summary turn runs on a throwaway FORK of the old session, so the
         # original transcript is never touched.
+        if source_id.startswith("codex:"):
+            from .codex_rpc import CliCodexRunner
+            from .codex_data import parse_session_file
+            view = self.snapshot.by_id(source_id)
+            if view is None or view.parsed is None or not view.parsed.path.is_file():
+                raise RuntimeError("Codex source transcript is unavailable")
+            parsed = parse_session_file(view.parsed.path, head_bytes=64 * 1024,
+                                        tail_bytes=512 * 1024, preview_items=1000)
+            context = "Source conversation (bounded transcript excerpt):\n" + "\n\n".join(
+                f"{item.kind}: {item.text}" for item in parsed.preview)
+            if len(context) > 200_000:
+                context = context[:50_000] + "\n[Middle omitted]\n" + context[-150_000:]
+            return CliCodexRunner(self.codex_dir, view.work_dir, self._agent_bin("codex"),
+                                  context=context)
         return CliClaudeRunner(
             claude_bin=self._claude_bin(),
             extra_args=("--resume", source_id, "--fork-session"),
         )
 
-    @work(thread=True, exclusive=True, group="handoff", exit_on_error=False)
-    def _handoff_worker(self, source_id: str, prompt: str) -> None:
+    @work(thread=True, group="handoff", exit_on_error=False)
+    def _handoff_worker(self, source_id: str, prompt: str, provider: str, model: str = "") -> None:
         try:
             spec = self._handoff_runner(source_id).run(summary_prompt(prompt))
         except Exception as error:
@@ -1587,23 +1849,29 @@ exec {real!r} "$@"
                 self._handoff_failed, source_id, "Handoff spec came back empty — aborting."
             )
             return
-        self.call_from_thread(self._handoff_spec_ready, source_id, prompt, spec.strip())
+        self.call_from_thread(self._handoff_spec_ready, source_id, prompt, spec.strip(), provider, model)
 
-    def _handoff_spec_ready(self, source_id: str, prompt: str, spec: str) -> None:
-        self._clear_pending_handoff(source_id)
+    def _handoff_spec_ready(self, source_id: str, prompt: str, spec: str, provider: str, model: str = "") -> None:
         view = self.snapshot.by_id(source_id)
         if view is None:
-            self.notify("Source session vanished mid-handoff.", severity="error")
+            self._handoff_failed(source_id, "Source session vanished mid-handoff.")
+            return
+        if provider == "codex":
+            self._codex_handoff_worker(view, prompt, spec, model)
             return
         new_id = str(uuid.uuid4())
         try:
-            name = self._spawn_session(view.project_dir, ["--session-id", new_id], new_id)
+            args = ["--session-id", new_id]
+            if model:
+                args += ["--model", model]
+            name = self._spawn_session(view.work_dir, args, new_id)
         except Exception as error:
-            self.notify(f"Handoff session failed to start: {error}", severity="error", timeout=10)
+            self._handoff_failed(source_id, f"Handoff session failed to start: {error}")
             return
+        self._clear_pending_handoff(source_id)
         self._checkpoint("handoff")
         self.store.track(
-            new_id, view.project_dir, utcnow().isoformat(), label=prompt[:60],
+            new_id, view.work_dir, utcnow().isoformat(), label=prompt[:60],
             parent_id=source_id, relation="handoff",
         )
         # The predecessor is done — restore anytime with d.
@@ -1615,6 +1883,33 @@ exec {real!r} "$@"
             name, first_message(spec, prompt),
             "Handed off — previous session marked done (d on it restores).",
         )
+        self.refresh_data()
+
+    @work(thread=True, group="codex-handoff", exit_on_error=False)
+    def _codex_handoff_worker(self, view: SessionView, prompt: str, spec: str, model: str = "") -> None:
+        try:
+            from .codex_rpc import CodexClient
+            client = CodexClient(self.codex_dir, self._agent_bin("codex"))
+            native_id = client.create(view.work_dir, **({"model": model} if model else {}))
+            sid = "codex:" + native_id
+            args = ["resume", native_id, "-C", view.work_dir,
+                    "--remote", "unix://" + str(client.socket_path)]
+            if model:
+                args += ["--model", model]
+            name = self._spawn_session(view.work_dir, args, sid)
+            self.call_from_thread(self._codex_handoff_ready, view, prompt, spec, sid, name)
+        except Exception as error:
+            self.call_from_thread(self._handoff_failed, view.session_id, f"Codex handoff failed: {error}")
+
+    def _codex_handoff_ready(self, view: SessionView, prompt: str, spec: str, sid: str, name: str) -> None:
+        self._clear_pending_handoff(view.session_id)
+        self._checkpoint("handoff")
+        self.store.track(sid, view.work_dir, utcnow().isoformat(), label=prompt[:60],
+                         parent_id=view.session_id, relation="handoff")
+        self.store.mark_reviewed(view.session_id, utcnow().isoformat())
+        self.selected_session_id = self._pending_highlight = sid
+        self._show_new_session(name)
+        self._send_prompt_later(name, first_message(spec, prompt), "Handed off to Codex.")
         self.refresh_data()
 
     def action_related(self) -> None:
@@ -1702,9 +1997,13 @@ exec {real!r} "$@"
             if view.live:
                 tmux_name, socket = view.tmux_name, (view.tmux_socket or None)
             else:
-                tmux_name = self._spawn_session(
-                    view.project_dir, ["--resume", view.session_id], view.session_id
-                )
+                if view.provider == "codex":
+                    tmux_name, reason, _severity = self._resume_target(view)
+                    if not tmux_name:
+                        raise RuntimeError(reason)
+                else:
+                    tmux_name = self._spawn_session(
+                        view.project_dir, self._resume_args(view), view.session_id)
                 socket = self.tmux.create_socket
                 time.sleep(4.0)
             self.tmux.send_text(tmux_name, message, socket=socket)
@@ -1715,7 +2014,7 @@ exec {real!r} "$@"
             )
             return
         self.call_from_thread(
-            self.notify, f"Sent {count} review comment{'s' if count != 1 else ''} to Claude."
+            self.notify, f"Sent {count} review comment{'s' if count != 1 else ''} to {view.provider}."
         )
         self.call_from_thread(self.refresh_data)
 
@@ -1775,13 +2074,15 @@ exec {real!r} "$@"
     @work(thread=True, exclusive=True, group="track", exit_on_error=False)
     def _load_track_candidates(self) -> None:
         from .claude_data import parse_session_file
+        from .codex_data import parse_session_file as parse_codex
 
         candidates = []
         for discovered in self.registry.discover_untracked()[:200]:
             title = discovered.session_id[:8]
             cwd = ""
             try:
-                parsed = parse_session_file(
+                parser = parse_codex if discovered.provider == "codex" else parse_session_file
+                parsed = parser(
                     discovered.path, head_bytes=16 * 1024, tail_bytes=32 * 1024, preview_items=1
                 )
                 title = parsed.title
@@ -1793,7 +2094,7 @@ exec {real!r} "$@"
 
     def _show_track_modal(self, candidates: list) -> None:
         if not candidates:
-            self.notify("No untracked sessions found in Claude's store.")
+            self.notify("No untracked sessions found in the Claude or Codex stores.")
             return
         self._track_cwds = {d.session_id: cwd for d, _t, cwd in candidates}
         self.push_screen(TrackModal([(d, t) for d, t, _cwd in candidates]), self._track_chosen)
@@ -1816,7 +2117,7 @@ exec {real!r} "$@"
                 severity="warning",
             )
             return
-        self.push_screen(SearchModal(self.claude_dir), self._search_chosen)
+        self.push_screen(SearchModal(self.claude_dir, self.codex_dir), self._search_chosen)
 
     def _search_chosen(self, result) -> None:
         if result is None:
@@ -1871,7 +2172,7 @@ exec {real!r} "$@"
         self.refresh_data()
         self._notify_undoable("Untracked.")
 
-    # -- links / palette / settings ------------------------------------------------
+    # -- links / commands / settings ------------------------------------------------
 
     def action_open_link(self) -> None:
         view = self.selected_view()
@@ -1922,49 +2223,240 @@ exec {real!r} "$@"
             self._open_url(url, "PR")
         self.refresh_data()
 
-    def action_palette(self) -> None:
-        self.push_screen(PaletteModal(), self._palette_submitted)
+    # -- agent suspension / restart -----------------------------------------
 
-    def _palette_submitted(self, request: str | None) -> None:
-        if not request:
+    def _poll_idle_sessions(self) -> None:
+        if self._idle_poll_running or self._restart_all_pending:
             return
-        self.notify("Asking the fleet assistant… (plan will need your confirmation)")
-        self._run_palette_request(request)
+        self._idle_poll_running = True
+        self._idle_worker()
 
-    @work(thread=True, exclusive=True, group="palette", exit_on_error=False)
-    def _run_palette_request(self, request: str) -> None:
-        snapshot = self.snapshot
-        runner = self.claude_runner or CliClaudeRunner(claude_bin=self._claude_bin())
+    @work(thread=True, group="idle", exit_on_error=False)
+    def _idle_worker(self) -> None:
         try:
-            raw = runner.run(build_prompt(snapshot, request))
-            plan = parse_plan(raw, snapshot)
+            activity = self.tmux.client_activity()
+            self.call_from_thread(self._apply_idle_activity, activity)
         except Exception as error:
-            self.call_from_thread(
-                self.notify, f"Fleet assistant failed: {error}", severity="error", timeout=10
-            )
-            return
-        titles = {v.session_id: v.title for v in snapshot.views}
-        self.call_from_thread(
-            self.push_screen, PlanConfirmModal(plan, titles),
-            lambda yes: self._plan_confirmed(plan, yes),
-        )
+            self.call_from_thread(self._dbg, f"Idle activity check failed: {error}")
+        finally:
+            self.call_from_thread(setattr, self, "_idle_poll_running", False)
 
-    def _plan_confirmed(self, plan, yes: bool) -> None:
-        if not yes:
-            return
-        self._checkpoint("fleet plan")
-        done = apply_plan(plan, self.store, utcnow().isoformat())
-        if done:
-            self._notify_undoable("Applied: " + ", ".join(done))
+    def _apply_idle_activity(self, activity: dict[str, float]) -> None:
+        import time
+        from .lifecycle import should_suspend
+
+        now = time.time()
+        for view in self.snapshot.views:
+            last = activity.get(f"{view.tmux_socket}:{view.tmux_name}", 0)
+            if last:
+                self._record_interaction(view.session_id, last)
+            if should_suspend(view, now):
+                self._begin_lifecycle(view, "suspend")
+        self._flush_interactions()
+
+    def _resume_command(self, view: SessionView) -> tuple[str, str]:
+        import shlex
+        binary = self._agent_bin(view.provider)
+        if not binary:
+            raise RuntimeError(f"{view.provider} CLI not found.")
+        directory = view.work_dir if Path(view.work_dir).is_dir() else view.project_dir
+        if not Path(directory).is_dir():
+            raise RuntimeError(f"Project directory no longer exists: {directory}")
+        args = self._resume_args(view)
+        if view.provider == "codex":
+            command = ["env", f"CODEX_HOME={self.codex_dir}", binary, "--no-alt-screen", *args]
         else:
-            self.notify("Nothing to apply.")
+            command = [binary, *args, *self._hook_args(view.session_id)]
+        return "exec " + shlex.join(command), directory
+
+    def _begin_lifecycle(self, view: SessionView, operation: str, focus: bool = False) -> None:
+        if view.session_id in self._lifecycle_busy or self._restart_all_pending:
+            return
+        self._lifecycle_busy.add(view.session_id)
+        self._lifecycle_worker(view, operation, focus)
+
+    def _suspend_still_valid(self, session_id: str) -> bool:
+        import time
+        from .lifecycle import should_suspend
+        view = self.snapshot.by_id(session_id)
+        return bool(view and should_suspend(view, time.time()))
+
+    def _replace_instance(self, view: SessionView, operation: str) -> bool:
+        command, directory = (None, "") if operation == "suspend" else self._resume_command(view)
+        if operation != "suspend" and view.missing:
+            raise RuntimeError("No saved conversation to resume yet; start the agent in its terminal.")
+        if operation == "resume" and not view.tmux_name:
+            name, reason, _ = self._resume_target(view)
+            if name is None:
+                raise RuntimeError(reason)
+            view.tmux_name, view.tmux_socket = name, self.tmux.create_socket
+            return True
+        if operation == "suspend":
+            # A new transcript write since the snapshot makes this decision
+            # obsolete. Give the next refresh a chance to classify that work.
+            if view.parsed and view.parsed.path.is_file() and view.parsed.path.stat().st_mtime > view.parsed.mtime:
+                raise RuntimeError("Conversation changed; suspension deferred.")
+            if not self.call_from_thread(self._suspend_still_valid, view.session_id):
+                return False
+        if view.provider == "codex" and view.live:
+            import shlex
+            from .codex_rpc import CodexClient
+            original = shlex.split(self.tmux.agent_start_command(
+                view.tmux_name, view.session_id, socket=view.tmux_socket or self.tmux.create_socket,
+                pane_id=view.pane_id, pane_pid=view.pane_pid,
+            ))
+            endpoint = next((original[i + 1] for i, arg in enumerate(original[:-1]) if arg == "--remote"), "")
+            endpoint = next((arg.partition("=")[2] for arg in original if arg.startswith("--remote=")), endpoint)
+            if endpoint:
+                if not endpoint.startswith("unix://"):
+                    raise RuntimeError("Restart this remote Codex session from its app server host.")
+                path = Path(endpoint.removeprefix("unix://")) if endpoint != "unix://" else None
+                client = CodexClient(self.codex_dir, timeout=5, socket_path=path)
+                client.stop_thread_activity(view.native_session_id)
+                # A brand-new thread has no rollout until its first turn. Its
+                # metadata still lives in that server, so retain the endpoint.
+                if command and view.parsed and not view.parsed.path.is_file():
+                    command += " --remote " + shlex.quote(endpoint)
+        self.tmux.replace_agent(
+            view.tmux_name, view.session_id, socket=view.tmux_socket or self.tmux.create_socket,
+            pane_id=view.pane_id, pane_pid=view.pane_pid, command=command, directory=directory,
+        )
+        return True
+
+    @work(thread=True, group="agent-lifecycle", exit_on_error=False)
+    def _lifecycle_worker(self, view: SessionView, operation: str, focus: bool) -> None:
+        error = ""
+        try:
+            if operation == "suspend" and not self.call_from_thread(self._suspend_still_valid, view.session_id):
+                operation = "cancel"
+            else:
+                if not self._replace_instance(view, operation):
+                    operation = "cancel"
+        except Exception as exc:
+            error = str(exc)
+        self.call_from_thread(self._lifecycle_finished, view, operation, focus, error)
+
+    def _lifecycle_finished(self, view: SessionView, operation: str, focus: bool, error: str) -> None:
+        sid = view.session_id
+        self._lifecycle_busy.discard(sid)
+        wake = sid in self._wake_after_stop
+        self._wake_after_stop.discard(sid)
+        if error:
+            if operation == "suspend":
+                self._dbg(f"Suspend {sid}: {error}")
+            else:
+                self.notify(f"{view.title}: {error}", severity="error", timeout=10)
+            self.refresh_data()
+            return
+        if operation == "cancel":
+            return
+        tracked = self.store.sessions.get(sid)
+        if tracked is not None:
+            tracked.suspended_at = utcnow().isoformat() if operation == "suspend" else ""
+            if operation == "suspend" and view.provider == "codex":
+                tracked.idle_stopped_at = tracked.suspended_at
+                tracked.idle_activity_at = view.last_activity.isoformat() if view.last_activity else ""
+            self.store.save()
+        view.suspended = operation == "suspend"
+        view.live = not view.suspended
+        latest = self.snapshot.by_id(sid)
+        if latest is not None:
+            latest.suspended, latest.live = view.suspended, view.live
+            latest.tmux_name, latest.tmux_socket = view.tmux_name, view.tmux_socket
+            latest.pane_pid = 0  # replacement PID will arrive in the next inventory
+        import time
+        self.snapshot.generated_at = time.time()  # reject reads begun before the replacement
+        self._resumed_for_preview.discard(sid)
+        self._viewer_target = ""
+        if wake and view.suspended:
+            # The mouse arrived while the native process was shutting down.
+            # The replacement's PID is different; resolve the retained pane afresh.
+            view.pane_pid = 0
+            self._begin_lifecycle(view, "resume", focus)
+        elif focus and view.live:
+            self._attach_live(view)
+        else:
+            self._schedule_viewer_sync()
         self.refresh_data()
+
+    def action_restart_session(self) -> None:
+        view = self.selected_view()
+        if view is None:
+            return
+        self._record_interaction(view.session_id)
+        if not view.live and not view.suspended:
+            self.notify("No running agent to restart. Enter resumes this conversation.", severity="warning")
+            return
+        self.notify(f"Restarting {view.title}…")
+        self._begin_lifecycle(view, "resume" if view.suspended else "restart")
+
+    def action_restart_all(self) -> None:
+        if self._restart_all_pending or self._lifecycle_busy:
+            self.notify("Wait for the current session operation to finish, then retry :restart.", severity="warning")
+            return
+        self._restart_all_pending = True
+        self._flush_interactions()
+        self.notify("Restarting running agents, then cagents…")
+        self._restart_all_worker()
+
+    @work(thread=True, group="restart-all", exit_on_error=False)
+    def _restart_all_worker(self) -> None:
+        errors = []
+        try:
+            # Fresh inventory, not whichever rows happened to be visible when
+            # the command was typed. Skip dormant sessions and pending shells.
+            snapshot = self.registry.refresh()
+            restarted_panes = set()
+            for view in snapshot.views:
+                if not view.live or view.suspended or view.missing:
+                    continue
+                if view.pane_command in ("sh", "bash", "zsh", "fish", "sleep", "true"):
+                    continue  # an agent may have exited, leaving only its shell tab
+                key = (view.tmux_socket, view.pane_id or view.tmux_name)
+                if key in restarted_panes:
+                    continue
+                restarted_panes.add(key)
+                try:
+                    self._replace_instance(view, "restart")
+                    self.call_from_thread(self._record_interaction, view.session_id)
+                except Exception as error:
+                    errors.append(f"{view.title}: {error}")
+        except Exception as error:
+            errors.append(str(error))
+        self.call_from_thread(self._restart_all_finished, errors)
+
+    def _restart_all_finished(self, errors: list[str]) -> None:
+        self._restart_all_pending = False
+        if errors:
+            self.notify("Restart incomplete: " + "; ".join(errors), severity="error", timeout=20)
+            self.refresh_data()
+            return
+        self._flush_interactions()
+        self.restart_requested = True
+        # Leave the container and workspace intact. The entry point re-execs
+        # Python after Textual restores the terminal, loading updated code.
+        self.exit()
+
+    def action_command(self) -> None:
+        self.push_screen(CommandModal(), self._command_submitted)
+
+    def _command_submitted(self, command: str | None) -> None:
+        if not command:
+            return
+        if command.strip().removeprefix(":") == "restart":
+            self.action_restart_all()
+        else:
+            self.notify(f"Unknown command: {command}. Available: restart", severity="warning")
 
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))
 
     def _setting_changed(self, key: str, value) -> None:
-        if key == "state_order":
+        if key == "conversation_title_width":
+            for view_id in VIEW_IDS:
+                self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
+            return
+        if key in ("state_order", "background_activity_states", "auto_done_duration"):
             self.refresh_data()  # ranks are computed per refresh
             return
         if key == "diff_mode":

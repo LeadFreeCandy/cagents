@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from rich.console import Group, RenderableType
+from rich.cells import cell_len
 from rich.text import Text
 
 from .sessions import SessionState, SessionView
@@ -75,11 +76,25 @@ def _truncate(text: str, width: int) -> str:
 
 
 def state_badge(view: SessionView) -> Text:
-    glyph, style, label = STATE_STYLE[view.state]
+    glyph, style, label = session_style(view)
     badge = Text()
     badge.append(glyph + " ", style=style)
     badge.append(label, style=style)
     return badge
+
+
+def session_style(view: SessionView) -> tuple[str, str, str]:
+    glyph, style, label = STATE_STYLE[view.state]
+    if view.auto_done:
+        label = "Done (auto)"
+    if view.suspended:
+        glyph = "☾"
+    return glyph, style, label
+
+
+def provider_icon(provider: str) -> Text:
+    """Text-presentation glyphs that each occupy one terminal cell."""
+    return Text("›", style="cyan") if provider == "codex" else Text("✳", style="dark_orange")
 
 
 # Jira columns (session_row / jira_header must stay in lockstep on width).
@@ -87,41 +102,45 @@ JIRA_KEY_WIDTH = 10
 JIRA_STATUS_WIDTH = 16
 JIRA_ASSIGNEE_WIDTH = 18
 
-# The title column is sized to the widest title actually on screen (bounded),
-# not a fixed 44: with short /rename labels a fixed pad left most of the row
-# blank while the project, markers and detail fell off the right edge.
+# Fit short titles, with a configurable cap (22 by default).
 TITLE_MIN = 12
-TITLE_MAX = 44
+TITLE_MAX = 22
 STATE_MIN = len("working")
 
 
 @dataclass(frozen=True)
 class RowWidths:
     """Column widths shared by every row in one list, so the columns line up.
-    The defaults are the original fixed layout."""
+    The title defaults to half the previous 44-column maximum."""
 
     title: int = TITLE_MAX
     state: int = 10
 
 
-def row_widths(views: Iterable[SessionView]) -> RowWidths:
+def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX) -> RowWidths:
     """Fit the title and state columns to the rows being shown. Bounded so a
     single long AI title can't shove every other column off the edge."""
     views = list(views)
+    title_width = max(8, min(120, int(title_width)))
     if not views:
-        return RowWidths()
-    title = max(len(view.title) for view in views)
-    state = max(len(STATE_STYLE[view.state][2]) for view in views)
+        return RowWidths(title=title_width)
+    title = max(cell_len(view.title) for view in views)
+    state = max(len(session_style(view)[2]) for view in views)
     return RowWidths(
-        title=min(TITLE_MAX, max(TITLE_MIN, title)),
+        title=min(title_width, max(TITLE_MIN, title)),
         state=max(STATE_MIN, state),
     )
 
 
 def _jira_prefix_width(widths: RowWidths) -> int:
-    """Width of the prefix before the jira columns start: " {glyph} " (3) +
-    title field (+ 2 trailing) + state field + age field (4 + 1)."""
-    return 3 + widths.title + 2 + widths.state + 5
+    """State glyph (3), title (+ 2), state label, provider (2), age (4 + 1)."""
+    return 5 + widths.title + 2 + widths.state + 5
+
+
+def _title_field(title: str, width: int) -> str:
+    text = Text(title.replace("\n", " ").replace("\t", " "))
+    text.truncate(width, overflow="ellipsis", pad=True)
+    return text.plain
 
 
 def session_row(
@@ -136,20 +155,24 @@ def session_row(
     and optionally Jira key/status/assignee columns). Compact form (sidecar
     rail): glyph, short title, age — nothing else. `widths` comes from
     row_widths() over the whole list so every row's columns line up."""
-    glyph, style, label = STATE_STYLE[view.state]
-    if compact:
-        row = Text(no_wrap=True, overflow="ellipsis")
-        row.append(f" {glyph} ", style=style)
-        row.append(f"{_truncate(view.title, 22):<22} ", style="bold" if view.live else "")
-        row.append(f"{human_age(view.last_activity, now):>3}", style="dim")
-        return row
+    glyph, style, label = session_style(view)
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append(f" {glyph} ", style=style)
+    if compact:
+        row.append_text(provider_icon(view.provider))
+        row.append(" ")
+        row.append(_title_field(view.title, widths.title) + " ", style="bold" if view.live else "")
+        row.append(f"{human_age(view.last_activity, now):>3}", style="dim")
+        if view.auto_done:
+            row.append(" Done (auto)", style=style)
+        return row
     row.append(
-        f"{_truncate(view.title, widths.title):<{widths.title}}  ",
+        _title_field(view.title, widths.title) + "  ",
         style="bold" if view.live else "",
     )
     row.append(f"{label:<{widths.state}}", style=style)
+    row.append(" ")
+    row.append_text(provider_icon(view.provider))
     row.append(f"{human_age(view.last_activity, now):>4} ", style="dim")
     if show_jira:
         row.append(f"{view.jira_key or '—':<{JIRA_KEY_WIDTH}}", style="dim magenta" if view.jira_key else "dim")
@@ -202,9 +225,11 @@ def group_header(project_dir: str, count: int, compact: bool = False) -> Text:
 
 
 def kanban_card(view: SessionView, now: datetime | None = None) -> Text:
-    glyph, style, _ = STATE_STYLE[view.state]
+    glyph, style, _ = session_style(view)
     card = Text()
     card.append(f"{glyph} ", style=style)
+    card.append_text(provider_icon(view.provider))
+    card.append(" ")
     card.append(_truncate(view.title, 60), style="bold")
     card.append("\n  ")
     card.append(view.project_name, style="dim cyan")
@@ -227,7 +252,7 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
     head.append("\n")
     head.append(f"{view.project_dir}\n", style="dim cyan")
 
-    meta = Text(style="dim")
+    meta = Text(view.provider + " ", style="dim")
     if view.parsed:
         if view.parsed.git_branch:
             meta.append(f" {view.parsed.git_branch} ")
@@ -291,7 +316,7 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
     parts.append(Text("─" * max(10, width - 2), style="dim"))
 
     if view.missing:
-        parts.append(Text("Transcript not found in Claude's store.", style="dim red"))
+        parts.append(Text(f"Transcript not found in {view.provider}'s store.", style="dim red"))
         return Group(*parts)
     if not view.parsed or not view.parsed.preview:
         parts.append(Text("No conversation yet.", style="dim"))
@@ -299,6 +324,8 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
 
     for item in view.parsed.preview:
         prefix, style = PREVIEW_KIND_STYLE.get(item.kind, ("?", "dim"))
+        if item.kind == "assistant":
+            prefix = view.provider
         line = Text()
         if item.kind == "tool":
             line.append(f"{prefix} {item.tool_name}", style=style)

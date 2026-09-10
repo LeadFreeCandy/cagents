@@ -41,6 +41,7 @@ def _parse_iso(value: str) -> datetime | None:
 # User-facing toggles (the `,` settings panel). Everything defaults here;
 # only overrides are persisted.
 SETTINGS_DEFAULTS: dict[str, object] = {
+    "share_conversations": True,
     # Attach opens sessions in a side pane, keeping the list as a left rail.
     "sidebar": True,
     # Toast notifications (bottom-left). Errors always show regardless.
@@ -80,6 +81,11 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # sessions bubble up only when their state CHANGES (working -> review,
     # etc.), so recent activity beats a pile of stale needs-review rows.
     "time_ordered_queue": False,
+    # Treat finished turns with lingering tasks as needs-review unless the
+    # user opts into separate monitoring/background/shell-running states.
+    "background_activity_states": False,
+    "auto_done_duration": "7d",
+    "conversation_title_width": 22,
     # Verbose debug trace (keys, clicks, tmux commands, state changes)
     # into ctx.log next to state.json. Cheap and invaluable for "it
     # switched tabs on its own" reports — on by default for now.
@@ -161,6 +167,19 @@ class TrackedSession:
     # not a flag, so it self-expires the moment `now` passes it — no
     # explicit clearing needed on the happy path (see _finished_state).
     snoozed_until: str = ""  # ISO 8601
+    last_interacted_at: str = ""  # real UI input, never a background refresh
+    auto_done_at: str = ""  # distinct from a human accepting the result
+    suspended_at: str = ""  # agent stopped; explicit interaction may resume it
+    idle_stopped_at: str = ""  # ignore Codex's own shutdown event as new work
+    idle_activity_at: str = ""  # conversation clock immediately before that stop
+
+    @property
+    def provider(self) -> str:
+        return "codex" if self.session_id.startswith("codex:") else "claude"
+
+    @property
+    def native_session_id(self) -> str:
+        return self.session_id.removeprefix("codex:")
 
     def added_datetime(self) -> datetime | None:
         return _parse_iso(self.added_at)
@@ -196,6 +215,11 @@ class TrackedSession:
             "parent_id": self.parent_id,
             "relation": self.relation,
             "snoozed_until": self.snoozed_until,
+            "last_interacted_at": self.last_interacted_at,
+            "auto_done_at": self.auto_done_at,
+            "suspended_at": self.suspended_at,
+            "idle_stopped_at": self.idle_stopped_at,
+            "idle_activity_at": self.idle_activity_at,
         }
 
     @classmethod
@@ -221,6 +245,11 @@ class TrackedSession:
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
             snoozed_until=str(data.get("snoozed_until", "")),
+            last_interacted_at=str(data.get("last_interacted_at", "")),
+            auto_done_at=str(data.get("auto_done_at", "")),
+            suspended_at=str(data.get("suspended_at", "")),
+            idle_stopped_at=str(data.get("idle_stopped_at", "")),
+            idle_activity_at=str(data.get("idle_activity_at", "")),
         )
 
 
@@ -262,6 +291,29 @@ class Store:
         tmp.write_text(json.dumps(payload, indent=2) + "\n", "utf-8")
         os.replace(tmp, self.path)
 
+    def sync_shared(self) -> None:
+        if not self.get_setting("share_conversations"):
+            return
+        from .shared import bridge_path, sync
+        path = bridge_path(self.path, "cagents")
+        if path is None:
+            return
+        local = {sid: t.project_dir for sid, t in self.sessions.items() if t.provider == "claude"}
+        def apply(shared):
+            if set(shared) == set(local):
+                return
+            previous = dict(self.sessions)
+            for sid in set(local) - set(shared):
+                self.sessions.pop(sid, None)
+            for sid in set(shared) - set(local):
+                self.sessions[sid] = TrackedSession.from_dict(sid, {"project_dir": shared[sid]})
+            try:
+                self.save()
+            except BaseException:
+                self.sessions = previous
+                raise
+        sync(path, "cagents:" + str(self.path.resolve()), local, apply)
+
     def export_sessions(self) -> dict:
         """JSON-safe snapshot of the session bookkeeping (for undo)."""
         return {sid: t.to_dict() for sid, t in self.sessions.items()}
@@ -276,8 +328,14 @@ class Store:
 
     def reset(self) -> None:
         """Wipe cagents' own bookkeeping. Claude's transcripts are untouched."""
+        from .shared import bridge_path, forget_checkpoint
+        path = bridge_path(self.path, "cagents")
+        if path:
+            forget_checkpoint(path, "cagents:" + str(self.path.resolve()))
         self.sessions.clear()
         self.settings.clear()
+        if path:
+            self.settings["share_conversations"] = False
         self.save()
 
     # -- mutations (each saves immediately; the store is tiny) --------------
@@ -313,12 +371,14 @@ class Store:
         tracked = self.sessions.get(session_id)
         if tracked is not None:
             tracked.reviewed_at = when
+            tracked.auto_done_at = ""
             self.save()
 
     def clear_reviewed(self, session_id: str) -> None:
         tracked = self.sessions.get(session_id)
-        if tracked is not None and tracked.reviewed_at:
+        if tracked is not None:
             tracked.reviewed_at = ""
+            tracked.auto_done_at = ""
             self.save()
 
     def set_label(self, session_id: str, label: str) -> None:

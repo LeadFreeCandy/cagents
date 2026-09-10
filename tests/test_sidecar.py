@@ -142,6 +142,72 @@ class TestSidecarPane:
         assert ["resize-pane", "-Z", "-t", "%1"] in outer.calls
 
 
+class TestViewerReuse:
+    @pytest.mark.parametrize("window", ["session", "term-1"])
+    def test_superseded_switch_is_abandoned_after_tty_lookup(self, window):
+        outer, work, switches = FakeOuterTmux(), FakeWorkTmux(), []
+        cancelled = False
+        def workspace(args):
+            nonlocal cancelled
+            if args[-1] == "#{pane_tty}":
+                cancelled = True  # another selection landed during the lookup
+                return "/dev/viewer-tty\n"
+            return work(args)
+        sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=workspace,
+                          session_runner=lambda *args: switches.append(args))
+        sidecar.ensure_workspace()
+        show = sidecar.show_viewer if window == "session" else sidecar.sync_terminal_tab
+        show(nested_attach_command("native", "alpha"))
+        work.calls.clear()
+        show(nested_attach_command("native", "beta"), stale=lambda: cancelled)
+        assert not switches
+        assert not any(c[0] == "respawn-pane" for c in work.calls)
+
+    @pytest.mark.parametrize("window", ["session", "term-1"])
+    def test_switch_reuses_only_the_viewers_client(self, window):
+        outer, work, switches = FakeOuterTmux(), FakeWorkTmux(), []
+
+        def workspace(args):
+            if args[-1] == "#{pane_tty}":
+                return "/dev/viewer-tty\n"
+            return work(args)
+
+        sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=workspace,
+                          session_runner=lambda socket, args: switches.append((socket, args)))
+        sidecar.ensure_workspace()
+        show = sidecar.show_viewer if window == "session" else sidecar.sync_terminal_tab
+        show(nested_attach_command("native", "alpha"))
+        work.calls.clear()
+        show(nested_attach_command("native", "beta"))
+        assert switches == [("native", ["switch-client", "-c", "/dev/viewer-tty", "-t", "=beta"])]
+        assert not any(c[0] in ("respawn-pane", "select-window") for c in work.calls)
+        show(nested_attach_command("native", "beta"))
+        assert len(switches) == 1
+
+    @pytest.mark.parametrize("case", ["different-server", "dead-client", "shell"])
+    def test_incompatible_or_dead_clients_fall_back_to_respawn(self, case):
+        outer, work, switches = FakeOuterTmux(), FakeWorkTmux(), []
+
+        def workspace(args):
+            if args[-1] == "#{pane_tty}":
+                return "/dev/viewer-tty\n"
+            return work(args)
+
+        def native(socket, args):
+            switches.append(args)
+            raise RuntimeError("no such client")
+
+        sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=workspace, session_runner=native)
+        sidecar.ensure_workspace()
+        sidecar.show_viewer(nested_attach_command("native", "alpha"))
+        command = ("sleep 60" if case == "shell" else
+                   nested_attach_command("another" if case == "different-server" else "native", "beta"))
+        work.calls.clear()
+        sidecar.show_viewer(command)
+        assert ["respawn-pane", "-k", "-t", "=work:session", command] in work.calls
+        assert bool(switches) == (case == "dead-client")
+
+
 class TestCommands:
     def test_nested_attach_command_quotes_and_socket(self):
         cmd = nested_attach_command("claude", "my-repo")
@@ -164,7 +230,7 @@ class TestCommands:
         # No key bindings in static setup — the ← cycle comes from
         # arrow_capture_commands (toggleable); C-t/C-d from ctx binds.
         assert not any(c.startswith("bind") for c in flat)
-        assert any("after-select-pane" in c for c in flat)
+        assert any("window-pane-changed" in c for c in flat)
         assert any("status-right" in c for c in flat)  # the statusline
 
     def test_arrow_bindings_are_a_size_control(self):
@@ -280,8 +346,8 @@ class TestCommands:
 
         commands = dim_chat_commands(True)
         flat = [" ".join(c) for c in commands]
-        assert any("set-hook" in c and "after-select-pane" in c for c in flat)
-        hook = next(c for c in flat if "set-hook" in c)
+        assert ["set-hook", "-g", "-u", "after-select-pane"] in commands
+        hook = next(c for c in flat if "window-pane-changed" in c)
         # per-pane override (-p) on the chat pane (1), never the rail (0)
         assert "set-option -p -t :.1 window-style" in hook
         assert "set-option -p -t :.0" not in hook
@@ -291,7 +357,7 @@ class TestCommands:
 
         commands = dim_chat_commands(False)
         flat = [" ".join(c) for c in commands]
-        hook = next(c for c in flat if "set-hook" in c)
+        hook = next(c for c in flat if "window-pane-changed" in c)
         assert "window-style" not in hook  # plain, undimmed focus hook
         assert ["set-option", "-p", "-t", ":.1", "-u", "window-style"] in commands
 
@@ -358,6 +424,8 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
         TmuxSession(name="alpha", created=now - 60, activity=now, attached=False,
                     pane_pid=1, pane_path="/proj/alpha", socket="claude")
     )
+    for tracked in store.sessions.values():
+        tracked.last_interacted_at = ts_ago(3600)
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
     return store, tmux, registry, claude_dir
 
@@ -459,7 +527,7 @@ async def test_browsing_to_a_dead_session_resumes_the_real_cli(world, claude_dir
     TranscriptBuilder(sid_dead, "/tmp").ai_title("Old work").user("x").assistant_text(
         "finished"
     ).write(claude_dir, mtime=now - 5000)
-    store.track(sid_dead, "/tmp", "2026-08-18T07:00:00+00:00")
+    store.track(sid_dead, "/tmp", ts_ago(3600))
     outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,

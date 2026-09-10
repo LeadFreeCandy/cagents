@@ -421,6 +421,7 @@ class TestTmuxMapping:
 class TestRegistry:
     def test_refresh_builds_views(self, claude_dir: Path, tmp_path: Path, now: float):
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
         store.track(SID2, "/proj/beta", "2026-08-17T09:00:00+00:00")
 
@@ -460,6 +461,7 @@ class TestRegistry:
             claude_dir, mtime=now - 5
         )
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
         tmux = FakeTmux()
         tmux.sessions.append(_tmux(name="alpha", path="/proj/alpha", created=now - 60))
@@ -492,6 +494,7 @@ class TestRegistry:
 
     def test_refresh_handles_missing_transcript(self, claude_dir: Path, tmp_path: Path, now: float):
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID3, "/proj/ghost", "2026-08-17T09:00:00+00:00")
         registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
         snap = registry.refresh(now=now)
@@ -504,6 +507,7 @@ class TestRegistry:
         # encoding of the tracked project_dir (e.g. started in a subdir).
         TranscriptBuilder(SID1, "/proj/alpha/sub").user("hi").write(claude_dir, mtime=now)
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
         registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
         snap = registry.refresh(now=now)
@@ -514,6 +518,7 @@ class TestRegistry:
         TranscriptBuilder(SID1, "/proj/alpha").user("a").write(claude_dir, mtime=now - 10)
         TranscriptBuilder(SID2, "/proj/beta").user("b").write(claude_dir, mtime=now - 5)
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
         registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
         untracked = registry.discover_untracked()
@@ -521,6 +526,7 @@ class TestRegistry:
 
     def test_pane_prompt_forces_needs_input(self, claude_dir: Path, tmp_path: Path, now: float):
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-17T09:00:00+00:00")
         TranscriptBuilder(SID1, "/proj/alpha").user("go").assistant_tool_use(
             "t1", "Bash", {"command": "make deploy"}
@@ -544,6 +550,7 @@ class TestEnterWorktreeTranscriptMove:
         from cagents.store import Store
 
         store = Store.load(tmp_path / "state.json")
+        store.set_setting("auto_done_duration", "off")
         store.track(SID1, "/proj/alpha", "2026-08-23T10:00:00+00:00")
         claude_dir = tmp_path / "claude"
         return SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir), claude_dir

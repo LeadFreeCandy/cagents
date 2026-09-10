@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from .agent_status import fetch_agent_states
+from . import codex_data
 from .claude_data import (
     DiscoveredSession,
     ParsedSession,
@@ -186,6 +187,20 @@ class SessionView:
     # stays put while nothing meaningful has changed, only reshuffling
     # when a rank actually changes. See SessionRegistry._state_since.
     rank_stable_since: float = 0.0
+    auto_done: bool = False
+    done_at: float = 0.0
+    suspended: bool = False
+    pane_id: str = ""
+    pane_pid: int = 0
+    pane_command: str = ""
+
+    @property
+    def provider(self) -> str:
+        return self.tracked.provider
+
+    @property
+    def native_session_id(self) -> str:
+        return self.tracked.native_session_id
 
     @property
     def parent_id(self) -> str:
@@ -223,7 +238,7 @@ class SessionView:
             return self.parsed.title
         if self.inherited_title:
             return self.inherited_title
-        return self.session_id[:8]
+        return self.native_session_id[:8]
 
     @property
     def project_dir(self) -> str:
@@ -401,8 +416,35 @@ def derive_state(
             return needs_input("forked — type to begin")
         added = tracked.added_datetime()
         if added is not None and now - added.timestamp() < NEW_TERMINAL_GRACE_SECONDS:
-            return needs_input("waiting on you — run `claude` in its terminal")
+            return needs_input("waiting on you — run `claude` or `codex` in its terminal")
         return (SessionState.STOPPED, "transcript missing")
+
+    if tracked.provider == "codex":
+        if live and codex_pane_prompt(pane_text):
+            return needs_input("Codex is waiting on you")
+        if agent_state:
+            status = agent_state.get("type")
+            flags = agent_state.get("activeFlags", [])
+            if status == "active":
+                if "waitingOnApproval" in flags or "waitingOnUserInput" in flags:
+                    return needs_input("Codex is waiting on you")
+                return (SessionState.WORKING, _working_detail(parsed))
+            if status == "systemError":
+                return (SessionState.STOPPED, "Codex reports an error")
+        if parsed.turn_state == "completed":
+            return _finished_state(parsed, tracked, now)
+        if parsed.turn_state == "interrupted":
+            return (SessionState.STOPPED, "turn interrupted")
+        if live and (parsed.turn_state == "running" or "esc to interrupt" in pane_text.lower()):
+            return (SessionState.WORKING, _working_detail(parsed))
+        if not parsed.last_record_role:
+            return needs_input("at the Codex prompt") if live else (SessionState.STOPPED, "empty session")
+        if parsed.turn_state == "running":
+            recent = parsed.last_timestamp and now - parsed.last_timestamp.timestamp() < FRESH_WRITE_SECONDS
+            if recent:
+                return (SessionState.WORKING, "active outside cagents' tmux")
+            return (SessionState.STOPPED, "ended mid-turn")
+        return _finished_state(parsed, tracked, now)
 
     if live and agent_state:
         status = agent_state.get("status")
@@ -463,6 +505,15 @@ def derive_state(
     if parsed.last_record_role == "":
         return (SessionState.STOPPED, "empty session")
     return _finished_state(parsed, tracked, now)
+
+
+def codex_pane_prompt(text: str) -> bool:
+    tail = "\n".join(text.lower().splitlines()[-20:])
+    return any(marker in tail for marker in (
+        "would you like to run the following command", "would you like to make the following edits",
+        "do you trust the contents of this directory", "press enter to confirm",
+        "waiting for your input",
+    ))
 
 
 def _lingering_background_activity(
@@ -696,7 +747,7 @@ def map_tmux_sessions(
     # beating the Claude session whenever its name sorted later.
     by_id: dict[str, TmuxSession] = {}
     for tmux in sorted(tmux_sessions, key=lambda t: t.created):
-        if tmux.cagents_session_id:
+        if tmux.cagents_session_id and not tmux.is_view:
             by_id[tmux.cagents_session_id] = tmux
     for tracked, _parsed in tracked_views:
         tmux = by_id.get(tracked.session_id)
@@ -722,6 +773,9 @@ def map_tmux_sessions(
             for tracked, parsed in tracked_views:
                 if tracked.session_id in result or parsed is None:
                     continue
+                command = Path(tmux.pane_command).name
+                if command in ("codex", "claude") and tracked.provider != command:
+                    continue
                 cwd = parsed.cwd or tracked.project_dir
                 if not dir_matches(tmux.pane_path, cwd):
                     continue
@@ -737,7 +791,7 @@ def map_tmux_sessions(
             # newest-mtime-wins-by-default is a guess, not a match.
             must_verify = verify_content or len(candidates) > 1
             for _mtime, sid in candidates:
-                if must_verify:
+                if must_verify or sid.startswith("codex:"):
                     if pane_text_fn is None:
                         continue
                     if not _content_match(parsed_by_id[sid], pane_text_fn(tmux)):
@@ -781,10 +835,16 @@ class SessionRegistry:
         tmux: TmuxClient | None = None,
         claude_dir: Path | None = None,
         agents_runner=None,
+        codex_dir: Path | None = None,
+        codex_client=None,
     ):
         self.store = store
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
+        self.codex_dir = (codex_dir or codex_data.default_codex_dir()).expanduser().resolve()
+        from .codex_rpc import CodexClient
+        self.codex_client = codex_client or CodexClient(self.codex_dir, timeout=2)
+        self._codex_retry_at = 0.0
         self.agents_runner = agents_runner  # injectable for `claude agents --json`
         # Debounce state: a WORKING session must look blocked on two
         # consecutive refreshes before we say "needs you" — a single frame
@@ -815,7 +875,7 @@ class SessionRegistry:
 
         now = time.time() if now is None else now
         tmux_sessions = self.tmux.list_sessions()
-        if now - self._agent_states_at >= AGENT_POLL_SECONDS:
+        if any(t.provider == "claude" for t in self.store.sessions.values()) and now - self._agent_states_at >= AGENT_POLL_SECONDS:
             self._agent_states = fetch_agent_states(runner=self.agents_runner)
             self._agent_states_at = now
         agent_states = self._agent_states
@@ -826,7 +886,7 @@ class SessionRegistry:
             if tracked.archived:
                 continue  # hidden from views; still in the store's history
             path = self._find_session_file(tracked)
-            parsed = self._parse(path) if path is not None else None
+            parsed = self._parse(path, tracked.provider) if path is not None else None
             if path is not None:
                 seen_paths.add(path)
             pairs.append((tracked, parsed))
@@ -847,36 +907,71 @@ class SessionRegistry:
 
         views: list[SessionView] = []
         for tracked, parsed in pairs:
+            if tracked.provider == "codex" and tracked.idle_stopped_at and parsed and parsed.turn_state == "interrupted":
+                from dataclasses import replace
+                from .store import _parse_iso
+                cutoff = _parse_iso(tracked.idle_stopped_at)
+                if cutoff and parsed.last_timestamp and parsed.last_timestamp <= cutoff:
+                    # Interrupting a parked remote turn is cagents' cleanup,
+                    # not a new conversation. Preserve its pre-suspend clock
+                    # and completion; a genuinely newer record supersedes this.
+                    parsed = replace(parsed, turn_state="completed", last_stop_reason="end_turn",
+                                     last_timestamp=_parse_iso(tracked.idle_activity_at))
             tmux = mapping.get(tracked.session_id)
-            live = tmux is not None
-            pane_text = pane_text_of(tmux) if tmux is not None else ""
-            events = self._load_events(tracked.session_id)
+            live = tmux is not None and not tmux.pane_dead
+            suspended = bool(tracked.suspended_at) or bool(tmux and tmux.suspended)
+            if tmux is not None and not tmux.pane_dead:
+                suspended = False  # another UI already resumed this pane
+            pane_text = pane_text_of(tmux) if live else ""
+            events = self._load_events(tracked.session_id) if tracked.provider == "claude" else None
+            agent_state = agent_states.get(tracked.session_id)
+            if not suspended and tracked.provider == "codex" and now >= self._codex_retry_at and self.codex_client.socket_path.exists():
+                try:
+                    thread = self.codex_client.call("thread/read", {"threadId": tracked.native_session_id})["thread"]
+                    agent_state = thread.get("status")
+                    if parsed is None:
+                        parsed = ParsedSession(tracked.session_id, Path(thread.get("path") or "."),
+                                               cwd=thread.get("cwd") or tracked.project_dir)
+                    if thread.get("name"):
+                        from dataclasses import replace
+                        parsed = replace(parsed, title=thread["name"])
+                except (RuntimeError, KeyError, ImportError):
+                    self._codex_retry_at = now + 10  # one failed connection, not one per session
             state, detail = derive_state(
                 parsed, tracked, live, pane_text, now, events=events,
-                agent_state=agent_states.get(tracked.session_id),
+                agent_state=agent_state,
             )
+            # Apply the display policy before recording transitions, sorting,
+            # or building review/notification text, so changes between these
+            # background states don't shuffle or re-alert the same review row.
+            if not self.store.get_setting("background_activity_states") and state in (
+                SessionState.MONITORING, SessionState.BACKGROUND, SessionState.SHELL_RUNNING,
+            ):
+                state = SessionState.NEEDS_REVIEW
+                detail = tracked.finished_reason or "finished, unreviewed"
+            view = SessionView(
+                session_id=tracked.session_id, tracked=tracked, parsed=parsed,
+                state=state, live=live,
+                tmux_name=tmux.name if tmux else "",
+                tmux_socket=tmux.socket if tmux else "",
+                attached=tmux.attached if tmux else False,
+                state_detail=detail, missing=parsed is None,
+                suspended=suspended,
+                pane_id=tmux.pane_id if tmux else "",
+                pane_pid=tmux.pane_pid if tmux else 0,
+                pane_command=tmux.pane_command if tmux else "",
+            )
+            from .lifecycle import apply_auto_done
+            apply_auto_done(view, self.store.get_setting("auto_done_duration"), now)
             previous_state = self._last_state.get(tracked.session_id)
-            state, detail = self._debounce(tracked.session_id, state, detail)
-            if state != previous_state or tracked.session_id not in self._state_since:
+            view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
+            if view.state != previous_state or tracked.session_id not in self._state_since:
                 self._state_since[tracked.session_id] = now
-            did_line, needs_line = derive_did_needs(state, detail, parsed, pane_text)
-            views.append(
-                SessionView(
-                    session_id=tracked.session_id,
-                    tracked=tracked,
-                    parsed=parsed,
-                    state=state,
-                    live=live,
-                    tmux_name=tmux.name if tmux else "",
-                    tmux_socket=tmux.socket if tmux else "",
-                    attached=tmux.attached if tmux else False,
-                    state_detail=detail,
-                    missing=parsed is None,
-                    did_line=did_line,
-                    needs_line=needs_line,
-                    rank_stable_since=self._state_since[tracked.session_id],
-                )
-            )
+            view.rank_stable_since = view.done_at if view.state == SessionState.DONE else self._state_since[tracked.session_id]
+            view.did_line, view.needs_line = derive_did_needs(view.state, view.state_detail, parsed, pane_text)
+            if suspended:
+                view.state_detail += " · suspended — hover to resume"
+            views.append(view)
 
         # Lineage: resolve forks/handoffs against what's visible.
         children: dict[str, list[str]] = {}
@@ -952,7 +1047,7 @@ class SessionRegistry:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _parse(self, path: Path) -> ParsedSession | None:
+    def _parse(self, path: Path, provider: str = "claude") -> ParsedSession | None:
         """parse_session_file, reused while the file's (mtime, size) holds."""
         try:
             stat = path.stat()
@@ -964,7 +1059,8 @@ class SessionRegistry:
         if cached is not None and cached[0] == stamp:
             return cached[1]
         try:
-            parsed = parse_session_file(path)
+            parser = codex_data.parse_session_file if provider == "codex" else parse_session_file
+            parsed = parser(path)
         except OSError:
             self._parse_cache.pop(path, None)
             return None
@@ -972,6 +1068,13 @@ class SessionRegistry:
         return parsed
 
     def _find_session_file(self, tracked: TrackedSession) -> Path | None:
+        if tracked.provider == "codex":
+            cached = self._file_cache.get(tracked.session_id)
+            if cached is not None and cached.is_file():
+                return cached
+            self._file_cache.pop(tracked.session_id, None)
+            self._file_cache.update({s.session_id: s.path for s in codex_data.discover_sessions(self.codex_dir)})
+            return self._file_cache.get(tracked.session_id)
         path = session_file_path(self.claude_dir, tracked.project_dir, tracked.session_id)
         if path.is_file():
             return path
@@ -991,4 +1094,5 @@ class SessionRegistry:
 
     def discover_untracked(self) -> list[DiscoveredSession]:
         tracked_ids = set(self.store.sessions)
-        return [s for s in discover_sessions(self.claude_dir) if s.session_id not in tracked_ids]
+        found = discover_sessions(self.claude_dir) + codex_data.discover_sessions(self.codex_dir)
+        return sorted((s for s in found if s.session_id not in tracked_ids), key=lambda s: s.mtime, reverse=True)

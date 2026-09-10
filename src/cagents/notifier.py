@@ -63,7 +63,7 @@ def notify_desktop(
                 tn,
                 "-title", title,
                 "-message", message,
-                "-group", f"cagents-{session_id[:8]}",
+                "-group", f"cagents-{session_id if session_id.startswith('codex:') else session_id[:8]}",
                 "-execute", f"/bin/sh -c \"echo {session_id} > '{request}'\"",
             ]
             bundle_id = _terminal_bundle_id()

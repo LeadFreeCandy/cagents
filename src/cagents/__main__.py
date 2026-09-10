@@ -11,7 +11,7 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cagents",
-        description="A lightweight terminal supervisor for Claude Code sessions.",
+        description="A lightweight terminal supervisor for Claude Code and Codex sessions.",
     )
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument(
@@ -19,6 +19,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Claude config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)",
+    )
+    parser.add_argument(
+        "--codex-dir", type=Path, default=None,
+        help="Codex data dir (default: $CODEX_HOME or ~/.codex)",
     )
     parser.add_argument(
         "--store",
@@ -36,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         "--reset",
         action="store_true",
         help="wipe cagents' own bookkeeping (tracked sessions, settings) and exit; "
-        "Claude's transcripts are untouched",
+        "agent transcripts are untouched",
     )
     args = parser.parse_args(argv)
 
@@ -53,11 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         count = len(store.sessions)
         answer = input(
             f"Wipe cagents' bookkeeping ({count} tracked session(s), settings)? "
-            "Claude's transcripts are NOT touched. [y/N] "
+            "Agent transcripts are NOT touched. [y/N] "
         )
         if answer.strip().lower() == "y":
             store.reset()
-            print("Reset. Claude's own session data is untouched.")
+            print("Reset. Agent session data is untouched.")
         else:
             print("Aborted.")
         return 0
@@ -86,8 +90,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from cagents.app import CagentsApp
 
-    app = CagentsApp(store=store, claude_dir=args.claude_dir)
+    app = CagentsApp(store=store, claude_dir=args.claude_dir, codex_dir=args.codex_dir)
     app.run()
+    if app.restart_requested:
+        os.execv(sys.executable, [sys.executable, "-m", "cagents", *raw_args])
     return 0
 
 

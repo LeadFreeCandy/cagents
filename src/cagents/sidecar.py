@@ -43,11 +43,12 @@ TABS = ("session", "diff", "term-1", "+term")  # left-to-right (display names)
 
 
 class Sidecar:
-    def __init__(self, runner=None, own_pane: str = "", work_runner=None):
+    def __init__(self, runner=None, own_pane: str = "", work_runner=None, session_runner=None):
         # runner: outer-tmux (the container); work_runner: the workspace
         # server that holds the tabs. Both injectable for tests.
         self._run = _logged_runner("outer", runner or _outer_tmux)
         self._work = _logged_runner("work", work_runner or _work_tmux)
+        self._session = session_runner or _session_tmux
         self.term_env: list[str] = []  # -e PATH=... for terminal tabs (claude shim)
         self.own_pane = own_pane or os.environ.get("TMUX_PANE", "")
         self.pane_id: str = ""  # the viewer pane on the right
@@ -68,8 +69,8 @@ class Sidecar:
     # The right pane permanently attaches the "work" session on a private
     # socket; that session's WINDOWS are the tabs (native tmux tab bar at
     # the top of the pane, clickable): session | diff | term-1. Content
-    # switches by respawning a window's pane; shells persist across tab
-    # switches because the windows never die with the view.
+    # switches reuse the nested client on the same server; shells persist
+    # across tab switches because the windows never die with the view.
 
     def ensure_workspace(
         self, terminal_dir: str = "", ctx_prog: str = "", context_path: str = "",
@@ -222,20 +223,45 @@ class Sidecar:
             args.append(command)
         self._work(args)
 
-    def show_viewer(self, shell_command: str) -> None:
+    def show_viewer(self, shell_command: str, stale=lambda: False) -> None:
         """Point the SESSION TAB at `shell_command` (live attach or static
         preview). Never steals focus or switches tabs — browsing must not
         disturb what you're looking at. Content is respawned BEFORE the
         viewer pane is (first) created: at startup the split must appear
         already showing the conversation, not flash the placeholder shell
         for a beat (user-reported)."""
+        if stale():
+            return
         if shell_command != self.current_command or self._pane_dead("session"):
             # placeholder, not a default shell: a just-recreated window must
             # never flash a terminal while waiting for the attach
             self._ensure_window("session", command=_placeholder("attaching…"))
-            self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
+            switched = self._switch_client("session", self.current_command, shell_command, stale)
+            if stale():
+                return
+            if not switched:
+                self._work(["respawn-pane", "-k", "-t", "=work:session", shell_command])
             self.current_command = shell_command
         self._ensure_viewer_pane()
+
+    def _switch_client(self, window: str, previous: str, command: str, stale=lambda: False) -> bool:
+        """Retarget the existing nested client without tearing down its PTY.
+
+        Clients can only switch within their current server. Generic shell
+        commands, different sockets, and dead clients use the respawn path.
+        The workspace pane's TTY identifies this viewer, never another client.
+        """
+        old, new = _attach_target(previous), _attach_target(command)
+        if not old or not new or old[0] != new[0]:
+            return False
+        try:
+            tty = self._work(["display-message", "-p", "-t", f"=work:{window}", "#{pane_tty}"]).strip()
+            if not tty.startswith("/dev/") or stale():
+                return False
+            self._session(new[0], ["switch-client", "-c", tty, "-t", "=" + new[1]])
+            return True
+        except RuntimeError:
+            return False
 
     def _pane_dead(self, window: str) -> bool:
         """remain-on-exit keeps dead panes around (deliberately — see
@@ -258,7 +284,7 @@ class Sidecar:
         self._work(["respawn-pane", "-k", "-t", "=work:diff", pager_command])
         self.select_tab("diff")
 
-    def sync_terminal_tab(self, shell_command: str) -> None:
+    def sync_terminal_tab(self, shell_command: str, stale=lambda: False) -> None:
         """Keep the term-1 PANE pointed at `shell_command` — normally a
         nested attach into the currently selected session's OWN terminal
         window (see app.py's _sync_terminal) — without switching tabs or
@@ -269,9 +295,15 @@ class Sidecar:
         shared by every session. Only respawns when the target actually
         changed, so revisiting the same session's terminal doesn't kill
         work already running in it."""
+        if stale():
+            return
         self._ensure_window("term-1")
         if shell_command != self.current_terminal_command or self._pane_dead("term-1"):
-            self._work(["respawn-pane", "-k", "-t", "=work:term-1", shell_command])
+            switched = self._switch_client("term-1", self.current_terminal_command, shell_command, stale)
+            if stale():
+                return
+            if not switched:
+                self._work(["respawn-pane", "-k", "-t", "=work:term-1", shell_command])
             self.current_terminal_command = shell_command
 
     def open_terminal_tab(self, shell_command: str) -> None:
@@ -327,6 +359,19 @@ def _work_tmux(args: list[str]) -> str:
     return proc.stdout
 
 
+def _session_tmux(socket: str, args: list[str]) -> str:
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    from .ctx import _log
+
+    _log(f"tmux[{socket}]: {' '.join(args)}")
+    proc = subprocess.run(["tmux", "-L", socket, *args], capture_output=True,
+                          text=True, timeout=10, env=env)
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or "tmux client switch failed")
+    return proc.stdout
+
+
 def _placeholder(message: str) -> str:
     import shlex
 
@@ -362,6 +407,19 @@ def nested_attach_command(socket: str, session_name: str) -> str:
     its own socket, with $TMUX cleared so tmux allows the nesting."""
     safe = session_name.replace("'", "'\\''")
     return f"env -u TMUX tmux -L {socket} attach-session -t '={safe}'"
+
+
+def _attach_target(command: str) -> tuple[str, str] | None:
+    import shlex
+
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return None
+    if (len(args) == 9 and args[:5] == ["env", "-u", "TMUX", "tmux", "-L"]
+            and args[6:8] == ["attach-session", "-t"] and args[8].startswith("=")):
+        return args[5], args[8][1:]
+    return None
 
 
 def program_invocation(extra_args: list[str]) -> list[str]:
@@ -542,9 +600,10 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "window-status-current-format", ""],
         ["set", "-g", "focus-events", "on"],
         ["set", "-g", "detach-on-destroy", "on"],
-        # after-select-pane fires for keys AND mouse clicks (pane-focus-in
-        # would need terminal focus reporting, which many terminals lack).
-        ["set-hook", "-g", "after-select-pane", _FOCUS_HOOK],
+        # Re-selecting the focused pane must not trigger another resize.
+        # This hook follows actual pane changes for both keys and clicks.
+        ["set-hook", "-g", "-u", "after-select-pane"],
+        ["set-hook", "-g", "window-pane-changed", _FOCUS_HOOK],
     ]
 
 
@@ -589,7 +648,8 @@ def apply_arrow_capture(
 
 def dim_chat_commands(enable: bool) -> list[list[str]]:
     hook = _FOCUS_HOOK_DIMMED if enable else _FOCUS_HOOK
-    commands = [["set-hook", "-g", "after-select-pane", hook]]
+    commands = [["set-hook", "-g", "-u", "after-select-pane"],
+                ["set-hook", "-g", "window-pane-changed", hook]]
     if not enable:
         # clear any dim left over from before the setting was turned off
         commands.append(["set-option", "-p", "-t", ":.1", "-u", "window-style"])

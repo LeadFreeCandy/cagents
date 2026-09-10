@@ -179,7 +179,8 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
 
 
 def search_all_sessions(
-    claude_dir: Path, query: str, limit: int = 50, sessions: list[DiscoveredSession] | None = None
+    claude_dir: Path, query: str, limit: int = 50, sessions: list[DiscoveredSession] | None = None,
+    codex_dir: Path | None = None,
 ) -> list[SearchResult]:
     """Every session transcript under claude_dir, fully read (not just
     discovered), scored against `query`, best matches first. Slow by
@@ -194,9 +195,19 @@ def search_all_sessions(
         return []
     if sessions is None:
         sessions = discover_sessions(claude_dir, min_size=1)
+        if codex_dir is not None:
+            from .codex_data import discover_sessions as discover_codex
+            sessions += discover_codex(codex_dir)
     results: list[SearchResult] = []
     for discovered in sessions:
-        project_dir, title, lines = _scan_transcript(discovered.path)
+        if discovered.provider == "codex":
+            from .codex_data import scan_transcript
+            try:
+                project_dir, title, lines = scan_transcript(discovered.path)
+            except OSError:
+                continue  # archived or removed between discovery and the full scan
+        else:
+            project_dir, title, lines = _scan_transcript(discovered.path)
         best: tuple[MatchKind, float, str] | None = None
 
         def consider(text: str, exact_kind: MatchKind, fuzzy_kind: MatchKind) -> None:

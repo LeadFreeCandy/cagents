@@ -13,6 +13,12 @@ import pytest
 from cagents.claude_data import encode_project_dir
 
 
+@pytest.fixture(autouse=True)
+def isolated_codex_home(tmp_path, monkeypatch):
+    """Provider discovery must never read the developer's live Codex store."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+
 def init_git_repo(path: Path) -> None:
     """A minimal real git repo at `path` — for tests exercising the
     worktree-detection that gates terminal-tab access."""

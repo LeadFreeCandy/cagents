@@ -4,6 +4,15 @@ Run `cagents` from any terminal. It wraps itself in a tmux container: the
 session list as a left rail, and one viewer pane on the right that always shows the
 real thing.
 
+## Codex sessions
+
+Press `n`, move to your project directory, and type `codex` (or `claude`). Press `a`
+to import an existing conversation from either agent. Enter opens its native terminal;
+`f`, `h`, review state, diffs, and search work with Codex too. Codex's configured model
+and permissions are used by default. `codex resume <UUID>` works in cagents shells.
+Creating or forking requires the standalone Codex CLI with local daemon support.
+Use `--codex-dir` to select a different Codex home. See README for setup and details.
+
 ## The one idea everything follows from
 
 **The right pane is never a re-implementation.** For a live session it is a real tmux
@@ -12,7 +21,10 @@ transcript, rendered read-only in the same pane. `enter` doesn't "open" anything
 just moves your focus into the pane that's already showing the session. Preview and
 attach cannot disagree because they are the same mechanism.
 
-Moving through the list re-points the pane (debounced ~250ms so j/k stays instant).
+Moving through the list re-points the pane after a ~150ms pause in navigation.
+Refreshes update rows in place, preserving scroll position. Conversations on the
+same tmux server reuse the viewer client when switching, avoiding a terminal
+teardown between selections. Arrow sizing runs on actual focus changes.
 Hover the pane and scroll with the mouse wheel.
 
 ## Layout — the arrows size the Claude pane
@@ -98,6 +110,9 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
   spawn a duplicate CLI on those.
 - `◉ needs you` — a real dialog (permission/question) or idle at the prompt.
 - `◆ review` — finished, no human has looked. `d` marks **done** (toggle).
+- **Background activity states** in Settings (`,`) is off by default: monitoring,
+  background, and shell running all become `◆ review`. Turn it on to show these
+  states separately; changing the setting applies immediately.
 - `◎ monitoring` / `◌ background` — idle, but Claude's own Monitor is watching /
   a backgrounded command is still running. Low priority: below review, above
   working. Tracked through the tasks' real lifecycle: they persist across new
@@ -107,7 +122,16 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
   branch via `gh` (or you paste the URL). Polled every ~5 min: **new PR
   comments → back to `◆ review` marked "github comments"; merged → `✓ done`
   marked "merged"**. New local activity also un-parks it.
-- `✓ done` — accepted (`d`). Claude doing more work re-alerts it automatically.
+- `✓ done` — accepted (`d`). New conversation activity re-alerts it automatically.
+- `✓ Done (auto)` — no interaction for **Auto done duration** (Settings, default
+  **7d**, configurable or off). Uses existing UI/bookkeeping/transcript timestamps
+  retroactively on upgrade; active work and snoozes are excluded. Hover/select or
+  new conversation activity resets the timer. Manual and automatic done rows
+  appear together, ordered by when they became done, newest first.
+- `☾` — a done conversation suspended after **1 hour** without interaction
+  (checked every 30s). The native agent process stops to release memory. Hover or
+  select it to resume the same conversation; automatic UI refreshes never wake
+  it. Conversation history and terminal tabs survive.
 - `■ stopped` — not running, transcript ends mid-turn.
 
 ## List keys
@@ -118,16 +142,17 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 | `d` | done / un-done |
 | `w` | waiting on external (PR watch) |
 | `f` | fork: branch this conversation into a new session and open it — no prompt asked for; starts under the source's title until it diverges |
-| `h` | handoff: the old session writes a spec (on a throwaway fork), a fresh session starts on it, the old one is marked done (`d` restores) |
+| `h` | handoff: choose Claude or Codex and a model for the successor; the source supplies a spec, the successor starts on it, and the source is marked done (`d` restores) |
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |
 | `D` | full diff-review screen: comment on lines, pull GitHub PR comments, send all comments into the session's Claude |
 | `o` | open the session's PR/artifact link — if none is recorded, prompts you to paste one (remembered for next time and for `w`) |
 | `R` / `x` | rename (display name) / untrack (cagents bookkeeping only) |
-| `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association, fleet plans — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
+| `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
 | `n` / `a` | new session via the dialog (launch-dir default, tab completes, `ctrl+t` shell-pick) / track existing |
 | `N` | **the shell way to start sessions**: jumps to the terminal tab. `cd`/`z`/`mkdir` around like always, then type `claude` — it opens as a managed cagents session in that directory (tracked, selected, session tab focused). `claude --resume <id>` works too. If cagents isn't running, the shim falls back to real claude |
 | `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
-| `:` | fleet assistant: plain English → a confirmed plan on cagents' bookkeeping |
+| `ctrl+r` | restart the selected Claude/Codex process, resuming the same conversation |
+| `:restart` | restart running tracked agents and reload cagents; interrupts in-flight work, keeps history, terminal tabs, and suspended sessions |
 | `,` `?` `q` | settings / help / quit |
 
 ## Reliability guarantees (each one earned the hard way)
@@ -154,9 +179,30 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 
 ## Settings (`,`)
 
+**Conversation title width** caps the title column in the queue, grouped list,
+and sidebar. It defaults to **22 columns**, half the previous 44, and accepts
+**8–120**. Shorter titles use less space. Changes apply immediately and persist.
+The one-column provider icons are **`✳` Claude** and **`›` Codex**, after the state
+label (or after the state glyph in the compact rail and kanban). The same icons
+appear in the track/search pickers.
+
 Sidebar rail (on) · toast notifications (off; errors always show) · arrow layout keys
 (on) · desktop notifications (off; with terminal-notifier installed, clicking one
 selects the task).
+
+The handoff dialog (`h`) defaults to the source's provider and the successor
+provider's configured model. Use Tab to reach the provider/model selectors; choose
+a suggested model or **Custom model ID…**, enter the task, and press Enter. Claude
+suggestions include Sonnet, Opus, and Haiku; Codex suggestions come from its local
+model cache and tracked conversations. Opening the dialog makes no model/network
+request. Model availability is determined by your native CLI configuration/account.
+Switching providers keeps their model selections separate.
+
+The source still generates the spec with its own provider: Claude uses a throwaway
+fork; Codex uses a bounded transcript excerpt in a separate read-only invocation.
+The successor starts in the source's current working directory, including an active
+worktree, with the selected provider/model and a link back to the original. The
+source transcript is preserved.
 
 ## Modes
 
@@ -164,3 +210,18 @@ selects the task).
 - Inside your own tmux → splits your current window instead.
 - `--fullscreen` → classic whole-terminal attach with a cagents statusline;
   ← detaches back to the list (scoped to cagents' own client only).
+
+
+## Sharing conversations with cagents2
+
+The default cagents and cagents2 stores share tracked Claude conversations in
+both directions. Restart both dashboards after updating. Tracking or untracking
+in either app propagates during refresh, and both attach to the same tagged
+native terminal when one exists. Claude owns the history and rendering.
+
+Review state, notes, labels, archive state, snoozes and settings remain local.
+Codex conversations can be tracked in either app independently. General settings includes a sharing
+switch. Custom store paths remain isolated unless `CAGENTS_SHARED_DB` is set.
+The registry lives at `~/.local/share/cagents-shared/claude.sqlite3`, respecting
+`XDG_DATA_HOME`. Reset clears local bookkeeping and disables sharing; re-enabling
+it rejoins the shared list without untracking the other app’s conversations.

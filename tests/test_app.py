@@ -55,6 +55,8 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
             pane_pid=42, pane_path="/proj/alpha", socket="claude",
         )
     )
+    for tracked in store.sessions.values():
+        tracked.last_interacted_at = ts_ago(3600)
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
     app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
     return app, store, tmux, claude_dir
@@ -395,6 +397,58 @@ async def test_list_columns_size_to_the_visible_titles(world):
                 for row in rows
             }
             assert state_cols == {3 + max(longest, TITLE_MIN) + 2}
+
+
+async def test_conversation_title_width_setting_applies_and_persists(world):
+    from textual.widgets import Input, OptionList
+
+    from cagents.format import session_style
+    from cagents.modals import InputModal, SettingsModal
+    from cagents.views import SessionList
+
+    app, store, *_ = world
+    store.set_label(SID1, "x" * 90)
+    assert store.get_setting("conversation_title_width") == 22
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+
+        def check_width(limit):
+            view = app.snapshot.by_id(SID1)
+            for list_id in ("#queue-list", "#grouped-list"):
+                listing = app.query_one(list_id, SessionList)
+                row = render_text(listing.get_option(SID1).prompt)
+                assert "x" * (limit - 1) + "…" in row
+                assert row.index(session_style(view)[2]) == 3 + limit + 2
+
+        check_width(22)
+        await pilot.press("comma")
+        await pilot.pause()
+        settings = app.screen
+        listing = settings.query_one("#settings-list", OptionList)
+        listing.highlighted = listing.get_option_index("conversation_title_width")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, InputModal)
+        assert app.screen.query_one(Input).value == "22"
+        app.screen.query_one(Input).value = "44"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsModal)
+        assert Store.load(store.path).get_setting("conversation_title_width") == 44
+        check_width(44)
+        assert listing.get_option_at_index(listing.highlighted).id == "conversation_title_width"
+
+        for invalid in ("narrow", "0", "121"):
+            await pilot.press("enter")
+            await pilot.pause()
+            app.screen.query_one(Input).value = invalid
+            await pilot.press("enter")
+            await pilot.pause()
+            assert store.get_setting("conversation_title_width") == 44
+        await pilot.press("enter", "escape", "escape")
+        await pilot.pause()
+        assert store.get_setting("conversation_title_width") == 44
+        check_width(44)
 
 
 async def test_kanban_cards_still_wrap(world):

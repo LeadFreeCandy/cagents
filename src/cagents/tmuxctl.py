@@ -38,6 +38,10 @@ _LIST_FORMAT = _FIELD_SEP.join(
         "#{pane_pid}",
         "#{pane_current_path}",
         "#{session_group}",
+        "#{pane_current_command}",
+        "#{pane_id}",
+        "#{pane_dead}",
+        "#{@cagents_suspended}",
     ]
 )
 
@@ -53,6 +57,10 @@ class TmuxSession:
     socket: str = CREATE_SOCKET
     cagents_session_id: str = ""  # from the CAGENTS_SESSION_ID env var, if set
     group: str = ""  # tmux session group, if any (named after its first member)
+    pane_command: str = ""
+    pane_id: str = ""
+    pane_dead: bool = False
+    suspended: bool = False
 
     @property
     def is_view(self) -> bool:
@@ -131,9 +139,9 @@ class TmuxClient:
         sessions: dict[str, TmuxSession] = {}
         for line in proc.stdout.splitlines():
             parts = line.split(_FIELD_SEP)
-            if len(parts) != 7:
+            if len(parts) not in (7, 8, 11):
                 continue
-            name, created, activity, attached, pane_pid, pane_path, group = parts
+            name, created, activity, attached, pane_pid, pane_path, group = parts[:7]
             if name in sessions:
                 continue  # first pane per session is enough
             try:
@@ -146,6 +154,10 @@ class TmuxClient:
                     pane_path=pane_path,
                     socket=socket,
                     group=group,
+                    pane_command=parts[7] if len(parts) >= 8 else "",
+                    pane_id=parts[8] if len(parts) == 11 else "",
+                    pane_dead=parts[9] == "1" if len(parts) == 11 else False,
+                    suspended=parts[10] == "1" if len(parts) == 11 else False,
                 )
             except ValueError:
                 continue
@@ -156,11 +168,117 @@ class TmuxClient:
                 self._env_cache[key] = self.get_session_env(
                     sess.name, "CAGENTS_SESSION_ID", socket=socket
                 )
+                if not self._env_cache[key] and socket.startswith("cagents2-sessions-"):
+                    tagged = self._run(socket, "show-option", "-qv", "-t", sess.name, "@cagents2_key").stdout.strip()
+                    if tagged.startswith("claude:"):
+                        self._env_cache[key] = tagged.partition(":")[2]
+                    elif tagged.startswith("codex:"):
+                        self._env_cache[key] = tagged
             sess.cagents_session_id = self._env_cache[key]
         live = {(socket, s.name, s.created) for s in found}
         for key in [k for k in self._env_cache if k[0] == socket and k not in live]:
             del self._env_cache[key]
         return found
+
+    def client_activity(self) -> dict[str, float]:
+        """Last real terminal input, not session_activity (which includes output)."""
+        result: dict[str, float] = {}
+        fmt = _FIELD_SEP.join(["#{session_name}", "#{session_group}", "#{client_activity}"])
+        for socket in self.sockets:
+            proc = self._run(socket, "list-clients", "-F", fmt)
+            for line in proc.stdout.splitlines() if proc.returncode == 0 else ():
+                parts = line.split(_FIELD_SEP)
+                if len(parts) != 3:
+                    continue
+                name, group, activity = parts
+                try:
+                    key = f"{socket}:{group or name}"
+                    result[key] = max(result.get(key, 0), float(activity))
+                except ValueError:
+                    continue
+        return result
+
+    def _checked_agent_pane(self, session_name: str, session_id: str, socket: str,
+                            pane_id: str, pane_pid: int) -> TmuxSession:
+        """Revalidate identity immediately before replacing a process.
+
+        A stale directory match must never kill a different conversation or a
+        terminal tab. Use the originally observed pane and PID, plus any exact tag.
+        """
+        current = next((s for s in self._list_on(socket) if s.name == session_name), None)
+        if current is None or current.is_view or not current.pane_id:
+            raise RuntimeError("Session no longer has an agent pane; refresh and retry.")
+        if (pane_id and current.pane_id != pane_id) or (pane_pid and current.pane_pid != pane_pid):
+            raise RuntimeError("Agent process changed; refresh and retry.")
+        tag = self.get_session_env(session_name, "CAGENTS_SESSION_ID", socket)
+        if tag and tag != session_id:
+            raise RuntimeError("Session now belongs to a different conversation.")
+        command = Path(current.pane_command).name
+        if not current.suspended and not current.pane_dead:
+            if current.pane_pid <= 1:
+                raise RuntimeError("Invalid agent process ID.")
+            if command in ("sh", "bash", "zsh", "fish", "sleep", "true", ""):
+                raise RuntimeError("This is a shell terminal, not an agent instance.")
+            if not tag and command not in ("claude", "codex"):
+                raise RuntimeError("Cannot verify the agent in this untagged terminal.")
+        return current
+
+    def agent_start_command(self, session_name: str, session_id: str, *, socket: str,
+                            pane_id: str, pane_pid: int) -> str:
+        pane = self._checked_agent_pane(session_name, session_id, socket, pane_id, pane_pid)
+        result = self._run(socket, "display-message", "-p", "-t", pane.pane_id, "#{pane_start_command}")
+        if result.returncode:
+            raise RuntimeError("Could not inspect the agent's original command.")
+        return result.stdout.strip()
+
+    def replace_agent(self, session_name: str, session_id: str, *, socket: str,
+                      pane_id: str, pane_pid: int, command: str | None = None,
+                      directory: str = "") -> None:
+        """Stop only the agent pane, retaining its window and terminal siblings.
+
+        A suspended pane exits immediately and remains as a zero-process tmux
+        placeholder. Restart supplies a fresh, fully quoted resume command.
+        """
+        current = self._checked_agent_pane(session_name, session_id, socket, pane_id, pane_pid)
+        target = current.pane_id
+        # A dead pane also keeps grouped terminal views alive. This must succeed
+        # before we stop anything, or the last window could disappear.
+        proc = self._run(socket, "set-option", "-p", "-t", target, "remain-on-exit", "on")
+        if proc.returncode:
+            raise RuntimeError(proc.stderr.strip() or "Cannot preserve the agent pane.")
+        # Give the native CLI a chance to flush its transcript and stop children.
+        if not current.pane_dead:
+            import os
+            import signal
+            import time
+            # Native CLIs usually clean up MCP servers / tool children during
+            # shutdown. Keep their identities so orphaned children cannot keep
+            # consuming memory after the terminal process has exited.
+            descendants = _process_descendants(current.pane_pid)
+            try:
+                os.kill(current.pane_pid, signal.SIGTERM)
+                for _ in range(30):
+                    try:
+                        os.kill(current.pane_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+            except ProcessLookupError:
+                pass
+            _stop_orphaned_children(descendants)
+            # A second dashboard might have resumed this retained pane while
+            # shutdown was draining. Never kill its newer replacement.
+            self._checked_agent_pane(session_name, session_id, socket, target, current.pane_pid)
+        args = ["respawn-pane", "-k", "-t", target]
+        if directory:
+            args += ["-c", directory]
+        proc = self._run(socket, *args, command or "/usr/bin/true", timeout=10)
+        if proc.returncode:
+            raise RuntimeError(proc.stderr.strip() or "Could not replace the agent process.")
+        marker = self._run(socket, "set-option", "-p", "-t", target,
+                           "@cagents_suspended", "0" if command else "1")
+        if marker.returncode:
+            raise RuntimeError(marker.stderr.strip() or "Could not record suspension.")
 
     def get_session_env(self, session_name: str, var: str, socket: str | None = None) -> str:
         socket = socket or self.create_socket
@@ -252,6 +370,7 @@ class TmuxClient:
         claude_args: list[str],
         session_id: str = "",
         claude_bin: str = "",
+        extra_env: list[str] | None = None,
     ) -> str:
         """Create a detached session running the real claude CLI — always on
         the private create socket (spawning next to a live claude on a
@@ -259,9 +378,9 @@ class TmuxClient:
         name = self._unique_name(Path(directory).name)
         claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         cmd = " ".join(_shquote(a) for a in [claude_bin, *claude_args])
-        env_args: list[str] = []
+        env_args: list[str] = list(extra_env or ())
         if session_id:
-            env_args = ["-e", f"CAGENTS_SESSION_ID={session_id}"]
+            env_args += ["-e", f"CAGENTS_SESSION_ID={session_id}"]
         proc = self._run(
             self.create_socket,
             "new-session", "-d", *env_args, "-s", name, "-c", directory, cmd,
@@ -281,6 +400,15 @@ class TmuxClient:
             self._run(self.create_socket, "set", "-g", "status", "off")
             self._mouse_enabled.add(self.create_socket)
         return name
+
+    def new_codex_session(self, directory: str, args: list[str], session_id: str,
+                          codex_dir: Path, codex_bin: str = "codex") -> str:
+        # The transport and terminal setup are identical; only the CLI and
+        # its environment differ. Codex keeps its own approval/config defaults.
+        return self.new_claude_session(
+            directory, ["--no-alt-screen", *args], session_id, codex_bin,
+            extra_env=["-e", f"CODEX_HOME={codex_dir}"],
+        )
 
     def new_shell_session(
         self, directory: str, session_id: str = "", extra_env: list[str] | None = None
@@ -438,6 +566,58 @@ class TmuxClient:
 
     def unbind_left_detach(self, socket: str | None = None) -> None:
         self._run(socket or self.create_socket, "unbind", "-n", "Left")
+
+
+def _process_table() -> dict[int, tuple[int, str]]:
+    """PID -> (parent, birth stamp); command arguments are intentionally omitted."""
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart="],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    table = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3:
+            try:
+                table[int(fields[0])] = (int(fields[1]), fields[2])
+            except ValueError:
+                pass
+    return table
+
+
+def _process_descendants(root: int) -> dict[int, str]:
+    table = _process_table()
+    parents = {root}
+    descendants = {}
+    while parents:
+        children = {pid for pid, (parent, _) in table.items()
+                    if parent in parents and pid not in descendants and pid != root}
+        descendants.update({pid: table[pid][1] for pid in children})
+        parents = children
+    return descendants
+
+
+def _stop_orphaned_children(descendants: dict[int, str]) -> None:
+    import os
+    import signal
+    import time
+
+    if not descendants:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        current = _process_table()
+        remaining = {pid: stamp for pid, stamp in descendants.items()
+                     if pid > 1 and pid in current and current[pid][1] == stamp}
+        if not remaining:
+            return
+        for pid in remaining:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        if sig == signal.SIGTERM:
+            time.sleep(0.2)
 
 
 def _shquote(value: str) -> str:

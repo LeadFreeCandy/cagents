@@ -38,7 +38,7 @@ def attention_sort_key(view) -> tuple:
     queue: newest response on top."""
     return (
         view.attention_rank,
-        -view.rank_stable_since,
+        -(view.done_at if getattr(view, "state", None) == SessionState.DONE else view.rank_stable_since),
         -(view.last_activity.timestamp() if view.last_activity else 0.0),
     )
 
@@ -65,14 +65,52 @@ class SessionList(OptionList):
         Binding("G", "last", "Last", show=False),
     ]
 
+    def _interacted(self) -> None:
+        sid = self.highlighted_session_id
+        if sid:
+            self.post_message(SessionInteracted(sid))
+
+    def on_mouse_move(self, event) -> None:
+        index = event.style.meta.get("option")
+        if index is None or not 0 <= index < self.option_count:
+            return
+        option = self.get_option_at_index(index)
+        if option.disabled or option.id is None:
+            return
+        self.highlighted = index
+        self._interacted()
+
+    def on_key(self, event) -> None:
+        # Navigation is applied by OptionList's key handler. Rebuilds never
+        # pass through here, so a timer cannot masquerade as human input.
+        if event.key in ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right"):
+            self.call_after_refresh(self._interacted)
+
+    def on_click(self, event) -> None:
+        self.call_after_refresh(self._interacted)
+
     def rebuild(self, options: list[Option], keep_id: str | None) -> None:
-        """Replace all options, restoring the highlight to `keep_id` (or the
-        nearest selectable row) without flicker."""
+        """Patch stable rows in place; rebuild only when membership/order changes.
+
+        Clearing OptionList resets its scroll and emits transient highlights.
+        Avoid both during refreshes and width changes.
+        """
         old_index = self.highlighted
-        self.clear_options()
+        old_scroll = self.scroll_offset
+        same_rows = len(options) == self.option_count and all(
+            (old.id, old.disabled) == (new.id, new.disabled)
+            for old, new in zip(self.options, options)
+        )
+        with self.prevent(OptionList.OptionHighlighted):
+            if same_rows:
+                for i, (old, new) in enumerate(zip(self.options, options)):
+                    if old.prompt != new.prompt:
+                        self.replace_option_prompt_at_index(i, new.prompt)
+            else:
+                self.clear_options()
+                self.add_options(options)
         if not options:
             return
-        self.add_options(options)
         index = None
         if keep_id is not None:
             for i, opt in enumerate(options):
@@ -88,7 +126,14 @@ class SessionList(OptionList):
                 index = candidates[0]
             else:
                 index = min(candidates, key=lambda i: abs(i - old_index))
-        self.highlighted = index
+        with self.prevent(OptionList.OptionHighlighted):
+            self.highlighted = index
+        if same_rows and index == old_index:
+            return
+        # Preserve the viewport across an atomic rebuild, moving only enough
+        # to keep the selected conversation visible if its position changed.
+        self.scroll_to(old_scroll.x, old_scroll.y, animate=False, force=True)
+        self.scroll_to_highlight()
 
     @property
     def highlighted_session_id(self) -> str | None:
@@ -99,6 +144,14 @@ class SessionList(OptionList):
         except Exception:
             return None
         return option.id
+
+
+class SessionInteracted(Message):
+    """Explicit mouse/keyboard input; distinct from a periodic re-highlight."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__()
 
 
 class SelectionChanged(Message):
@@ -140,12 +193,16 @@ class BaseSessionView(Widget):
         ]
 
     def _emit_selection(self, session_id: str | None) -> None:
+        if session_id == self.selected_id:
+            return
         self.selected_id = session_id
         self.post_message(SelectionChanged(self.id, session_id))
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option.disabled or event.option.id is None:
             return
+        if event.option.id != event.option_list.highlighted_session_id:
+            return  # an event queued before a rebuild or later keypress
         self._emit_selection(event.option.id)
 
     # Subclasses implement:
@@ -185,7 +242,7 @@ class GroupedView(BaseSessionView):
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
         # One set of column widths for the whole list, so rows line up across
         # groups too.
-        widths = row_widths(snapshot.views)
+        widths = row_widths(snapshot.views, self.app.store.get_setting("conversation_title_width"))
         header = self.query_one("#grouped-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:
@@ -239,7 +296,7 @@ class QueueView(BaseSessionView):
         ordered = sorted(snapshot.views, key=attention_sort_key)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
-        widths = row_widths(ordered)
+        widths = row_widths(ordered, self.app.store.get_setting("conversation_title_width"))
         header = self.query_one("#queue-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:

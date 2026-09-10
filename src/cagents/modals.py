@@ -10,11 +10,96 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, OptionList, Static
+from textual.widgets import Button, Input, Label, OptionList, Select, Static
 from textual.widgets.option_list import Option
 
 from .claude_data import DiscoveredSession
-from .format import human_age
+from .format import human_age, provider_icon
+from .handoff import HandoffRequest
+
+
+class HandoffModal(ModalScreen[HandoffRequest | None]):
+    """Choose the successor independently of the source that writes the spec."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = """
+    HandoffModal { align: center middle; }
+    HandoffModal > Vertical {
+        width: 78; max-width: 95%; height: auto; max-height: 95%;
+        border: round $primary; background: $surface; padding: 1 2;
+        overflow-y: auto;
+    }
+    HandoffModal .hint { color: $text-muted; margin-bottom: 1; }
+    HandoffModal #handoff-custom-model { display: none; }
+    HandoffModal #handoff-custom-model.shown { display: block; }
+    """
+
+    def __init__(self, title: str, provider: str, models: dict[str, list[tuple[str, str]]]):
+        super().__init__()
+        self.source_title, self.initial_provider, self.models = title, provider, models
+        self._selected_models = {"claude": "", "codex": ""}
+        self._custom_models = {"claude": "", "codex": ""}
+        self._provider = provider
+
+    def _models_for(self, provider: str) -> list[tuple[str, str]]:
+        return [*self.models[provider], ("Custom model ID…", "__custom__")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(f"Handoff: {self.source_title}")
+            yield Static("The source writes a spec. These options choose the successor.", classes="hint")
+            yield Label("Successor provider")
+            yield Select([("✳ Claude", "claude"), ("› Codex", "codex")],
+                         value=self.initial_provider, allow_blank=False, id="handoff-provider")
+            yield Label("Successor model")
+            yield Select(self._models_for(self.initial_provider), value="", allow_blank=False, id="handoff-model")
+            yield Input(placeholder="Exact model ID or alias", id="handoff-custom-model")
+            yield Label("What should the successor focus on?")
+            yield Input(placeholder="the new session's task", id="handoff-prompt")
+            yield Static("Tab moves between options · Enter in the task starts the handoff · Esc cancels", classes="hint")
+            yield Button("Start handoff", variant="primary", id="handoff-start")
+
+    def on_mount(self) -> None:
+        self.query_one("#handoff-prompt", Input).focus()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "handoff-provider" and event.value in self.models:
+            provider = str(event.value)
+            if provider == self._provider:
+                return
+            model = self.query_one("#handoff-model", Select)
+            custom_input = self.query_one("#handoff-custom-model", Input)
+            self._selected_models[self._provider] = str(model.value)
+            self._custom_models[self._provider] = custom_input.value
+            self._provider = provider
+            model.set_options(self._models_for(provider))
+            model.value = self._selected_models[provider]
+            custom_input.value = self._custom_models[provider]
+        if event.select.id in ("handoff-provider", "handoff-model"):
+            custom = self.query_one("#handoff-model", Select).value == "__custom__"
+            self.query_one("#handoff-custom-model", Input).set_class(custom, "shown")
+
+    def _submit(self) -> None:
+        prompt = self.query_one("#handoff-prompt", Input).value.strip()
+        if not prompt:
+            self.query_one("#handoff-prompt", Input).focus()
+            return
+        model = str(self.query_one("#handoff-model", Select).value)
+        if model == "__custom__":
+            model = self.query_one("#handoff-custom-model", Input).value.strip()
+            if not model:
+                self.query_one("#handoff-custom-model", Input).focus()
+                return
+        self.dismiss(HandoffRequest(prompt, self._provider, model))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self._submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class InputModal(ModalScreen[str | None]):
@@ -149,11 +234,13 @@ class TrackModal(ModalScreen[str | None]):
         now = datetime.now(timezone.utc)
         shown = 0
         for discovered, title in self.candidates:
-            haystack = f"{title} {discovered.encoded_project}".lower()
+            haystack = f"{discovered.provider} {title} {discovered.encoded_project}".lower()
             if needle and needle not in haystack:
                 continue
             age = human_age(datetime.fromtimestamp(discovered.mtime, tz=timezone.utc), now)
             row = Text(no_wrap=True, overflow="ellipsis")
+            row.append_text(provider_icon(discovered.provider))
+            row.append(" ")
             row.append(f"{title[:56]:<56} ", style="bold")
             row.append(f"{age:>4} ", style="dim")
             row.append(discovered.encoded_project, style="dim cyan")
@@ -204,9 +291,10 @@ class SearchModal(ModalScreen["object | None"]):
     SearchModal OptionList { height: 1fr; }
     """
 
-    def __init__(self, claude_dir: Path) -> None:
+    def __init__(self, claude_dir: Path, codex_dir: Path | None = None) -> None:
         super().__init__()
         self.claude_dir = claude_dir
+        self.codex_dir = codex_dir
         self.results: list = []
 
     def compose(self) -> ComposeResult:
@@ -237,7 +325,7 @@ class SearchModal(ModalScreen["object | None"]):
     def _run_search(self, query: str) -> None:
         from .search import search_all_sessions
 
-        results = search_all_sessions(self.claude_dir, query)
+        results = search_all_sessions(self.claude_dir, query, codex_dir=self.codex_dir)
         self.app.call_from_thread(self._show_results, results)
 
     def _show_results(self, results: list) -> None:
@@ -256,6 +344,8 @@ class SearchModal(ModalScreen["object | None"]):
         for i, result in enumerate(results):
             is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
             row = Text(no_wrap=True, overflow="ellipsis")
+            row.append_text(provider_icon("codex" if result.session_id.startswith("codex:") else "claude"))
+            row.append(" ")
             row.append(f"{result.title[:60]:<60}", style="bold cyan" if is_title_match else "bold")
             row.append(f"  [{result.kind.label}]\n", style="dim italic")
             row.append(f"  {result.project_dir}\n", style="dim cyan")
@@ -314,6 +404,7 @@ HELP_TEXT = """\
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
+  provider      ✳ Claude · › Codex (one-column icons beside session state)
 
 [bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]
   click diff    builds automatically (mouse-interactive lazygit, if installed)
@@ -330,24 +421,24 @@ HELP_TEXT = """\
                 purely time-based, new activity doesn't wake it early
   f             fork — branch this conversation into a new session
   h             handoff — old session writes a spec, new one starts on it,
-                old is marked done (d restores)
+                choose Claude/Codex and the successor model; old is marked done
   *             related — visit this session's forks/handoffs/parent
-  D             diff review screen — comment on lines, send comments to Claude
+  D             diff review screen — comment on lines, send comments to the agent
   o             open the newest recorded link (PR, artifact)
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
   n             new conversation — opens a shell (launch dir default; numbered
-                shortcuts to your 5 most recent directories); type "claude" and
+                shortcuts to your 5 most recent directories); type "claude" or "codex" and
                 it becomes the managed session this row is already waiting on
   N             the shell way, for a session already in the list: terminal
-                tab -> cd/z/mkdir anywhere -> type "claude" and it opens as a
+                tab -> cd/z/mkdir anywhere -> type "claude" or "codex" and it opens as a
                 managed session right there
   a             track an existing session
   /             search all conversation history (fuzzy, full scan — off by
                 default, enable in settings)
-  :             fleet assistant — plain English, proposes a plan, you confirm
-  R             refresh now
+  ctrl+r        restart the selected agent, resuming the same conversation
+  :restart      restart running tracked agents and the dashboard
 
   ,             settings · ? this help · q quit\
 """
@@ -376,32 +467,30 @@ class HelpModal(ModalScreen[None]):
         self.dismiss(None)
 
 
-class PaletteModal(ModalScreen[str | None]):
-    """The fleet palette input. Clearly labeled as the AI-assisted surface
-    (spec §10): everything else in cagents is deterministic; this one line
-    is where you talk to the assistant about your *fleet*, not your code."""
+class CommandModal(ModalScreen[str | None]):
+    """Deterministic colon commands."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
-    PaletteModal { align: center top; }
-    PaletteModal > Vertical {
+    CommandModal { align: center top; }
+    CommandModal > Vertical {
         width: 90; max-width: 95%; height: auto; margin-top: 2;
         border: round $accent; background: $surface; padding: 1 2;
     }
-    PaletteModal Label { text-style: bold; }
-    PaletteModal .hint { color: $text-muted; margin-bottom: 1; }
+    CommandModal Label { text-style: bold; }
+    CommandModal .hint { color: $text-muted; margin-bottom: 1; }
     """
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(": fleet assistant")
+            yield Label(": command")
             yield Static(
-                "Plain English; proposes changes to cagents' bookkeeping only "
-                "(review/notes/labels/tracking). You confirm before anything applies.",
+                "restart — restart running tracked agents and cagents. "
+                "Interrupts current work; preserves history. Suspended sessions stay asleep.",
                 classes="hint",
             )
-            yield Input(placeholder="e.g. mark everything in dealpilot reviewed — it's merged")
+            yield Input(placeholder="restart")
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
@@ -414,65 +503,9 @@ class PaletteModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class PlanConfirmModal(ModalScreen[bool]):
-    """Show the assistant's proposed plan; nothing applies without a yes."""
-
-    BINDINGS = [
-        Binding("escape", "no", "No"),
-        Binding("n", "no", "No"),
-        Binding("y", "yes", "Apply"),
-    ]
-
-    DEFAULT_CSS = """
-    PlanConfirmModal { align: center middle; }
-    PlanConfirmModal > Vertical {
-        width: 100; max-width: 95%; height: auto; max-height: 80%;
-        border: round $accent; background: $surface; padding: 1 2;
-    }
-    PlanConfirmModal .reply { margin-bottom: 1; }
-    PlanConfirmModal .keys { color: $text-muted; margin-top: 1; }
-    """
-
-    def __init__(self, plan, titles: dict[str, str]) -> None:
-        super().__init__()
-        self.plan = plan
-        self.titles = titles  # session_id -> display title
-
-    def compose(self) -> ComposeResult:
-        from rich.text import Text
-
-        body = Text()
-        for act in self.plan.actions:
-            title = self.titles.get(act.session_id, act.session_id[:8])
-            body.append("  → ", style="bold green")
-            body.append(f"{act.action.replace('_', ' ')}", style="bold")
-            if act.value:
-                body.append(f' "{act.value}"')
-            body.append(f"  {title}\n", style="cyan")
-            if act.reason:
-                body.append(f"      {act.reason}\n", style="dim italic")
-        if not self.plan.actions:
-            body.append("  (no actions proposed)\n", style="dim")
-        for drop in self.plan.dropped:
-            body.append("  ✗ refused: ", style="red")
-            body.append(f"{drop}\n", style="dim")
-
-        with Vertical():
-            yield Label("Proposed plan")
-            yield Static(self.plan.reply or "", classes="reply")
-            yield Static(body)
-            keys = "y — apply    n / esc — cancel" if self.plan.actions else "esc — close"
-            yield Static(keys, classes="keys")
-
-    def action_yes(self) -> None:
-        self.dismiss(bool(self.plan.actions))
-
-    def action_no(self) -> None:
-        self.dismiss(False)
-
-
 # Allowed values for string settings; enter cycles through them.
 SETTING_CHOICES: dict[str, list[str]] = {
+    "auto_done_duration": ["off", "1d", "3d", "7d", "14d", "30d"],
     "diff_mode": ["branch", "uncommitted"],
     "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
 }
@@ -483,6 +516,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Sidebar rail",
         "Enter opens sessions in a side pane and the list stays as a left rail. "
         "Off: attaching takes the whole terminal (come back with ctrl-b d).",
+    ),
+    (
+        "conversation_title_width",
+        "Conversation title width",
+        "Maximum title columns in the queue, grouped list, and sidebar. Default 22 "
+        "(previously 44); shorter titles use less space. Enter to set 8–120 columns.",
     ),
     (
         "notifications",
@@ -555,6 +594,19 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "while across many/large transcripts.",
     ),
     (
+        "auto_done_duration",
+        "Auto done duration",
+        "Mark idle conversations Done (auto). Default 7d; applies to existing history. "
+        "Enter cycles; off disables. New input reopens auto-done conversations. "
+        "Done conversations suspend after 1h idle; hover or select to resume.",
+    ),
+    (
+        "background_activity_states",
+        "Background activity states",
+        "Show monitoring, background, and shell running as separate states. "
+        "Off by default: all three become needs review.",
+    ),
+    (
         "time_ordered_queue",
         "Time-ordered queue",
         "All states rank equally; sessions rise to the top only when their state "
@@ -567,6 +619,8 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Verbose trace of keys, clicks, tmux commands and state changes into ctx.log "
         "(next to state.json) — for cross-validating 'it did something on its own' reports.",
     ),
+    ("share_conversations", "Share conversations with cagents2",
+     "Share tracked Claude conversations in both directions. Codex tracking, review state, labels, notes and settings stay local."),
 ]
 
 # What re-alerts a session parked "waiting on PR" (w) back out of that
@@ -696,10 +750,10 @@ class SettingsModal(ModalScreen[None]):
         for i, (key, label, _desc) in enumerate(meta):
             value = self.store.get_setting(key)
             row = Text()
-            if isinstance(value, str):
+            if isinstance(value, str) or type(value) is int:
                 row.append(" ◈ ", style="bold cyan")
                 row.append(f"{label:<34}", style="bold")
-                row.append(value, style="cyan")
+                row.append(str(value), style="cyan")
             else:
                 value = bool(value)
                 row.append(" ▣ " if value else " □ ", style="bold green" if value else "dim")
@@ -729,6 +783,10 @@ class SettingsModal(ModalScreen[None]):
         if key is None:
             return
         current = self.store.get_setting(key)
+        if key == "conversation_title_width":
+            self.app.push_screen(InputModal("Conversation title width (8–120 columns)", initial=str(current)),
+                                 self._title_width_submitted)
+            return
         if isinstance(current, str):
             choices = SETTING_CHOICES.get(key, [current])
             value = choices[(choices.index(current) + 1) % len(choices)] \
@@ -737,6 +795,21 @@ class SettingsModal(ModalScreen[None]):
             value = not bool(current)
         self.store.set_setting(key, value)
         self._refill(list_id, self._meta_for(list_id), keep=key)
+        self.on_change(key, value)
+
+    def _title_width_submitted(self, text: str | None) -> None:
+        if text is None:
+            return
+        try:
+            value = int(text.strip())
+            if not 8 <= value <= 120:
+                raise ValueError
+        except ValueError:
+            self.app.notify("Title width must be a whole number from 8 to 120.", severity="warning")
+            return
+        key = "conversation_title_width"
+        self.store.set_setting(key, value)
+        self._refill("#settings-list", SETTINGS_META, keep=key)
         self.on_change(key, value)
 
     # -- Priority tab ------------------------------------------------------------
