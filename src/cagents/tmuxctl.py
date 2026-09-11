@@ -282,10 +282,9 @@ class TmuxClient:
         """
         current = self._checked_agent_pane(session_name, session_id, socket, pane_id, pane_pid)
         self.configure_scrolling(socket)
-        if command and session_id.startswith("codex:"):
-            from .terminal_colors import prepare_command
-
-            command = prepare_command(command, self.tmux_bin)
+        environment = self._respawn_environment(current.pane_id, socket)
+        if command:
+            command = self._prepare_agent_command(command, session_id, socket)
         target = current.pane_id
         # A dead pane also keeps grouped terminal views alive. This must succeed
         # before we stop anything, or the last window could disappear.
@@ -315,7 +314,7 @@ class TmuxClient:
             # A second dashboard might have resumed this retained pane while
             # shutdown was draining. Never kill its newer replacement.
             self._checked_agent_pane(session_name, session_id, socket, target, current.pane_pid)
-        args = ["respawn-pane", "-k", "-t", target]
+        args = ["respawn-pane", "-k", "-t", target, *environment]
         if directory:
             args += ["-c", directory]
         proc = self._run(socket, *args, command or "/usr/bin/true", timeout=10)
@@ -325,6 +324,15 @@ class TmuxClient:
                            "@cagents_suspended", "0" if command else "1")
         if marker.returncode:
             raise RuntimeError(marker.stderr.strip() or "Could not record suspension.")
+
+    def _prepare_agent_command(self, command: str, session_id: str, socket: str) -> str:
+        if session_id.startswith("codex:"):
+            from .terminal_colors import prepare_command
+            return prepare_command(command, self.tmux_bin)
+        return command
+
+    def _respawn_environment(self, pane_id: str, socket: str) -> list[str]:
+        return []  # legacy sessions already persist their environment in tmux
 
     def get_session_env(self, session_name: str, var: str, socket: str | None = None) -> str:
         socket = socket or self.create_socket
@@ -338,6 +346,9 @@ class TmuxClient:
         if "=" in line and not line.startswith("-"):
             return line.split("=", 1)[1]
         return ""
+
+    def _pane_target(self, session_name: str, socket: str) -> str:
+        return f"={session_name}:"
 
     def capture_pane(self, session_name: str, lines: int = 40, socket: str | None = None) -> str:
         """The visible tail of a session's active pane, for prompt detection.
@@ -357,7 +368,7 @@ class TmuxClient:
             # "=name" resolves for attach/has-session but NOT for pane
             # targets (verified against tmux 3.6a).
             proc = self._run(
-                socket, "capture-pane", "-p", "-J", "-t", f"={session_name}:", "-S", f"-{lines}"
+                socket, "capture-pane", "-p", "-J", "-t", self._pane_target(session_name, socket), "-S", f"-{lines}"
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""
@@ -408,13 +419,13 @@ class TmuxClient:
                 raise RuntimeError(f"tmux load-buffer failed: {load.stderr.strip()}")
             paste = self._run(
                 socket, "paste-buffer", "-p", "-d", "-b", "cagents-send",
-                "-t", f"={session_name}:",
+                "-t", self._pane_target(session_name, socket),
             )
             if paste.returncode != 0:
                 raise RuntimeError(f"tmux paste-buffer failed: {paste.stderr.strip()}")
             if submit:
                 time.sleep(0.3)  # let the CLI ingest the paste before Enter
-                enter = self._run(socket, "send-keys", "-t", f"={session_name}:", "Enter")
+                enter = self._run(socket, "send-keys", "-t", self._pane_target(session_name, socket), "Enter")
                 if enter.returncode != 0:
                     raise RuntimeError(f"tmux send-keys failed: {enter.stderr.strip()}")
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -516,7 +527,7 @@ class TmuxClient:
         dodge Claude's own bracketed-paste UI timing); a single-line
         semicolon-joined shell command has no such concern."""
         socket = socket or self.create_socket
-        proc = self._run(socket, "send-keys", "-t", f"={session_name}:", command, "Enter")
+        proc = self._run(socket, "send-keys", "-t", self._pane_target(session_name, socket), command, "Enter")
         if proc.returncode != 0:
             raise RuntimeError(f"tmux send-keys failed: {proc.stderr.strip()}")
 
@@ -539,7 +550,7 @@ class TmuxClient:
         if window_name in proc.stdout.split():
             return
         result = self._run(
-            socket, "new-window", "-d", "-t", f"={session_name}:", "-n", window_name, "-c", directory
+            socket, "new-window", "-d", "-t", self._pane_target(session_name, socket), "-n", window_name, "-c", directory
         )
         if result.returncode != 0:
             raise RuntimeError(f"tmux new-window failed: {result.stderr.strip()}")

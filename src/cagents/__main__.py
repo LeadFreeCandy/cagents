@@ -9,8 +9,9 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    direct = os.environ.get("CAGENTS_DIRECT") == "1"
     parser = argparse.ArgumentParser(
-        prog="cagents",
+        prog="cagents3" if direct else "cagents",
         description="A lightweight terminal supervisor for Claude Code and Codex sessions.",
     )
     parser.add_argument("--version", action="store_true", help="print version and exit")
@@ -52,6 +53,12 @@ def main(argv: list[str] | None = None) -> int:
 
     from cagents.store import Store
 
+    if direct and args.store is None:
+        from cagents.direct_cli import seed_state, state_path
+        args.store = state_path()
+        if not args.reset:
+            seed_state(args.store)
+
     if args.reset:
         store = Store.load(args.store)
         count = len(store.sessions)
@@ -80,15 +87,22 @@ def main(argv: list[str] | None = None) -> int:
 
     store = Store.load(args.store)
     raw_args = list(argv) if argv is not None else sys.argv[1:]
-    if store.get_setting("sidebar") and should_bootstrap(
+    if direct:
+        from cagents.direct_cli import bootstrap, needs_bootstrap
+        if needs_bootstrap(os.environ, sys.stdout.isatty()):
+            bootstrap(raw_args)
+    elif not direct and store.get_setting("sidebar") and should_bootstrap(
         os.environ, sys.stdout.isatty(), args.fullscreen
     ):
         bootstrap_container(raw_args)  # execs tmux attach; never returns
 
-    if args.fullscreen:
+    if args.fullscreen and not direct:
         os.environ["CAGENTS_SIDECAR"] = "0"  # opt out even inside tmux
 
     from cagents.app import CagentsApp
+
+    if direct:
+        from cagents.direct_app import DirectApp as CagentsApp
 
     app = CagentsApp(store=store, claude_dir=args.claude_dir, codex_dir=args.codex_dir)
     app.run()

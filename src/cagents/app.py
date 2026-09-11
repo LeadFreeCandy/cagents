@@ -242,9 +242,7 @@ class CagentsApp(App):
         _ctx._log(f"app started: {_ctx.version_stamp()} sidecar={self.sidecar is not None}")
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
-                self._apply_arrow_settings()
-                apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
-                apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
+                self._configure_container()
             except Exception as error:
                 self.notify(f"Container key setup failed: {error}", severity="warning")
         try:
@@ -259,8 +257,20 @@ class CagentsApp(App):
                     context_path=str(self._context_path()),
                     shim_env=self._shim_env(),
                 )
+                self._workspace_ready()
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")
+
+    def _workspace_ready(self) -> None:
+        pass
+
+    def _configure_container(self) -> None:
+        self._apply_arrow_settings()
+        apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
+        self._apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
+
+    def _apply_dim_chat(self, enable: bool) -> None:
+        apply_dim_chat(enable)
 
     def action_quit(self) -> None:
         """`q` from inside the container must actually return the user to
@@ -495,10 +505,14 @@ class CagentsApp(App):
         # a pause. A leading-edge switch briefly attached intermediate rows.
         self._viewer_timer = self.set_timer(VIEWER_COALESCE, self._sync_viewer)
 
+    def _attach_command(self, socket: str, name: str) -> str:
+        target = getattr(self.sidecar, "attach_command", None)
+        return target(socket, name) if target else nested_attach_command(socket, name)
+
     def _viewer_command(self, view: SessionView) -> str:
         socket = view.tmux_socket or self.tmux.create_socket
         self.tmux.configure_scrolling(socket)
-        return nested_attach_command(socket, view.tmux_name)
+        return self._attach_command(socket, view.tmux_name)
 
     def _sync_viewer(self) -> None:
         if self.sidecar is None:
@@ -607,7 +621,7 @@ class CagentsApp(App):
             group = self.tmux.ensure_window_view(view.tmux_name, "term", socket=socket)
             if stale():
                 return
-            self.sidecar.sync_terminal_tab(nested_attach_command(socket, group), stale=stale)
+            self.sidecar.sync_terminal_tab(self._attach_command(socket, group), stale=stale)
         except Exception:
             pass
 
@@ -629,7 +643,9 @@ class CagentsApp(App):
         if name is None:
             return
         self.refresh_data()  # so the list picks up "live" as soon as possible
-        command = nested_attach_command(self.tmux.create_socket, name)
+        if view.session_id != self.selected_session_id:
+            return  # hover may resume a Done conversation in the background
+        command = self._attach_command(self.tmux.create_socket, name)
         try:
             self.sidecar.show_viewer(command)
             self._viewer_target = command
@@ -828,7 +844,7 @@ class CagentsApp(App):
     def _show_new_session(self, tmux_name: str) -> None:
         """Point the viewer at a session we just created and walk in."""
         if self.sidecar is not None and self.store.get_setting("sidebar"):
-            command = nested_attach_command(self.tmux.create_socket, tmux_name)
+            command = self._attach_command(self.tmux.create_socket, tmux_name)
             self.sidecar.show_viewer(command)
             self._viewer_target = command
             self.sidecar.focus_session()
@@ -1114,7 +1130,7 @@ exec {shlex.quote(real)} "$@"
                     group = self.tmux.ensure_window_view(
                         view.tmux_name, "term", socket=socket, force_select=True
                     )
-                    command = nested_attach_command(socket, group)
+                    command = self._attach_command(socket, group)
                 else:
                     import shlex
 
@@ -2281,9 +2297,12 @@ exec {shlex.quote(real)} "$@"
             last = activity.get(f"{view.tmux_socket}:{view.tmux_name}", 0)
             if last:
                 self._record_interaction(view.session_id, last)
-            if should_suspend(view, now):
+            if self._can_auto_suspend(view) and should_suspend(view, now):
                 self._begin_lifecycle(view, "suspend")
         self._flush_interactions()
+
+    def _can_auto_suspend(self, view: SessionView) -> bool:
+        return True
 
     def _resume_command(self, view: SessionView) -> tuple[str, str]:
         import shlex
@@ -2398,7 +2417,9 @@ exec {shlex.quote(real)} "$@"
         import time
         self.snapshot.generated_at = time.time()  # reject reads begun before the replacement
         self._resumed_for_preview.discard(sid)
-        self._viewer_target = ""
+        selected = sid == self.selected_session_id
+        if selected:
+            self._viewer_target = ""
         if wake and view.suspended:
             # The mouse arrived while the native process was shutting down.
             # The replacement's PID is different; resolve the retained pane afresh.
@@ -2406,7 +2427,7 @@ exec {shlex.quote(real)} "$@"
             self._begin_lifecycle(view, "resume", focus)
         elif focus and view.live:
             self._attach_live(view)
-        else:
+        elif selected:
             self._schedule_viewer_sync()
         self.refresh_data()
 
@@ -2504,7 +2525,7 @@ exec {shlex.quote(real)} "$@"
             return
         if key == "dim_chat_preview" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:
-                apply_dim_chat(bool(value))
+                self._apply_dim_chat(bool(value))
             except Exception as error:
                 self.notify(f"Could not apply chat dimming: {error}", severity="error")
             return

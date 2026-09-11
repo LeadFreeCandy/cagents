@@ -249,3 +249,12 @@ The shared daemon stays running; server-side thread memory follows
 [Codex's own idle-unload policy](https://learn.chatgpt.com/docs/app-server).
 Restarts of saved conversations use a fresh local Codex runtime. A new thread
 without a saved first message retains its existing server connection.
+
+
+## cagents3 native pane preview
+
+On `feat/cagents3-direct-panes`, run `cagents3` to use the single-server native
+pane backend. It has separate bookkeeping and keeps the existing `cagents`
+launcher available. Conversation panes and drafts survive selection, tab changes,
+and dashboard relaunch. See [CAGENTS3_DESIGN.md](CAGENTS3_DESIGN.md) for layout,
+compatibility, and test details.

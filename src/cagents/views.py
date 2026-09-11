@@ -91,8 +91,9 @@ class SessionList(OptionList):
         option = self.get_option_at_index(index)
         if option.disabled or option.id is None:
             return
-        self.highlighted = index
-        self._interacted()
+        # Hover can wake an idle conversation without navigating away from
+        # the selected one. OptionList handles selection on click/key input.
+        self.post_message(SessionInteracted(option.id))
 
     def on_key(self, event) -> None:
         # Navigation is applied by OptionList's key handler. Rebuilds never
