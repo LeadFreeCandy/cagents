@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 
@@ -64,6 +65,9 @@ class DirectApp(CagentsApp):
         command = ("if -F '#{==:#{pane_index},0}' "
                    "'set -p -t :.1 window-style bg=colour234' "
                    "'set -pu -t :.1 window-style'") if enable else "set -pu -t :.1 window-style"
+        # Moving a conversation also changes the active pane in its hidden
+        # home window, which has no second pane. Only visible UI tabs dim chat.
+        command = "if -F '#{&&:#{@cagents_tab},#{>:#{window_panes},1}}' " + shlex.quote(command)
         self.sidecar._run(["set-hook", "-g", "window-pane-changed", command])
         self.sidecar._run(["set", "-pu", "-t", ":.1", "window-style"])
 

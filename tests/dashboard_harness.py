@@ -67,6 +67,15 @@ class Dashboard:
                       "#{@cagents_role}:#{pane_id}:#{pane_pid}").splitlines()
                       if row.startswith("agent:"))
 
+    def messages(self):
+        return [line for line in self.tmux("show-messages").splitlines() if " message:" in line]
+
+    def assert_no_tmux_messages(self):
+        messages = self.messages()
+        if messages:
+            self.save_artifacts("tmux-message")
+        assert not messages, "Unexpected tmux status-bar messages: " + repr(messages)
+
     def pump(self, duration=.15):
         end = time.monotonic() + duration
         while time.monotonic() < end:
@@ -113,6 +122,7 @@ class Dashboard:
         self.send(b"\x07")
         self.wait(lambda: self.active == self.rail, "Ctrl-G did not reach the queue")
         self.pump(.3)
+        self.assert_no_tmux_messages()
 
     def check_shell_input(self):
         self.probe_number += 1
@@ -131,6 +141,7 @@ class Dashboard:
         pane = row.split(":")[1]
         self.wait(lambda: self.active == pane, "new conversation did not receive focus")
         self.check_shell_input()
+        self.assert_no_tmux_messages()
         return pane
 
     def select_session(self, sid):
@@ -148,9 +159,11 @@ class Dashboard:
         self.send(b"\r")
         self.wait(lambda: self.active != self.rail and self.pane(self.active, "@cagents_session_id") == sid,
                   "Enter did not attach the selected conversation")
+        self.assert_no_tmux_messages()
 
     def save_artifacts(self, label):
         self.artifacts.mkdir(parents=True, exist_ok=True)
+        (self.artifacts / f"{label}-messages.txt").write_text("\n".join(self.messages()))
         rows = self.tmux("list-panes", "-a", "-F",
                          "#{pane_id} #{pane_pid} #{pane_dead} #{pane_current_command} #{@cagents_role} #{@cagents_session_id}")
         (self.artifacts / f"{label}-panes.txt").write_text(rows)

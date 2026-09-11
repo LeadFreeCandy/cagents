@@ -167,6 +167,33 @@ def test_selection_while_zoomed_keeps_the_native_view_zoomed(terminal):
     assert d.run(["display-message", "-p", "#{window_zoomed_flag}"]) == "1"
 
 
+@pytest.mark.parametrize("dim", [True, False])
+def test_parking_conversations_does_not_flash_tmux_error_messages(terminal, dim):
+    from cagents.direct_app import DirectApp
+    t, d = terminal, terminal.d
+    a, _ = t.agent()
+    b = d.spawn("navigation-without-messages")
+    app = DirectApp(store=d.app.store, tmux=d.tmux, sidecar=d.sidecar)
+    app._apply_dim_chat(dim)
+    width = d.run(["display-message", "-p", "-t", d.rail, "#{pane_width}"])
+    for row in (b, a, b, a):
+        d.show(row)
+        d.sidecar.focus_session()
+        t.drain()
+        assert d.run(["show-option", "-pqv", "-t", row.pane_id, "window-style"]) == ""
+        d.sidecar.focus_rail()
+        t.drain()
+        style = d.run(["show-option", "-pqv", "-t", row.pane_id, "window-style"])
+        assert style == ("bg=colour234" if dim else "")
+        assert d.visible() == row.pane_id
+        assert d.run(["display-message", "-p", "-t", row.pane_id, "#{pane_pid}"]) == str(row.pane_pid)
+        assert d.run(["display-message", "-p", "-t", d.rail, "#{pane_width}"]) == width
+    # show-messages records the actual attached client's yellow status bar,
+    # which capture-pane cannot see because it is outside the pane's contents.
+    messages = [line for line in d.run(["show-messages"]).splitlines() if " message:" in line]
+    assert messages == [], "navigation must not display tmux errors: " + repr(messages)
+
+
 def test_explicit_arrow_size_controls_keep_wide_compact_and_zoom_states(terminal):
     from cagents.direct_app import DirectApp
     t, d = terminal, terminal.d

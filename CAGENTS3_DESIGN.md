@@ -118,6 +118,14 @@ contents and formats. The reusable dashboard harness was also run against an
 isolated copy of the unfixed implementation and failed because typed shell input
 was not executed. No existing regression test was removed or disabled.
 
+Navigation also checks tmux's client message history, since yellow status-bar
+errors are outside `capture-pane` output. Two dimming tests (enabled/disabled)
+and the dashboard workflow reproduced `No such pane: :.1` before the fix: the
+dimming hook ran in hidden windows containing only one pane. The hook now runs
+only in UI tabs with a second pane. Tests retain dimming, focus, size, and PID
+assertions; the shared harness checks messages during navigation and saves them
+alongside its terminal captures.
+
 Real PTY tests exercise the dashboard's new-conversation keys, Ctrl-G, quit and
 relaunch, the original process identities, native mouse packets, selection,
 bracketed paste, per-conversation terminals, and OSC color queries. Opt-in tests
