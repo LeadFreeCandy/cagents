@@ -1,9 +1,51 @@
 """Launch the real Textual dashboard in a PTY and drive its public keys."""
 import shutil
+import json
 
 import pytest
 
 from dashboard_harness import Dashboard
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+def test_real_dashboard_collapses_to_icon_and_name_and_restores_details(tmp_path):
+    d = Dashboard(tmp_path / "dashboard-artifacts")
+    try:
+        d.launch()
+        pane = d.new_shell()
+        pid = d.pane(pane, "pane_pid")
+        sid = d.pane(pane, "@cagents_session_id")
+        d.queue()
+        d.send("R")
+        d.wait(lambda: "Rename" in d.capture(d.rail), "rename dialog did not open")
+        title = "Conversation name uses all remaining room"
+        d.send("\x1b[200~" + title + "\x1b[201~")
+        d.send(b"\r")
+        d.wait(lambda: json.loads(d.state.read_text())["sessions"][sid]["label"] == title,
+               "conversation rename did not save")
+        for _ in range(2):
+            d.send(b"\x1b[C")
+            d.wait(lambda: d.pane(d.rail, "pane_width") == "34" and d.active == pane,
+                   "right arrow did not collapse the sidebar")
+            d.pump(.3)
+            row = next(line for line in d.capture(d.rail).splitlines() if "Conversation" in line)
+            # 34 cells minus borders/padding/scrollbar (6) and status (3)
+            # leaves 25 for the title, including its final ellipsis.
+            assert title[:24] + "…" in row, row
+            assert "✳" not in row and "›" not in row, row
+            assert row.count("…") == 1, row
+            d.save_artifacts("collapsed-sidebar")
+            d.send(b"\x1b[D")
+            d.wait(lambda: d.pane(d.rail, "pane_width") == "70" and d.active == d.rail,
+                   "left arrow did not expand the sidebar")
+            d.pump(.3)
+            row = next(line for line in d.capture(d.rail).splitlines() if "Conversation" in line)
+            assert "✳" in row, "expanded row lost its provider: " + row
+            assert d.pane(pane, "pane_pid") == pid
+        d.assert_no_tmux_messages()
+        d.save_artifacts("expanded-sidebar")
+    finally:
+        d.close()
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")

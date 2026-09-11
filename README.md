@@ -160,13 +160,16 @@ Codex it passes through unfamiliar layouts, and the explicit layout shortcuts st
 Integration references: [Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 and [Codex app server](https://learn.chatgpt.com/docs/app-server).
 
-Conversation rows show a one-column provider icon after the state: `✳` Claude or `›` Codex.
+Expanded conversation rows show a one-column provider icon after the state: `✳` Claude or `›` Codex.
 Titles follow the provider's saved conversation name, including native renames.
 Codex's local name index works even while a conversation is suspended; Claude's
 saved custom/generated titles are read from its transcript. An explicit cagents
 label takes priority, with the first real prompt as the fallback for unnamed threads.
-Settings (`,`) → **Conversation title width** controls the queue/grouped/sidebar
+Settings (`,`) → **Conversation title width** controls the expanded queue/grouped
 title limit, now **22** columns by default (previously 44; configurable from 8–120).
+Collapsed sidebars show only the status icon and conversation name, using all
+remaining width for the name and truncating it with an ellipsis when necessary.
+Expand the sidebar to see provider, age, and status labels such as **Done (auto)**.
 
 In tmux, managed Codex launches and restarts inherit the dashboard terminal's
 foreground/background colors before starting, preserving native message and

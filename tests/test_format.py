@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from conftest import SID1, TranscriptBuilder
 
 from cagents.claude_data import parse_session_file
@@ -119,7 +121,7 @@ def test_row_widths_default_halves_the_original_title_limit(claude_dir: Path):
     assert row.plain.index("working") == 3 + 22 + 2
 
 
-def test_provider_icons_use_one_cell_in_full_compact_and_kanban_rows(claude_dir: Path):
+def test_provider_icons_use_one_cell_in_full_and_kanban_rows_only(claude_dir: Path):
     from rich.cells import cell_len
 
     view = _view(claude_dir)
@@ -128,11 +130,12 @@ def test_provider_icons_use_one_cell_in_full_compact_and_kanban_rows(claude_dir:
         assert cell_len(provider_icon(provider).plain) == 1
         row = session_row(view, NOW).plain
         assert row.index(glyph) > row.index("working")
-        assert session_row(view, NOW, compact=True).plain.startswith(f" ● {glyph} ")
+        # Collapsed rows intentionally spend their space on the name alone.
+        assert session_row(view, NOW, compact=True).plain.strip() == "● Fix the login bug"
         assert kanban_card(view, NOW).plain.startswith(f"● {glyph} ")
 
 
-def test_configured_title_width_aligns_wide_characters_and_sidebar_ages(claude_dir: Path):
+def test_configured_title_width_aligns_wide_characters(claude_dir: Path):
     from rich.cells import cell_len
 
     views = [_view(claude_dir, label=title) for title in ("東京駅の問題を修正する" * 5, "x" * 100, "small")]
@@ -143,7 +146,37 @@ def test_configured_title_width_aligns_wide_characters_and_sidebar_ages(claude_d
             row = session_row(view, NOW, widths=widths).plain
             assert cell_len(row.split("working")[0]) == 3 + limit + 2
             compact = session_row(view, NOW, widths=widths, compact=True).plain
-            assert cell_len(compact) == 5 + limit + 1 + 3
+            assert cell_len(compact) == 3 + limit
+
+
+@pytest.mark.parametrize("state", list(SessionState))
+def test_collapsed_row_is_only_status_icon_and_name(claude_dir, state):
+    from cagents.format import session_style
+
+    view = _view(claude_dir, state=state, label="Conversation name")
+    for auto_done, suspended in ((False, False), (True, False), (True, True)):
+        view.auto_done, view.suspended = auto_done, suspended
+        row = session_row(view, NOW, compact=True, show_project=True, show_jira=True)
+        glyph = session_style(view)[0]
+        assert row.plain.strip() == f"{glyph} Conversation name"
+
+
+@pytest.mark.parametrize("width", [20, 28, 34, 50])
+def test_collapsed_title_uses_available_cells_regardless_of_title_cap(claude_dir, width):
+    from rich.cells import cell_len
+
+    views = [_view(claude_dir, label="Conversation title " * 6),
+             _view(claude_dir, state=SessionState.DONE, label="東京駅の問題を修正する" * 5)]
+    views[1].auto_done = True
+    for limit in (8, 22, 80):
+        widths = row_widths(views, limit, compact_width=width)
+        assert widths.title == width - 3  # status glyph and its surrounding spaces
+        for view in views:
+            row = session_row(view, NOW, compact=True, widths=widths).plain
+            assert cell_len(row) == width
+            assert row.count("…") == 1
+        # Adding an auto-done row must not shrink other names.
+        assert row_widths(views[:1], limit, compact_width=width).title == widths.title
 
 
 def test_preview_shows_compaction_hint(claude_dir: Path):

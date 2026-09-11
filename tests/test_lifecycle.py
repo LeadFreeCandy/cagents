@@ -44,7 +44,9 @@ def test_auto_done_default_retroactive_and_duration_boundary(tmp_path):
     assert view.auto_done and view.state == SessionState.DONE
     assert view.done_at == now  # when placed in Done, not the old transcript date
     assert "Done (auto)" in session_row(view).plain
-    assert "Done (auto)" in session_row(view, compact=True).plain
+    # The collapsed view uses the status glyph; the expanded label stays explicit.
+    assert session_row(view, compact=True).plain.startswith(" ✓ ")
+    assert "Done (auto)" not in session_row(view, compact=True).plain
     assert should_suspend(view, now)  # already idle over an hour, including on upgrade
 
 

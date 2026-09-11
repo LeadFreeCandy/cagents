@@ -60,6 +60,19 @@ wide/compact/zoom sizes, and the existing arrow-capture settings remain availabl
 Quitting detaches the dashboard; relaunching preserves agents and terminal tabs.
 Ctrl-R and `:restart` retain their existing conversation/lifecycle behavior.
 
+Collapsed queue and grouped rows show only the status glyph and conversation name.
+Names fill the row after accounting for borders, padding, and the scrollbar; the
+title-width setting applies to expanded rows. Previously one auto-done label
+reserved space in every row, leaving very short names throughout the list.
+Regression tests reproduce this before the fix and cover every status, mixed
+manual/auto completion, Unicode widths, repeated resizing, and stable selection.
+Real dashboard QA uses the arrow keys twice to collapse and expand, verifying
+provider details return and the conversation keeps its original process. Existing
+compact age/provider/label assertions were updated for this intentional removal;
+their expanded-row and lifecycle coverage remains in place.
+Sidebar QA reproduced 23 failing layout cases before the fix; all 195 relevant
+formatting, UI, lifecycle, navigation, hover, and native-dashboard tests now pass.
+
 A real resize still asks the native CLI to redraw. This change removes the extra
 workspace/session relays and automatic focus resizes; it does not claim to remove
 latency inside a CLI's own resize handling. A conversation on another tmux server

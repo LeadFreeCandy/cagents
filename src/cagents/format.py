@@ -121,6 +121,10 @@ def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX,
                compact_width: int | None = None) -> RowWidths:
     """Fit the title and state columns to the rows being shown. Bounded so a
     single long AI title can't shove every other column off the edge."""
+    if compact_width is not None:
+        # Collapsed rows contain only the status glyph and name. Give the name
+        # every remaining cell; the configured cap belongs to expanded rows.
+        return RowWidths(title=max(0, compact_width - 3))
     views = list(views)
     title_width = max(8, min(120, int(title_width)))
     if not views:
@@ -128,13 +132,6 @@ def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX,
     title = max(cell_len(view.title) for view in views)
     state = max(len(session_style(view)[2]) for view in views)
     title = min(title_width, max(TITLE_MIN, title))
-    if compact_width is not None:
-        # A compact row has two glyphs plus spacing (5), title, space,
-        # age (at least 3), and sometimes the explicit auto-done label.
-        # Fit the title BEFORE Textual clips the whole row and loses its age.
-        suffix = max(1 + max(3, len(human_age(view.last_activity)))
-                     + (len(" Done (auto)") if view.auto_done else 0) for view in views)
-        title = min(title, max(1, compact_width - 5 - suffix))
     return RowWidths(title=title, state=max(STATE_MIN, state))
 
 
@@ -159,18 +156,13 @@ def session_row(
 ) -> Text:
     """One list row: glyph, title, state, age (and optionally the project,
     and optionally Jira key/status/assignee columns). Compact form (sidecar
-    rail): glyph, short title, age — nothing else. `widths` comes from
+    rail): status glyph and title filling the available space. `widths` comes from
     row_widths() over the whole list so every row's columns line up."""
     glyph, style, label = session_style(view)
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append(f" {glyph} ", style=style)
     if compact:
-        row.append_text(provider_icon(view.provider))
-        row.append(" ")
-        row.append(_title_field(view.title, widths.title) + " ", style="bold" if view.live else "")
-        row.append(f"{human_age(view.last_activity, now):>3}", style="dim")
-        if view.auto_done:
-            row.append(" Done (auto)", style=style)
+        row.append(_title_field(view.title, widths.title), style="bold" if view.live else "")
         return row
     row.append(
         _title_field(view.title, widths.title) + "  ",

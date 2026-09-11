@@ -24,14 +24,14 @@ def rows(start=0, changed=False):
 
 @pytest.mark.parametrize("view_type", [QueueView, GroupedView])
 @pytest.mark.parametrize("auto_done", [False, True])
-async def test_compact_rows_keep_ages_visible_after_resizing(tmp_path, view_type, auto_done):
+async def test_compact_rows_fill_available_title_space_after_resizing(tmp_path, view_type, auto_done):
     class SidebarApp(App):
         compact = True
 
         def __init__(self):
             super().__init__()
             self.store = Store(tmp_path / "state.json")
-            self.store.settings["conversation_title_width"] = 80
+            self.store.settings["conversation_title_width"] = 8
 
         def compose(self):
             yield view_type()
@@ -43,7 +43,8 @@ async def test_compact_rows_keep_ages_visible_after_resizing(tmp_path, view_type
         sid = ("codex:" if i % 2 == 0 else "") + f"session-{i}"
         tracked = app.store.track(sid, "/proj", now.isoformat())
         parsed = ParsedSession(sid, tmp_path / "unused", cwd="/proj",
-                               title="東京 widget " * 10, last_timestamp=now - timedelta(minutes=1))
+                               title=("東京 widget " if i % 2 else "Conversation ") * 10,
+                               last_timestamp=now - timedelta(minutes=1))
         views.append(SessionView(sid, tracked, parsed, SessionState.DONE if auto_done else SessionState.NEEDS_REVIEW,
                                  False, auto_done=auto_done))
     async with app.run_test(size=(34, 10)) as pilot:
@@ -58,13 +59,14 @@ async def test_compact_rows_keep_ages_visible_after_resizing(tmp_path, view_type
             # Check actual rendered rows, including option padding and scrollbar,
             # rather than just the Rich Text before Textual clips it.
             first_row = 1 if view_type is GroupedView else 0
-            for i, icon in enumerate(("›", "✳")):
+            for i in range(2):
                 text = listing.render_line(first_row + i).text
-                assert icon in text
-                assert "1m" in text, text
-                assert text.count("…") <= 1, text
-                if auto_done:
-                    assert "Done (auto)" in text, text
+                glyph = "✓" if auto_done else "◆"
+                title = Text(views[i].title)
+                title.truncate(listing.prompt_width - 3, overflow="ellipsis", pad=True)
+                assert text.strip() == f"{glyph} {title.plain}".strip(), text
+                assert text.count("…") == 1, text
+                assert listing.get_option(views[i].session_id).prompt.cell_len == listing.prompt_width
             assert listing.highlighted_session_id == selected
 
 

@@ -523,8 +523,8 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     (
         "conversation_title_width",
         "Conversation title width",
-        "Maximum title columns in the queue, grouped list, and sidebar. Default 22 "
-        "(previously 44); shorter titles use less space. Enter to set 8–120 columns.",
+        "Maximum title columns in expanded lists. Default 22; shorter titles use less space. "
+        "Collapsed sidebars use the available width. Enter to set 8–120 columns.",
     ),
     (
         "notifications",

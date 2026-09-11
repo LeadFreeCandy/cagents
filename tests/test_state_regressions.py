@@ -218,7 +218,8 @@ def test_cached_claude_status_cannot_override_new_hook_or_process(claude_dir, tm
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
-async def test_list_updates_working_idle_working_without_losing_selection(claude_dir, tmp_path, provider):
+@pytest.mark.parametrize("compact", [True, False])
+async def test_list_updates_working_idle_working_without_losing_selection(claude_dir, tmp_path, provider, compact):
     from textual.app import App
     from cagents.views import QueueView, SessionList
 
@@ -258,6 +259,7 @@ async def test_list_updates_working_idle_working_without_losing_selection(claude
 
     app = ListApp()
     app.store = store
+    app.compact = compact
     async with app.run_test(size=(90, 12)) as pilot:
         view = app.query_one(QueueView)
         listing = app.query_one(SessionList)
@@ -270,4 +272,7 @@ async def test_list_updates_working_idle_working_without_losing_selection(claude
             assert listing.highlighted_session_id == t.session_id
             row = listing.get_option(t.session_id).prompt.plain
             assert ("●" in row) == busy
-            assert ("✳" if provider == "claude" else "›") in row
+            if compact:
+                assert row.strip() == ("●" if busy else "◆") + " go"
+            else:
+                assert ("✳" if provider == "claude" else "›") in row
