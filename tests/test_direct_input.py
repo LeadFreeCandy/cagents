@@ -89,6 +89,48 @@ def test_native_wheel_is_forwarded_once_to_hovered_application(terminal):
 
 
 @pytest.mark.parametrize("mode", ["emacs", "vi"])
+@pytest.mark.parametrize("selected", [False, True])
+def test_mouse_motion_keeps_scrollback_with_dashboard_mouse_reporting(terminal, mode, selected):
+    t, d = terminal, terminal.d
+    a, received = t.agent()
+    d.run(["set", "-g", "mode-keys", mode])
+    # Textual requests all mouse motion, including movement without a button.
+    # A sleeping rail (or a nested tmux) does not reproduce that client mode.
+    rail = d.path / "mouse-rail.py"
+    rail.write_text("import os,tty\ntty.setraw(0)\n"
+                    "os.write(1,b'\\x1b[?1003h\\x1b[?1006h')\n"
+                    "while True: os.read(0,4096)\n")
+    d.run(["respawn-pane", "-k", "-t", d.rail, shlex.join([sys.executable, str(rail)])])
+    t.drain(.3)
+    assert d.run(["display-message", "-p", "-t", d.rail, "#{mouse_all_flag}"]) == "1"
+    t.write(t.packet(a.pane_id, 64, 10, 8) * 7)
+    state = ["display-message", "-p", "-t", a.pane_id, "#{pane_in_mode}:#{scroll_position}"]
+    assert d.run(state) == "1:7"
+    if selected:
+        copied = d.path / "motion-copied"
+        d.run(["set", "-s", "copy-command", "cat > " + shlex.quote(str(copied))])
+        t.write(t.packet(a.pane_id, 0, 1, 5))
+        t.write(t.packet(a.pane_id, 32, 14, 5))
+        t.write(t.packet(a.pane_id, 0, 14, 5, "m"))
+        eventually(copied.exists)
+        assert copied.read_text().strip().startswith("COPY_LINE_")
+    # Include the border and status line, as well as both panes.
+    for pane, x, y in ((a.pane_id, 12, 9), (a.pane_id, 0, 9), (d.rail, 10, 8),
+                       (d.rail, 10, 0), (a.pane_id, 15, 12)):
+        t.write(t.packet(pane, 35, x, y))
+        assert d.run(state) == "1:7", "moving the pointer must not leave scrollback"
+        assert d.run(["display-message", "-p", "-t", a.pane_id, "#{selection_present}"]) == str(int(selected))
+    assert received.read_bytes() == b""
+    assert d.run(["display-message", "-p", "#{pane_id}"]) == a.pane_id
+    assert not [line for line in d.run(["show-messages"]).splitlines() if " message:" in line]
+    # Pasting must still leave history and preserve the original bracketed input.
+    pasted = "\x1b[200~draft café\n:restart\x1b[201~".encode()
+    t.write(pasted)
+    assert received.read_bytes() == pasted
+    assert d.run(["display-message", "-p", "-t", a.pane_id, "#{pane_in_mode}"]) == "0"
+
+
+@pytest.mark.parametrize("mode", ["emacs", "vi"])
 def test_selection_survives_release_and_unicode_paste_preserves_draft(terminal, mode):
     t, d = terminal, terminal.d
     a, received = t.agent()

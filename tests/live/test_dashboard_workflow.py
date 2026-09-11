@@ -88,6 +88,35 @@ def start_provider(d, provider):
     return pane, sid
 
 
+def test_codex_scrollback_survives_mouse_motion_in_real_dashboard(dashboard):
+    d = dashboard
+    pane, _ = start_provider(d, "codex")
+    pid = d.pane(pane, "pane_pid")
+    # The configured endpoint refuses connections; this only creates local UI
+    # history, following the existing installed-Codex scroll/copy QA fixture.
+    prompt = "\n".join(f"MOUSE_SCROLL_ROW_{i:02d}" for i in range(50))
+    d.send("\x1b[200~" + prompt + "\x1b[201~")
+    d.send(b"\r")
+    d.wait(lambda: "MOUSE_SCROLL_ROW_49" in d.capture(pane), "Codex did not show scroll fixture")
+    d.pump(1)
+    d.send("\x1b[200~UNSENT_MOUSE_DRAFT\x1b[201~")
+    d.wait(lambda: "UNSENT_MOUSE_DRAFT" in d.capture(pane), "Codex did not accept draft")
+    d.send(d.mouse(pane, 64, 10, 8) * 12)
+    position = d.pane(pane, "scroll_position")
+    assert int(position) >= 12
+    for target, x, y in ((pane, 12, 9), (d.rail, 10, 8), (pane, 15, 12)):
+        d.send(d.mouse(target, 35, x, y))
+        assert d.pane(pane, "pane_in_mode") == "1", "hover left Codex scrollback"
+        assert d.pane(pane, "scroll_position") == position, "hover reset Codex scroll position"
+        assert d.active == pane and d.pane(pane, "pane_pid") == pid
+    d.send("\x1b[200~ café\nsecond line\x1b[201~")
+    d.wait(lambda: all(part in d.capture(pane) for part in ("UNSENT_MOUSE_DRAFT", "café", "second line")),
+           "paste after scrolling lost the Codex draft")
+    assert d.pane(pane, "pane_in_mode") == "0"
+    d.assert_no_tmux_messages()
+    d.save_artifacts("codex-mouse-scrollback")
+
+
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 def test_new_provider_draft_terminal_switch_and_dashboard_reload(dashboard, provider):
     d = dashboard

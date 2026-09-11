@@ -94,6 +94,12 @@ class Dashboard:
         os.write(self.master, data.encode() if isinstance(data, str) else data)
         self.pump(pause)
 
+    def mouse(self, pane, button, x, y, suffix="M"):
+        left, top = map(int, self.tmux("display-message", "-p", "-t", pane,
+                                      "#{pane_left}:#{pane_top}").split(":"))
+        # One-based terminal coordinates include the status line above panes.
+        return f"\x1b[<{button};{left+x};{top+y+1}{suffix}"
+
     def wait(self, condition, message, timeout=15):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -175,13 +181,36 @@ class Dashboard:
                 shutil.copyfile(self.path / name, self.artifacts / name)
 
     def close(self):
+        from cagents.tmuxctl import _process_table, _stop_orphaned_children
+
         self.save_artifacts("final")
-        if (self.path / "codex/app-server-control/app-server-control.sock").exists():
-            subprocess.run([shutil.which("codex"), "app-server", "daemon", "stop"],
-                           env=self.env, capture_output=True, timeout=20)
+        # Only a daemon launched from this disposable provider home is ours.
+        # Retain birth stamps so cleanup cannot signal a reused process ID.
+        prefixes = tuple(str(path / "codex/packages/standalone/current/bin/codex") + " app-server "
+                         for path in (self.path, self.path.resolve()))
+        processes = _process_table()
+        commands = subprocess.run(["ps", "-axo", "pid=,command="], text=True,
+                                  capture_output=True, check=True, timeout=5).stdout
+        daemons = {}
+        for line in commands.splitlines():
+            fields = line.split(None, 1)
+            if len(fields) == 2 and fields[1].startswith(prefixes):
+                pid = int(fields[0])
+                if pid in processes:
+                    daemons[pid] = processes[pid][1]
         subprocess.run(["tmux", "-L", self.socket, "kill-server"], env=self.env,
                        capture_output=True, timeout=5)
         for pid, master in self.clients:
             os.close(master)
             os.waitpid(pid, 0)
-        self.temp.cleanup()
+        try:
+            if (self.path / "codex/app-server-control/app-server-control.sock").exists():
+                try:
+                    subprocess.run([shutil.which("codex"), "app-server", "daemon", "stop"],
+                                   env=self.env, capture_output=True, timeout=20)
+                except subprocess.TimeoutExpired:
+                    if not daemons:
+                        raise  # Never fall back to stopping an unidentified process.
+        finally:
+            _stop_orphaned_children(daemons)
+            self.temp.cleanup()

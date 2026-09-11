@@ -109,7 +109,8 @@ execute commands in the conversation terminal, and quit/relaunch the dashboard.
 They assert the original agent PID, draft, and terminal survive. Every run saves
 pane inventories, ANSI terminal captures, and app logs under pytest's temporary
 `dashboard-artifacts` directory; all QA tmux servers and provider homes are
-isolated from live conversations. No model turn is submitted by these workflows.
+isolated from live conversations. Navigation workflows leave drafts unsent;
+scroll fixtures submit only to the refused localhost endpoint, never a model service.
 
 Promotion QA after fixing shell startup: the complete suite with installed-CLI
 QA enabled passed 604 tests, with 3 opt-in checks skipped. The separate macOS
@@ -125,6 +126,22 @@ dimming hook ran in hidden windows containing only one pane. The hook now runs
 only in UI tabs with a second pane. Tests retain dimming, focus, size, and PID
 assertions; the shared harness checks messages during navigation and saves them
 alongside its terminal captures.
+
+Mouse-motion regressions also exercise Textual's all-motion reporting. The
+copy-mode `Any` binding used for bracketed paste was cancelling history on
+unbound mouse movement, so merely moving the pointer reset Codex to the bottom.
+Both emacs and vi tests failed before the fix, as did the real dashboard and
+installed Codex. The fallback now forwards mouse events with native tmux handling
+and leaves the paste path unchanged. Tests cover scroll position and selection
+across the content, rail, border, and status line; they retain focus, draft, and
+paste assertions. The earlier sleeping-rail fixture did not request all mouse
+motion and therefore missed this case. QA also cleans up its isolated Codex
+daemon if graceful shutdown stalls, verifying the temporary executable path and
+process birth stamp before sending signals.
+Verification for this fix: all six new regression cases fail against the original
+input binding. The complete suite with installed-CLI QA enabled passes 612 tests
+(3 opt-in checks skipped); the separate macOS clipboard run passes all 3 selected
+checks and restores the original pasteboard contents and formats.
 
 Real PTY tests exercise the dashboard's new-conversation keys, Ctrl-G, quit and
 relaunch, the original process identities, native mouse packets, selection,

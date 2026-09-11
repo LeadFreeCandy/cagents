@@ -120,7 +120,10 @@ def terminal_input_commands() -> list[list[str]]:
         # tmux 3.6's paste-start event has no bindable key name. Its Any
         # fallback can forward the original event, preserving bracketed
         # paste so multiline text never becomes individual CLI commands.
+        # Any also catches unbound mouse motion when Textual requests it.
+        # Forward mouse events natively without cancelling scrollback.
         commands.append(["bind", "-T", table, "Any",
+                         "if", "-F", "#{!=:#{mouse_x},}", "send-keys -M",
                          "send-keys -X cancel ; send-keys"])
     return commands
 
