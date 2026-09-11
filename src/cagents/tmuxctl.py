@@ -282,6 +282,17 @@ class TmuxClient:
             self._mouse_enabled.add(self.create_socket)
         return name
 
+    def kill_session(self, name: str, socket: str | None = None) -> None:
+        """Tear down a live session's tmux session (and the claude process
+        in it) so it can be respawned fresh — e.g. restarting onto a newer
+        claude build. A session already gone is not an error: this is used
+        right before re-spawning, and the target may have exited on its
+        own between the caller's last read and this call."""
+        try:
+            self._run(socket or self.create_socket, "kill-session", "-t", f"={name}")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
     def new_shell_session(
         self, directory: str, session_id: str = "", extra_env: list[str] | None = None
     ) -> str:

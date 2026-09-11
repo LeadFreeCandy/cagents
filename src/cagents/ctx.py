@@ -15,6 +15,10 @@ acts *inside the same tmux server* (run-shell provides $TMUX):
                                            whichever session opened one
                                            last (see do_shell)
     cagents-ctx diff    --context <file>   the diff tab (or a popup)
+    cagents-ctx top     --context <file>   ⌃G: jump to the top of the
+                                           attention queue — just drops a
+                                           marker (see do_jump_top); only
+                                           the running app knows the queue
     cagents-ctx event <Kind> --file <f>    Claude Code hook target: stamp a
                                            state event for the session
 
@@ -576,10 +580,26 @@ def do_event(kind: str, path: Path) -> int:
     return 0
 
 
+def do_jump_top(state_dir: Path) -> int:
+    """⌃G, root-bound: drop the marker `_handle_jump_top_request` polls
+    for on its next refresh and acts on immediately (same action the
+    in-app `T` key runs). This process has no view of the running app's
+    snapshot — computing "what's at the top of the queue" needs a live
+    SessionRegistry, which only the app already has — so unlike do_shell/
+    do_diff this can't act instantly; the tradeoff is the same one every
+    other cross-process nudge here already makes (select/spawn/toast
+    requests all wait for the same poll)."""
+    from .notifier import write_jump_top_request
+
+    write_jump_top_request(state_dir)
+    _log("jump-top: request written")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cagents-ctx")
     parser.add_argument(
-        "command", choices=["shell", "diff", "event", "wlog"],
+        "command", choices=["shell", "diff", "top", "event", "wlog"],
         nargs="?", default="shell",
     )
     parser.add_argument("kind", nargs="?", default="")
@@ -620,6 +640,8 @@ def main(argv: list[str] | None = None) -> int:
             select=not args.no_select,
             state_dir=args.context.parent,
         )
+    if args.command == "top":
+        return do_jump_top(args.context.parent)
     return do_diff(
         directory, select=not args.no_select,
         mode=str(context.get("diff_mode", "branch")),

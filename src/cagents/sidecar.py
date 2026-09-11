@@ -486,31 +486,38 @@ def _right_cycle(modifier: str = "", probe: str = "") -> list[str]:
     ]
 
 
-# ⌥ and ⇧ arrows walk the same three states from either pane and never
-# yield to anything -- the guaranteed path while the composer has text, or
-# if the probe ever stops recognising Claude's screen.
+# ⌥⇧ arrows and ⌃H/⌃L walk the same three states from either pane and
+# never yield to anything -- the guaranteed path while the composer has
+# text, or if the probe ever stops recognising Claude's screen, or (⌃H/⌃L)
+# just because you'd rather have vim-style hands-on-home-row keys that
+# work identically whichever pane is focused.
 #
-# Two modifiers rather than one because they cost different things.
+# Two arrow modifiers rather than one because they cost different things.
 # Measured against a real session: ⌥← and ⌃← are Claude's word-wise cursor
 # movement, so binding either takes an editing key away; ⇧← is just its
 # plain ← (one character), so taking it costs nothing the bare arrow
 # doesn't already do. ⇧ is therefore the pair to reach for, and ⌥ stays
 # bound only because it is what the statusline has always advertised.
-_UNCONDITIONAL_MODIFIERS = ("M-", "S-")
+# ⌃H/⌃L cost a real key too (backspace-as-BS and readline's clear-screen,
+# respectively) but neither survives to the pane anyway once bound at
+# root -- same tradeoff C-t/C-d already made for whatever they meant
+# inside Claude before cagents claimed them.
+_UNCONDITIONAL_LEFT_KEYS = ("M-Left", "S-Left", "C-h")
+_UNCONDITIONAL_RIGHT_KEYS = ("M-Right", "S-Right", "C-l")
 
 
-def _left_unconditional(modifier: str) -> list[str]:
+def _left_unconditional(key: str) -> list[str]:
     return [
-        "bind", "-n", f"{modifier}Left",
+        "bind", "-n", key,
         "if", "-F", "#{window_zoomed_flag}",
         "resize-pane -Z -t :.1 ; select-pane -t :.1",   # HIDDEN -> SMALL
         "select-pane -t :.0",                            # SMALL  -> WIDE
     ]
 
 
-def _right_unconditional(modifier: str) -> list[str]:
+def _right_unconditional(key: str) -> list[str]:
     return [
-        "bind", "-n", f"{modifier}Right",
+        "bind", "-n", key,
         "if", "-F", "#{!=:#{window_zoomed_flag},1}",
         "if -F '#{==:#{pane_index},0}' "
         "'select-pane -t :.1' "
@@ -519,9 +526,10 @@ def _right_unconditional(modifier: str) -> list[str]:
 
 
 def _unconditional_cycles() -> list[list[str]]:
-    return [command(modifier)
-            for modifier in _UNCONDITIONAL_MODIFIERS
-            for command in (_left_unconditional, _right_unconditional)]
+    return (
+        [_left_unconditional(key) for key in _UNCONDITIONAL_LEFT_KEYS]
+        + [_right_unconditional(key) for key in _UNCONDITIONAL_RIGHT_KEYS]
+    )
 
 
 def container_setup_commands() -> list[list[str]]:
@@ -536,7 +544,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size (⇧⌥ any time) · C-d diff · C-t term "],
+        ["set", "-g", "status-right", " ←/→ size (⇧⌥ or ⌃H/⌃L any time) · C-d diff · C-t term · C-g top "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -610,9 +618,10 @@ def apply_dim_chat(enable: bool, runner=None) -> None:
 
 
 def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
-    """C-t (shell in the session's dir) and C-d (diff vs master popup),
-    C-t rather than C-s so Claude Code's own ctrl-s binding stays reachable;
-    available regardless of which pane has focus."""
+    """C-t (shell in the session's dir), C-d (diff vs master popup), and
+    C-g (jump to the top of the attention queue) — C-t rather than C-s so
+    Claude Code's own ctrl-s binding stays reachable; all three available
+    regardless of which pane has focus."""
     import shlex
 
     prog = shlex.quote(ctx_prog)
@@ -622,6 +631,7 @@ def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
         ["unbind", "-n", "C-s"],
         ["bind", "-n", "C-t", "run-shell", "-b", f"{prog} shell --context {ctx}"],
         ["bind", "-n", "C-d", "run-shell", "-b", f"{prog} diff --context {ctx}"],
+        ["bind", "-n", "C-g", "run-shell", "-b", f"{prog} top --context {ctx}"],
     ]
 
 

@@ -622,6 +622,69 @@ class TestShellClaude:
             assert "--session-id" not in args
             assert SID2 in store.sessions
 
+    async def test_spawn_request_viewer_does_not_flicker_back_to_the_previous_session(
+        self, world, tmp_path, now, claude_dir
+    ):
+        # Real bug, confirmed live: _handle_spawn_request runs from WITHIN
+        # apply_snapshot, AFTER that same cycle's update_snapshot() loop
+        # already queued a SelectionChanged for whatever was selected
+        # before the spawn. That message fires right after this handler
+        # returns and clobbers the just-opened session's viewer back to
+        # the old one — in the wild this showed as "the new session's
+        # terminal never popped up" for as long as the slower, real
+        # refresh_data() call (real disk/tmux I/O) was still in flight.
+        import json
+        import time as _time
+
+        from conftest import FakeOuterTmux, FakeWorkTmux
+        from cagents.sidecar import Sidecar, nested_attach_command
+        from cagents.tmuxctl import TmuxSession
+
+        app, store, tmux = world
+        # SID1 must be genuinely LIVE (a real directory, matched by the
+        # tmux/session mapping) — a dead session takes the resume-preview
+        # branch instead, which doesn't touch sidecar.current_command at
+        # all and would silently pass this test either way.
+        real_dir = tmp_path / "alpha-worktree"
+        real_dir.mkdir()
+        init_git_repo(real_dir)
+        TranscriptBuilder(SID1, str(real_dir)).ai_title("Original work").user("go").assistant_text(
+            "Phase one complete."
+        ).write(claude_dir, mtime=now - 1)
+        store.sessions[SID1].project_dir = str(real_dir)
+        tmux.sessions.append(
+            TmuxSession(name="alpha", created=now - 60, activity=now, attached=False,
+                        pane_pid=1, pane_path=str(real_dir), socket="claude")
+        )
+        outer, work = FakeOuterTmux(), FakeWorkTmux()
+        app.sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+        project = tmp_path / "newconvo"
+        project.mkdir()
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.2)
+            select_session(app, SID1)
+            await pilot.pause(0.2)
+
+            app._spawn_request_path().write_text(json.dumps({"dir": str(project), "args": []}))
+
+            # Slow down only the refresh _handle_spawn_request triggers
+            # INTERNALLY (its own refresh_data() call) — real disk/tmux I/O
+            # takes real time; this test double normally doesn't, which is
+            # exactly why this race never showed up in other tests.
+            real_refresh = app.registry.refresh
+            app.registry.refresh = lambda: (_time.sleep(0.6), real_refresh())[1]
+
+            app.apply_snapshot(real_refresh())
+            await pilot.pause(0.4)  # well under the 0.6s slow refresh still pending
+
+            new_sid = tmux.created[-1][2]
+            new_name = tmux.sessions[-1].name
+            assert new_sid != SID1
+            assert app.sidecar.current_command == nested_attach_command(
+                tmux.create_socket, new_name
+            )
+
     async def test_spawn_request_reuses_a_pending_new_terminal_id(self, world, tmp_path):
         # `n` tracks a session before `claude` is ever typed — once the
         # shim reports one, its exact id must be reused (already tracked,

@@ -93,6 +93,23 @@ async def test_navigation_updates_preview(world):
         assert widget_text(app, "#preview-content")  # fullscreen mode renders internally
 
 
+async def test_list_navigation_does_not_wrap(world):
+    app, *_ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        queue = app.query_one("#queue-list", SessionList)
+        await pilot.press("k")  # already at the top -> stays, doesn't jump to the bottom
+        await pilot.pause()
+        assert queue.highlighted == 0
+        await pilot.press("g")  # OptionList's own "first" isn't affected by this
+        await pilot.pause()
+        last = queue.option_count - 1
+        for _ in range(queue.option_count):
+            await pilot.press("j")
+        await pilot.pause()
+        assert queue.highlighted == last  # ran off the bottom -> stays, doesn't jump to the top
+
+
 async def test_view_switching_cycles_three_views(world):
     app, *_ = world
     async with app.run_test(size=(140, 40)) as pilot:
@@ -154,6 +171,92 @@ async def test_attach_live_session_fullscreen(world):
         assert "status-on:alpha" in tmux.log and "status-off:alpha" in tmux.log
 
 
+async def test_snooze_key_works_on_a_needs_input_row(world):
+    """A pending permission/question prompt is exactly the kind of thing
+    you'd want to snooze away for later — only a still-streaming WORKING
+    session refuses snooze/waiting, needs-you no longer does."""
+    app, store, tmux, _ = world
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID2)
+        await pilot.pause()
+        assert app.snapshot.by_id(SID2).state == SessionState.NEEDS_INPUT
+        await pilot.press("s")
+        await pilot.pause(0.2)
+        assert store.sessions[SID2].snoozed_until != ""
+        assert app.snapshot.by_id(SID2).state == SessionState.SNOOZED
+
+
+async def test_waiting_key_works_on_a_needs_input_row(world, claude_dir, now):
+    """Same fix as snooze above, for `w`: a needs-you row with a PR
+    already recorded should park on it instead of being refused."""
+    app, store, tmux, _ = world
+    TranscriptBuilder(SID2, "/proj/alpha").ai_title("Alpha: add tests").user("go").assistant_tool_use(
+        "t1", "Bash", {"command": "pytest"}, ts=ts_ago(2)
+    ).raw(
+        {"type": "pr-link", "sessionId": SID2, "prNumber": 9,
+         "prUrl": "https://github.com/o/r/pull/9"}
+    ).write(claude_dir, mtime=now - 2)
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID2)
+        await pilot.pause()
+        assert app.snapshot.by_id(SID2).state == SessionState.NEEDS_INPUT
+        await pilot.press("w")
+        await pilot.pause(0.2)
+        assert store.sessions[SID2].waiting_pr == "https://github.com/o/r/pull/9"
+        assert app.snapshot.by_id(SID2).state == SessionState.WAITING_EXTERNAL
+
+
+async def test_jump_to_top_attaches_the_top_of_queue_session(world):
+    app, store, tmux, _ = world
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        # Starting selection is unrelated to the queue's top row.
+        select_session(app, SID1)
+        await pilot.pause()
+        await pilot.press("T")
+        await pilot.pause()
+        assert app.selected_session_id == SID2  # needs-input outranks everything else
+        assert tmux.attached_to == [("alpha", "claude")]
+
+
+async def test_jump_to_top_is_a_no_op_bell_when_already_there(world):
+    app, store, tmux, _ = world
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID2)
+        await pilot.pause()
+        await pilot.press("T")
+        await pilot.pause()
+        assert app.selected_session_id == SID2
+        assert tmux.attached_to == []  # already there -> no re-attach, just a bell
+
+
+async def test_ctrl_g_marker_triggers_the_same_jump_on_next_refresh(world):
+    """⌃G can't reach the Textual app directly (it's a root tmux binding
+    that fires even with a live Claude pane focused) — it just drops the
+    marker do_jump_top writes; the app's own poll picks it up and runs
+    exactly the `T` action."""
+    from cagents.notifier import write_jump_top_request
+
+    app, store, tmux, _ = world
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID1)
+        await pilot.pause()
+        write_jump_top_request(store.path.parent)
+        app.refresh_data()
+        await pilot.pause(0.3)
+        assert app.selected_session_id == SID2
+        assert tmux.attached_to == [("alpha", "claude")]
+
+
 async def test_attach_dead_session_resumes_on_private_socket(world):
     app, store, tmux, _ = world
     async with app.run_test(size=(120, 40)) as pilot:
@@ -179,6 +282,47 @@ async def test_attach_dead_session_resumes_on_private_socket(world):
         # Resume spawns on the PRIVATE socket (spawning next to a live
         # claude on a shared socket crashes it).
         assert tmux.attached_to[-1][1] == "cagents-sessions"
+
+
+async def test_colon_restart_relaunches_only_live_sessions(world):
+    app, store, tmux, _ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        store.sessions[SID2].project_dir = "/tmp"
+        view = app.snapshot.by_id(SID2)
+        if view.parsed:
+            view.parsed.cwd = "/tmp"
+
+        await pilot.press("colon")
+        await pilot.pause()
+        for ch in "restart":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause(0.1)
+
+        # SID2/"alpha" is the only live session here — killed on its own
+        # socket and respawned with --resume, SID1/SID3 (dead) untouched.
+        assert tmux.killed == [("alpha", "claude")]
+        assert tmux.created and tmux.created[-1][1][:2] == ["--resume", SID2]
+        assert tmux.created[-1][2] == SID2
+
+
+async def test_colon_restart_declined_leaves_sessions_alone(world):
+    app, store, tmux, _ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("colon")
+        await pilot.pause()
+        for ch in "restart":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause(0.1)
+        assert tmux.killed == []
+        assert tmux.created == []
 
 
 async def test_done_key_flow(world):

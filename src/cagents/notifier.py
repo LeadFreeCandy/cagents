@@ -23,6 +23,7 @@ import subprocess
 from pathlib import Path
 
 SELECT_REQUEST_FILE = "select-request"
+JUMP_TOP_REQUEST_FILE = "jump-top-request"
 
 # $TERM_PROGRAM -> the app's bundle id, for terminal-notifier's -activate.
 # Unrecognized/unset values just skip activation (falls back to today's
@@ -97,3 +98,27 @@ def read_select_request(state_dir: Path) -> str | None:
     except OSError:
         pass
     return session_id or None
+
+
+def write_jump_top_request(state_dir: Path) -> None:
+    """Dropped by the root ⌃G tmux binding (see ctx.py's `top` command) —
+    a plain marker, content doesn't matter. cagents polls for it each
+    refresh, same cadence as select/spawn/toast requests: this process is
+    a short-lived tmux hook with no view of the running app's state, so
+    it can't compute "what's at the top of the queue" itself."""
+    try:
+        (state_dir / JUMP_TOP_REQUEST_FILE).write_text("1", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_jump_top_request(state_dir: Path) -> bool:
+    """True (and consumes the request) if ⌃G fired since the last poll."""
+    request = state_dir / JUMP_TOP_REQUEST_FILE
+    if not request.exists():
+        return False
+    try:
+        request.unlink()
+    except OSError:
+        pass
+    return True

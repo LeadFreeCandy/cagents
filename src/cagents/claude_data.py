@@ -211,6 +211,20 @@ _TASK_NOTIF_ID = re.compile(r"<task-id>(\S+)</task-id>")
 _TASK_TERMINAL = re.compile(r"<status>(?:completed|failed|killed)</status>")
 _MONITOR_TIMED_OUT = re.compile(r"\[Monitor timed out")
 
+# Every genuine lifecycle ack (background start, Monitor start, task
+# notification) is a short, self-contained system message — real examples
+# top out around 150 chars. A tool_result, unlike those, can be an
+# arbitrarily large blob (a file Claude read, a long command's stdout —
+# even this very source file quoted back in conversation) that can merely
+# happen to contain the same phrase — confirmed live: reading
+# claude_data.py inside a cagents session made _BG_ACK's own pattern text
+# match itself in the Read tool's result, permanently flagging that
+# session as BACKGROUND with nothing actually running. Only tool_result
+# text is capped (below, at its one call site) — the raw-JSONL-line and
+# queue-operation paths carry their own envelope bytes that would trip a
+# blanket cap without ever being this risky.
+_LIFECYCLE_ACK_MAX_LEN = 300
+
 
 def _scan_lifecycle(
     text: str, ts, active_background: dict, active_monitors: dict,
@@ -501,9 +515,14 @@ def parse_session_file(
                     tool_id = block.get("tool_use_id")
                     if isinstance(tool_id, str):
                         open_tool_uses.pop(tool_id, None)
+                        # Slice rather than skip: a real ack always sits at
+                        # the front of its own tool_result, so a large
+                        # result (a file dump, long command output) still
+                        # gets its leading edge checked without the rest
+                        # of the blob being able to trip a false match.
                         _scan_lifecycle(
-                            _result_text(block), ts, active_background, active_monitors,
-                            terminal_task_ids, timed_out_monitor_ids,
+                            _result_text(block)[:_LIFECYCLE_ACK_MAX_LEN], ts, active_background,
+                            active_monitors, terminal_task_ids, timed_out_monitor_ids,
                         )
                 elif btype == "text":
                     text = block.get("text", "")

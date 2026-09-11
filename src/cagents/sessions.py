@@ -376,18 +376,27 @@ def derive_state(
     now = time.time() if now is None else now
 
     def needs_input(detail: str) -> tuple[SessionState, str]:
-        """NEEDS_INPUT — unless the human already dismissed it. `d` on a
-        needs-you row means "I've decided not to engage with this right
-        now" (imported sessions parked on Claude's startup resume dialog
-        were undismissable). Deliberately loud about what's left open:
-        the state reads done but the detail keeps naming the dialog, and
-        the moment the conversation actually moves (new transcript
-        activity past reviewed_at) the review stops counting and the row
-        comes straight back — same self-clearing idiom as NEEDS_REVIEW."""
+        """NEEDS_INPUT — unless the human already dismissed it. `d`/`s`/`w`
+        on a needs-you row all mean "I've decided not to engage with this
+        right now" (imported sessions parked on Claude's startup resume
+        dialog were undismissable, and a pending permission prompt is
+        exactly the kind of thing worth snoozing or parking rather than
+        answering immediately). Deliberately loud about what's left open:
+        the state reads done/snoozed/waiting but the detail keeps naming
+        the dialog, and the moment the conversation actually moves (new
+        transcript activity past the override's own timestamp) it stops
+        counting and the row comes straight back — same self-clearing
+        idiom as NEEDS_REVIEW, same precedence order as _finished_state."""
         reviewed = tracked.reviewed_datetime()
         last = parsed.last_timestamp if parsed is not None else None
         if reviewed is not None and (last is None or reviewed >= last):
             return (SessionState.DONE, f"done — {detail}")
+        snoozed_until = tracked.snoozed_datetime()
+        if snoozed_until is not None and now < snoozed_until.timestamp():
+            return (SessionState.SNOOZED, f"snoozed until {snoozed_until.strftime('%H:%M')}")
+        waiting = tracked.waiting_datetime()
+        if waiting is not None and (last is None or waiting >= last):
+            return (SessionState.WAITING_EXTERNAL, "waiting on PR")
         return (SessionState.NEEDS_INPUT, detail)
 
     if parsed is None:
@@ -465,6 +474,22 @@ def derive_state(
     return _finished_state(parsed, tracked, now)
 
 
+# How long a pendingBackgroundAgentCount reading stays trustworthy once
+# the transcript goes quiet. Real background agents (Task-tool subagents)
+# finish in minutes; a session idle far longer than this with no newer
+# system record to refresh the count almost certainly has a dead agent
+# process, not a live one — confirmed live: two sessions idle 11h/20h
+# both stuck showing BACKGROUND ("1 background agent running") off a
+# single stale system record, since pending_agents (unlike active_
+# background/monitors) has no completion signal to reconcile against.
+PENDING_AGENTS_STALE_SECONDS = 2 * 3600
+
+
+def _pending_agents_stale(parsed: ParsedSession, now: float) -> bool:
+    last = parsed.last_timestamp
+    return last is not None and (now - last.timestamp()) > PENDING_AGENTS_STALE_SECONDS
+
+
 def _lingering_background_activity(
     parsed: ParsedSession, pane_text: str, now: float
 ) -> bool:
@@ -483,7 +508,7 @@ def _lingering_background_activity(
         bool(pane_shell_count(pane_text))
         or parsed.monitor_running(now)
         or parsed.background_active
-        or bool(parsed.pending_agents)
+        or (bool(parsed.pending_agents) and not _pending_agents_stale(parsed, now))
     )
 
 
@@ -528,7 +553,7 @@ def _finished_state(
         return (SessionState.MONITORING, "Claude monitor active")
     if parsed.background_active:
         return (SessionState.BACKGROUND, "background task running")
-    if parsed.pending_agents:
+    if parsed.pending_agents and not _pending_agents_stale(parsed, now):
         # Claude's own sub-agent concurrency (pendingBackgroundAgentCount
         # on "system" records) — a background AGENT, not a `run_in_
         # background` bash command, but the same "idle here, something

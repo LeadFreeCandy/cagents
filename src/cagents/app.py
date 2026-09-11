@@ -44,7 +44,7 @@ from .modals import (
     SettingsModal,
     TrackModal,
 )
-from .notifier import notify_desktop, read_select_request
+from .notifier import notify_desktop, read_jump_top_request, read_select_request
 from .palette import CliClaudeRunner, apply_plan, build_prompt, parse_plan
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import (
@@ -57,7 +57,7 @@ from .sidecar import (
 )
 from .store import Store
 from .tmuxctl import TmuxClient
-from .views import GroupedView, KanbanView, QueueView, SelectionChanged
+from .views import GroupedView, KanbanView, QueueView, SelectionChanged, attention_sort_key
 
 REFRESH_SECONDS = 2.0
 # Viewer sync is leading-edge: a selection change attaches IMMEDIATELY (any
@@ -76,12 +76,13 @@ ALERT_STATES = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
 
 def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
     """The one compound shell command sent into a freshly-opened
-    "new conversation" terminal: numbered cd-shortcuts to the most recent
-    project directories, and a short printed menu. Convenience only — the
-    shell is otherwise completely untouched; typing `claude` directly
-    (with no alias involved) is already intercepted into a managed spawn
-    by the claude shim on $PATH (see _write_claude_shim/_shim_env), the
-    same mechanism the rest of cagents' terminal features use."""
+    "new conversation" terminal: numbered shortcuts that jump to a recent
+    project directory and start Claude right there, plus a short printed
+    menu. Convenience only — the shell is otherwise completely untouched;
+    `claude` inside each alias (with no alias involved on its own) is
+    already intercepted into a managed spawn by the claude shim on $PATH
+    (see _write_claude_shim/_shim_env), the same mechanism the rest of
+    cagents' terminal features use."""
     from .tmuxctl import _shquote
 
     commands = ["clear"]
@@ -89,10 +90,10 @@ def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
     if recents:
         menu.append("Recent directories:")
         for i, recent in enumerate(recents, start=1):
-            commands.append(f"alias {i}={_shquote(f'cd {_shquote(recent)}')}")
+            commands.append(f"alias {i}={_shquote(f'cd {_shquote(recent)} && claude')}")
             menu.append(f"  {i}) {recent}")
         menu.append("")
-        menu.append("Type a number to jump there, then run: claude")
+        menu.append("Type a number to jump there and start Claude, or run: claude")
     else:
         menu.append("Run: claude")
     commands.extend(f"echo {_shquote(line)}" for line in menu)
@@ -135,6 +136,7 @@ class CagentsApp(App):
         Binding("h", "handoff", "Handoff"),
         Binding("D", "show_diff", "Diff"),
         Binding("n", "new_session", "New"),
+        Binding("T", "jump_to_top", "Top", show=False),
         Binding("N", "open_terminal", "Terminal", show=False),
         Binding("a", "track_session", "Track", show=False),
         Binding("1", "switch_view('queue')", "Queue", show=False),
@@ -198,6 +200,12 @@ class CagentsApp(App):
 
         self._viewer_sync_lock = _threading.Lock()
         self._viewer_target: str = ""
+        # The session id we just explicitly moved the viewer AWAY FROM
+        # (fork/handoff/spawn-from-shell/etc.) — see on_selection_changed.
+        # A stale SelectionChanged reasserting exactly this id, queued
+        # from before the move, must not be allowed to undo it. Cleared
+        # once the move's own pending_highlight actually lands.
+        self._viewer_override_from: str | None = None
         self._pending_highlight: str | None = None
         self._undo_stack: list[tuple[str, dict]] = []
         # Dead sessions the passive preview has already tried (silently)
@@ -366,11 +374,13 @@ class CagentsApp(App):
                 self.action_switch_view("queue")
             self._highlight_session(self._pending_highlight)
             self._pending_highlight = None
+            self._viewer_override_from = None
         self._update_preview()
         self._notify_transitions(snapshot)
         self._handle_select_request()
         self._handle_spawn_request()
         self._handle_toast_requests()
+        self._handle_jump_top_request()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -382,6 +392,23 @@ class CagentsApp(App):
 
     def on_selection_changed(self, event: SelectionChanged) -> None:
         if event.view_id != self.active_view_id:
+            return
+        if self._viewer_override_from is not None and event.session_id == self._viewer_override_from:
+            # Real bug, confirmed live: every update_snapshot() call
+            # unconditionally re-emits SelectionChanged for whatever the
+            # ACTIVE view's widget currently has highlighted — harmless
+            # almost always (it's just reasserting the same value), except
+            # when an explicit move (spawn-from-shell/fork/handoff) changed
+            # the selection LATER IN THE SAME apply_snapshot call that
+            # already queued this message with the OLD id. Since the
+            # widget itself was never told about the move (it can't be:
+            # the new session isn't a rendered option yet), there is
+            # nothing "fresher" to check this message against — the
+            # override flag IS the only signal that this exact payload is
+            # answering a question that's no longer being asked. Cleared
+            # once the move's own pending_highlight actually lands, so
+            # deliberately re-selecting this session for real afterward
+            # works normally again.
             return
         self.selected_session_id = event.session_id
         self._update_preview()
@@ -688,6 +715,27 @@ class CagentsApp(App):
         name = self._spawn_session(directory, ["--resume", view.session_id], view.session_id)
         return name, "", ""
 
+    def _restart_target(self, view: SessionView) -> tuple[str | None, str, str]:
+        """Kill a live session's claude process and respawn `claude
+        --resume` for it on whatever binary is on $PATH right now.
+        (tmux_name, "", "") on success, or (None, reason, severity) if it
+        can't be restarted. A running process keeps the build it started
+        with no matter how new the one on disk gets — this is the only
+        way an already-live session ever picks up an update."""
+        if not view.live or not view.tmux_name:
+            return None, (
+                "This session isn't hosted in cagents' own tmux right now — nothing to restart."
+            ), "warning"
+        directory = view.work_dir if Path(view.work_dir).is_dir() else view.project_dir
+        if not Path(directory).is_dir():
+            return None, f"Project directory no longer exists: {directory}", "error"
+        claude_bin = self._claude_bin()
+        if not claude_bin:
+            return None, "claude CLI not found.", "error"
+        self.tmux.kill_session(view.tmux_name, socket=view.tmux_socket or None)
+        name = self._spawn_session(directory, ["--resume", view.session_id], view.session_id)
+        return name, "", ""
+
     def _show_new_session(self, tmux_name: str) -> None:
         """Point the viewer at a session we just created and walk in."""
         if self.sidecar is not None and self.store.get_setting("sidebar"):
@@ -907,6 +955,17 @@ exec {real!r} "$@"
             return
         self._checkpoint("new session")
         self.store.track(session_id, directory, utcnow().isoformat())
+        # This method runs FROM WITHIN apply_snapshot, AFTER that same
+        # cycle's update_snapshot() loop already queued a SelectionChanged
+        # for whatever was selected before this spawn (every update_snapshot
+        # unconditionally re-emits the active view's current highlight —
+        # harmless almost always, since it's normally just reasserting the
+        # same value). That message fires right after this method returns
+        # and, without this guard, clobbers the switch below back to the
+        # old session (real bug, confirmed live: the new session's
+        # terminal never visibly opened, because the viewer snapped right
+        # back). See on_selection_changed for how the guard works.
+        self._viewer_override_from = self.selected_session_id
         self.selected_session_id = session_id
         self._pending_highlight = session_id
         self._show_new_session(name)
@@ -1096,7 +1155,7 @@ exec {real!r} "$@"
             self._notify_undoable("No longer waiting on the PR.")
             self.refresh_data()
             return
-        if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+        if view.state == SessionState.WORKING:
             self.notify("Still in flight — park it once Claude is finished.", severity="warning")
             return
         # Prefer a PR the session itself recorded; else the manual
@@ -1110,8 +1169,10 @@ exec {real!r} "$@"
 
     def action_toggle_snooze(self) -> None:
         """s: defer this session for `snooze_duration` (settings panel;
-        default 1h) — a genuinely blocking/active session (WORKING,
-        NEEDS_INPUT) can't be snoozed away, same guard as done/waiting."""
+        default 1h) — only a genuinely still-streaming session (WORKING)
+        can't be snoozed away, same guard as done/waiting. needs-you rows
+        (a pending permission/question) can: snoozing one is a deliberate
+        "deal with this later", same as snoozing anything else."""
         view = self.selected_view()
         if view is None:
             return
@@ -1121,7 +1182,7 @@ exec {real!r} "$@"
             self._notify_undoable("Un-snoozed — back in the queue.")
             self.refresh_data()
             return
-        if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+        if view.state == SessionState.WORKING:
             self.notify("Still in flight — snooze it once Claude is finished.", severity="warning")
             return
         from datetime import timedelta
@@ -1456,6 +1517,15 @@ exec {real!r} "$@"
             self.action_switch_view("queue")
         self._highlight_session(session_id)
 
+    def _handle_jump_top_request(self) -> None:
+        """⌃G fired (see ctx.py's `top` command): the root tmux binding
+        that reaches cagents even with a live Claude pane focused. It
+        can't compute the queue itself, so it just drops a marker and
+        lets the next refresh call the exact same action the in-app `T`
+        key does."""
+        if read_jump_top_request(self.store.path.parent):
+            self.action_jump_to_top()
+
     def _highlight_session(self, session_id: str) -> None:
         from .views import SessionList
 
@@ -1464,6 +1534,29 @@ exec {real!r} "$@"
             if session_list.get_option_at_index(i).id == session_id:
                 session_list.highlighted = i
                 return
+
+    def action_jump_to_top(self) -> None:
+        """T: jump straight to whatever's at the top of the attention
+        queue (the same ordering the Queue view sorts by) and open its
+        chat in the small-rail layout — same result as `enter` on that
+        row, reachable from anywhere in cagents' own UI (list or the
+        preview/chat pane), not just the Queue view. Distinct from
+        SessionList's own `g` ("first row of the current view") — this
+        is queue-wide and attaches. Already there? A bell instead of a
+        no-op re-attach, so repeated presses read as confirmation, not
+        silence."""
+        if not self.snapshot.views:
+            self.notify("No sessions.", severity="warning")
+            return
+        top = min(self.snapshot.views, key=attention_sort_key)
+        if self.selected_session_id == top.session_id:
+            self.bell()
+            return
+        if self.active_view_id == "kanban":
+            self.action_switch_view("queue")
+        self.selected_session_id = top.session_id
+        self._highlight_session(top.session_id)
+        self._attach()
 
     # -- fork / handoff / lineage --------------------------------------------------
 
@@ -1925,11 +2018,62 @@ exec {real!r} "$@"
     def action_palette(self) -> None:
         self.push_screen(PaletteModal(), self._palette_submitted)
 
+    # Literal commands the palette recognizes on its own, before ever
+    # asking the fleet assistant — the vim-`:` model: most input there is
+    # an ex command, not prose. Kept to a handful on purpose; anything
+    # else still goes to the LLM planner exactly as before.
+    _PALETTE_COMMANDS = ("restart", "restart all", "restart all sessions")
+
     def _palette_submitted(self, request: str | None) -> None:
         if not request:
             return
+        if request.strip().lower() in self._PALETTE_COMMANDS:
+            self._confirm_restart_all()
+            return
         self.notify("Asking the fleet assistant… (plan will need your confirmation)")
         self._run_palette_request(request)
+
+    def _confirm_restart_all(self) -> None:
+        """`:restart` — every currently-live claude process keeps whatever
+        build it started with, however new the one on $PATH gets; this
+        kills and respawns each one (via `--resume`) so they actually
+        pick it up."""
+        targets = [v for v in self.snapshot.views if v.live and v.tmux_name]
+        if not targets:
+            self.notify("No live sessions to restart.")
+            return
+        n = len(targets)
+        self.push_screen(
+            ConfirmModal(
+                f"Restart {n} live session{'s' if n != 1 else ''} onto the current "
+                "claude build?\n\nInterrupts anything mid-turn right now; each one "
+                "resumes right where it left off."
+            ),
+            lambda yes: self._restart_all_confirmed(targets, bool(yes)),
+        )
+
+    def _restart_all_confirmed(self, views: list[SessionView], yes: bool) -> None:
+        if not yes:
+            return
+        current = self.selected_session_id
+        reattach_name: str | None = None
+        restarted = 0
+        failures: list[str] = []
+        for view in views:
+            name, reason, severity = self._restart_target(view)
+            if name is None:
+                failures.append(f"{view.title}: {reason}")
+                continue
+            restarted += 1
+            if view.session_id == current:
+                reattach_name = name
+        if reattach_name is not None:
+            self._show_new_session(reattach_name)
+        if restarted:
+            self.notify(f"Restarted {restarted} session{'s' if restarted != 1 else ''}.")
+        if failures:
+            self.notify("Couldn't restart: " + "; ".join(failures), severity="warning", timeout=10)
+        self.refresh_data()
 
     @work(thread=True, exclusive=True, group="palette", exit_on_error=False)
     def _run_palette_request(self, request: str) -> None:

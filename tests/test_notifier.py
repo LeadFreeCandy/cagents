@@ -7,7 +7,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from cagents.notifier import notify_desktop, read_select_request
+from cagents.notifier import (
+    notify_desktop,
+    read_jump_top_request,
+    read_select_request,
+    write_jump_top_request,
+)
 
 
 def test_activates_the_terminal_app_when_recognized(tmp_path: Path, monkeypatch):
@@ -76,6 +81,13 @@ def test_click_still_writes_the_select_request(tmp_path: Path, monkeypatch):
     # simulate what -execute does when actually clicked
     (tmp_path / "select-request").write_text("sid123\n")
     assert read_select_request(tmp_path) == "sid123"
+
+
+def test_jump_top_request_is_a_consuming_marker(tmp_path: Path):
+    assert read_jump_top_request(tmp_path) is False  # nothing dropped yet
+    write_jump_top_request(tmp_path)
+    assert read_jump_top_request(tmp_path) is True
+    assert read_jump_top_request(tmp_path) is False  # consumed
 
 
 def test_osascript_fallback_when_terminal_notifier_absent(tmp_path: Path, monkeypatch):

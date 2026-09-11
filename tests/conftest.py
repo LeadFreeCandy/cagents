@@ -275,6 +275,7 @@ class FakeTmux:
         self.sent: list[tuple[str, str, str]] = []  # (name, text, socket)
         self.shell_created: list[tuple[str, str]] = []  # (directory, session_id)
         self.shell_commands: list[tuple[str, str]] = []  # (name, command)
+        self.killed: list[tuple[str, str]] = []  # (name, socket)
         self.log: list[str] = []
 
     def available(self) -> bool:
@@ -349,6 +350,10 @@ class FakeTmux:
 
     def has_session(self, session_name, socket=None):
         return any(s.name == session_name for s in self.sessions)
+
+    def kill_session(self, name, socket=None):
+        self.killed.append((name, socket or self.create_socket))
+        self.sessions = [s for s in self.sessions if s.name != name]
 
 
 class FakeOuterTmux:

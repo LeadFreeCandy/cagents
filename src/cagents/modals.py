@@ -313,6 +313,7 @@ HELP_TEXT = """\
 [bold cyan]Navigate[/bold cyan]
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
+  ⌃H / ⌃L       same resize, unconditionally, whichever pane is focused
   mouse         click focuses; wheel scrolls the hovered pane
 
 [bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]
@@ -323,6 +324,9 @@ HELP_TEXT = """\
 
 [bold cyan]Act on a session[/bold cyan]
   enter         attach — the right pane IS the real session; enter focuses it
+  T / ⌃G        jump to the top of the queue and open its chat (small rail);
+                ⌃G works even with a live Claude pane focused (root tmux key,
+                may take up to ~2s); already there? a bell instead of a no-op
   d             mark done / un-done
   w             waiting on external: parks it on its PR; new comments re-alert,
                 merge marks it done automatically
@@ -347,6 +351,7 @@ HELP_TEXT = """\
   /             search all conversation history (fuzzy, full scan — off by
                 default, enable in settings)
   :             fleet assistant — plain English, proposes a plan, you confirm
+                (type restart to relaunch every live session on the current build)
   R             refresh now
 
   ,             settings · ? this help · q quit\
@@ -398,7 +403,8 @@ class PaletteModal(ModalScreen[str | None]):
             yield Label(": fleet assistant")
             yield Static(
                 "Plain English; proposes changes to cagents' bookkeeping only "
-                "(review/notes/labels/tracking). You confirm before anything applies.",
+                "(review/notes/labels/tracking). You confirm before anything applies. "
+                "Type restart to relaunch every live session on the current claude build.",
                 classes="hint",
             )
             yield Input(placeholder="e.g. mark everything in dealpilot reviewed — it's merged")

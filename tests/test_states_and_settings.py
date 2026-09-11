@@ -326,7 +326,7 @@ class TestNewStates:
     def test_pending_background_agents_yields_background(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("kick off a sub-agent").assistant_text(
-            "Started.", ts="2026-08-18T10:00:00.000Z"
+            "Started.", ts=ts_ago(60)
         )
         b.raw({"type": "system", "sessionId": SID1, "pendingBackgroundAgentCount": 1})
         parsed = self._parse(claude_dir, b)
@@ -345,7 +345,7 @@ class TestNewStates:
         # like shells/monitors/background commands.
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("kick off a sub-agent").assistant_text(
-            "Started.", ts="2026-08-18T10:00:00.000Z"
+            "Started.", ts=ts_ago(60)
         )
         b.raw({"type": "system", "sessionId": SID1, "pendingBackgroundAgentCount": 1})
         parsed = self._parse(claude_dir, b)
@@ -353,6 +353,24 @@ class TestNewStates:
             parsed, _tracked(), live=True, agent_state={"status": "busy"}, now=now
         )
         assert state == SessionState.BACKGROUND
+
+    def test_stale_pending_background_agents_does_not_yield_background(self, claude_dir, now):
+        # Real bug, confirmed live: two sessions idle 11h/20h both stuck
+        # showing BACKGROUND ("1 background agent running") off a single
+        # old system record, since pendingBackgroundAgentCount — unlike
+        # active_background/monitors — has no completion signal to
+        # reconcile against. A count this old almost certainly outlived
+        # the agent process that reported it; falling through to a plain
+        # needs-review reads truer than an indefinite BACKGROUND.
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("kick off a sub-agent").assistant_text(
+            "Started.", ts=ts_ago(20 * 3600)
+        )
+        b.raw({"type": "system", "sessionId": SID1, "pendingBackgroundAgentCount": 1})
+        parsed = self._parse(claude_dir, b)
+        assert parsed.pending_agents == 1
+        state, _ = derive_state(parsed, _tracked(), live=False, now=now)
+        assert state == SessionState.NEEDS_REVIEW
 
     def test_background_survives_new_messages_until_completion(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
@@ -460,25 +478,28 @@ class TestNewStates:
         state, _ = derive_state(parsed, tracked, live=False, now=now)
         assert state == SessionState.SNOOZED
 
-    def test_snooze_never_overrides_working_or_needs_input(self, claude_dir, now):
+    def test_snooze_never_overrides_working_but_does_override_needs_input(self, claude_dir, now):
         from datetime import timedelta
 
         from cagents.claude_data import utcnow
 
         until = utcnow() + timedelta(minutes=30)
         tracked = _tracked(snoozed_until=until.isoformat())
-        # actively working (fresh writes)
+        # actively working (fresh writes): can't snooze away a live turn,
+        # same as reviewed/waiting can't either.
         b = TranscriptBuilder(SID1, "/proj/a").user("go", ts=ts_ago(2))
         parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
         state, _ = derive_state(parsed, tracked, live=True, now=now)
         assert state == SessionState.WORKING
-        # a live, unanswered prompt
+        # a live, unanswered prompt: snoozing IS a deliberate "deal with
+        # this later" override here, same self-clearing idiom as marking
+        # a needs-you row reviewed already was.
         pane = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
         b2 = TranscriptBuilder(SID1, "/proj/a")
         b2.user("run it").assistant_tool_use("t1", "Bash", {"command": "ls"})
         parsed2 = parse_session_file(b2.write(claude_dir, mtime=now - 1))
         state, _ = derive_state(parsed2, tracked, live=True, pane_text=pane, now=now)
-        assert state == SessionState.NEEDS_INPUT
+        assert state == SessionState.SNOOZED
 
     def test_snoozed_ranks_below_working_and_above_waiting(self):
         from cagents.sessions import ATTENTION_ORDER

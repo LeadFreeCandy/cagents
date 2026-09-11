@@ -275,6 +275,20 @@ class TestCommands:
                 assert "select-pane -t :.1" in right
                 assert "resize-pane -Z -t :.1" in right
 
+    def test_ctrl_h_and_l_walk_the_cycle_regardless_of_focus(self):
+        """⌃H/⌃L are the vim-hands-on-home-row equivalent of ⌥←/⇧→ — bound
+        unconditionally (present whatever bare/ctrl arrow settings say),
+        walking the same three-state cycle from either pane."""
+        for enabled in (True, False):
+            bound = {c[2]: " ".join(c) for c in arrow_capture_commands(bare=enabled)
+                     if len(c) > 2 and c[2] in ("C-h", "C-l")}
+            assert set(bound) == {"C-h", "C-l"}, enabled
+            for binding in bound.values():
+                assert "cursor_x" not in binding and "run-shell" not in binding
+            assert "resize-pane -Z -t :.1 ; select-pane -t :.1" in bound["C-h"]
+            assert "select-pane -t :.0" in bound["C-h"]
+            assert "resize-pane -Z -t :.1" in bound["C-l"]
+
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands
 
@@ -312,6 +326,7 @@ class TestCommands:
         flat = [" ".join(c) for c in commands]
         assert any(c.startswith("bind -n C-t run-shell") and "shell" in c for c in flat)
         assert any(c.startswith("bind -n C-d run-shell") and "diff" in c for c in flat)
+        assert any(c.startswith("bind -n C-g run-shell") and "top" in c for c in flat)
 
     def test_should_bootstrap_only_bare_terminal(self):
         assert should_bootstrap({}, stdout_is_tty=True, fullscreen_flag=False) is True

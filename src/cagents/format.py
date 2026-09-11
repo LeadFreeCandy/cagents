@@ -16,33 +16,39 @@ from .sessions import SessionState, SessionView
 
 # state -> (glyph, style, short label)
 #
-# The colours ARE the priority: a rainbow running red -> orange -> yellow ->
-# green -> blue -> purple, in the same order as ATTENTION_ORDER, so a glance
-# down the list reads as a heat map and you never have to learn which hue
-# means what. Warm = your move, green = something is running for you, blue =
-# Claude has it, purple = parked or finished.
+# The colours ARE the priority, but the metaphor is a traffic light rather
+# than a plain rainbow: red means stop (you're needed), amber/yellow means
+# idling (something's technically alive but nobody needs to act), green
+# means go (Claude is actually driving), and once a task crosses the finish
+# line the ramp keeps going past green into a blue -> purple cool-down
+# (snoozed -> waiting -> done). Same order as ATTENTION_ORDER throughout, so
+# a glance down the list reads as "how fast is this moving", not an
+# arbitrary category.
 #
-# Where several states share a hue they are separated by weight rather than
-# by colour (bold > plain > dim), since three greens a shade apart are not
-# something a terminal palette can be trusted to render distinguishably.
-# Everything but needs-you is a fixed 256-colour index rather than an ANSI
-# name, so the ramp keeps its spacing whatever the terminal theme does with
-# "yellow" and "green"; needs-you keeps plain red on purpose, because the
-# alarm colour should be the red the user's own theme has taught them.
+# needs-you gets two reds instead of sharing one, since both are full stops
+# but not equally urgent: needs_input is the brighter of the pair and rides
+# the terminal's own "bright_red" so the loudest alarm never has to fight
+# the user's theme; needs_review gets the plainer "red" that used to belong
+# to needs_input alone.
+#
+# Where several idle states share the amber/yellow band they're separated
+# by weight (bold > plain > dim) as well as hue, since three yellows a
+# shade apart are not something a terminal palette can be trusted to
+# render distinguishably.
 # stopped stays outside the rainbow, in plain dim: it is an anomaly, not a
 # rung on the ladder.
 STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
-    SessionState.NEEDS_INPUT: ("◉", "bold red", "needs you"),
-    SessionState.NEEDS_REVIEW: ("◆", "bold orange1", "review"),
-    SessionState.EXTERNAL_UPDATE: ("✉", "bold gold1", "external update"),
-    SessionState.SHELL_RUNNING: ("◍", "bold green3", "shell running"),
-    SessionState.MONITORING: ("◎", "green3", "monitoring"),
-    SessionState.BACKGROUND: ("◌", "dim green3", "background"),
-    SessionState.WORKING: ("●", "bold dodger_blue1", "working"),
-    SessionState.SNOOZED: ("☾", "royal_blue1", "snoozed"),
-    SessionState.WAITING_EXTERNAL: ("⧖", "medium_purple", "waiting"),
+    SessionState.NEEDS_INPUT: ("◉", "bold bright_red", "needs you"),
+    SessionState.NEEDS_REVIEW: ("◆", "bold red", "review"),
+    SessionState.EXTERNAL_UPDATE: ("✉", "bold #ffb238", "external update"),
+    SessionState.SHELL_RUNNING: ("◍", "bold #ff9d4d", "shell running"),
+    SessionState.MONITORING: ("◎", "bold #ffe066", "monitoring"),
+    SessionState.BACKGROUND: ("◌", "dim #8a7130", "background"),
+    SessionState.WORKING: ("●", "bold #4bcf6e", "working"),
+    SessionState.SNOOZED: ("☾", "#5b8dff", "snoozed"),
+    SessionState.WAITING_EXTERNAL: ("⧖", "#7d7196", "waiting"),
     SessionState.STOPPED: ("■", "dim", "stopped"),
-    SessionState.DONE: ("✓", "medium_purple4", "done"),
+    SessionState.DONE: ("✓", "#6a5872", "done"),
 }
 
 PREVIEW_KIND_STYLE = {

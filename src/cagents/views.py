@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from rich.text import Text
+from textual import _widget_navigation
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
@@ -64,6 +65,25 @@ class SessionList(OptionList):
         Binding("g", "first", "First", show=False),
         Binding("G", "last", "Last", show=False),
     ]
+
+    # OptionList's own cursor_down/up wrap around the ends by default
+    # (find_next_enabled always wraps) — confirmed live: j at the last row
+    # jumped straight back to the first, which reads as a stray keypress
+    # having sent you somewhere else entirely rather than "already at the
+    # bottom." Clamp instead: no next/previous enabled row just stays put.
+    def action_cursor_down(self) -> None:
+        next_index = _widget_navigation.find_next_enabled_no_wrap(
+            candidates=self._options, anchor=self.highlighted, direction=1,
+        )
+        if next_index is not None:
+            self.highlighted = next_index
+
+    def action_cursor_up(self) -> None:
+        next_index = _widget_navigation.find_next_enabled_no_wrap(
+            candidates=self._options, anchor=self.highlighted, direction=-1,
+        )
+        if next_index is not None:
+            self.highlighted = next_index
 
     def rebuild(self, options: list[Option], keep_id: str | None) -> None:
         """Replace all options, restoring the highlight to `keep_id` (or the
