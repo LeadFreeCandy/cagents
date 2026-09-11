@@ -251,9 +251,9 @@ Restarts of saved conversations use a fresh local Codex runtime. A new thread
 without a saved first message retains its existing server connection.
 
 
-## cagents3 native pane preview
+## cagents3 native panes
 
-On `feat/cagents3-direct-panes`, run `cagents3` to use the single-server native
+Run `cagents3` from the main checkout to use the single-server native
 pane backend. It has separate bookkeeping and keeps the existing `cagents`
 launcher available. Conversation panes and drafts survive selection, tab changes,
 and dashboard relaunch. See [CAGENTS3_DESIGN.md](CAGENTS3_DESIGN.md) for layout,

@@ -1,7 +1,7 @@
-# cagents3: native pane experiment
+# cagents3: native tmux panes
 
-Branch: `feat/cagents3-direct-panes`. The original checkout and launcher stay
-available. cagents3 has its own tmux server and bookkeeping file.
+Available on `main`, developed on `feat/cagents3-direct-panes`. The `cagents`
+launcher remains available. cagents3 has its own tmux server and bookkeeping file.
 
 ## Transport
 
@@ -42,10 +42,8 @@ then wired to the direct backend without weakening their assertions.
 
 ## Trying it
 
-Run `cagents3`. The installed launcher points to this feature worktree's virtual
-environment. The normal `cagents`
-launcher still uses the original checkout. Do not delete this worktree while
-using the new launcher.
+Run `cagents3`. Both launchers use the main checkout's virtual environment;
+the feature worktree is no longer required to run cagents3.
 
 The default server is `cagents3`; state lives at
 `~/.local/share/cagents3/state.json` (respecting `XDG_DATA_HOME`). On first launch,
@@ -91,9 +89,34 @@ click/keyboard navigation, and selected-conversation resume. The existing idle
 hover-to-wake regression remains. A native-pane integration test additionally
 checks visible pane identity, process IDs, and drafts through hover/click/keyboard.
 
-Final full-suite results after the hover fix: original checkout 566 passed,
+Full-suite results at the hover-fix milestone: original checkout 566 passed,
 3 skipped; cagents3 598 passed, 5 skipped. The additional skips are the opt-in
 installed-CLI checks described below, which were also run explicitly.
+
+The first new-conversation QA only checked pane creation, focus, and persistence.
+That missed an exited startup placeholder: a retained pane still has an ID and
+can receive focus. Strengthened tests reproduced four failures by requiring new
+shells and terminal tabs to execute typed input, including configured tmux shell
+commands. New shells now explicitly start tmux's configured command or login
+shell instead of respawning the placeholder.
+
+`tests/dashboard_harness.py` drives the actual dashboard through a PTY, with no
+app-method or provider-launch stubs. The existing launch test now shares this
+harness and retains its pane/focus/relaunch coverage. Opt-in workflow tests type
+`claude` and `codex` into the new shell, verify the native composer and tracked
+identity, type an unsent Unicode draft, switch away and back through the queue,
+execute commands in the conversation terminal, and quit/relaunch the dashboard.
+They assert the original agent PID, draft, and terminal survive. Every run saves
+pane inventories, ANSI terminal captures, and app logs under pytest's temporary
+`dashboard-artifacts` directory; all QA tmux servers and provider homes are
+isolated from live conversations. No model turn is submitted by these workflows.
+
+Promotion QA after fixing shell startup: the complete suite with installed-CLI
+QA enabled passed 604 tests, with 3 opt-in checks skipped. The separate macOS
+clipboard run passed all 3 selected checks and restored the original pasteboard
+contents and formats. The reusable dashboard harness was also run against an
+isolated copy of the unfixed implementation and failed because typed shell input
+was not executed. No existing regression test was removed or disabled.
 
 Real PTY tests exercise the dashboard's new-conversation keys, Ctrl-G, quit and
 relaunch, the original process identities, native mouse packets, selection,
@@ -107,7 +130,7 @@ checks; GUI automation of iTerm was unavailable.
 Run the default suite with `.venv/bin/python -m pytest -q`. Installed CLI QA:
 
 ```sh
-CAGENTS_NATIVE_CLI_TESTS=1 .venv/bin/python -m pytest -q tests/live/test_direct_native_clis.py
+CAGENTS_NATIVE_CLI_TESTS=1 .venv/bin/python -m pytest -q tests/live/test_direct_native_clis.py tests/live/test_dashboard_workflow.py
 ```
 
 The macOS clipboard check additionally sets `CAGENTS_MAC_CLIPBOARD_TESTS=1` and

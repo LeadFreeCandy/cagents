@@ -143,6 +143,15 @@ class DirectTmux(TmuxClient):
     def _new_home(self, name, directory, command="", sid="", role="agent", env=None, owner=""):
         import json
         with server_lock(self.create_socket):
+            if command:
+                launch = [command]
+            else:
+                # respawn-pane with no command repeats the startup placeholder.
+                # Match a fresh tmux window: default-command, or a login shell.
+                default = self.call("show-option", "-Av", "-t", SESSION, "default-command")
+                launch = [default] if default else [
+                    self.call("show-option", "-Av", "-t", SESSION, "default-shell"), "-l"
+                ]
             environment = list(env or ())
             if sid:
                 environment += ["-e", f"CAGENTS_SESSION_ID={sid}"]
@@ -164,7 +173,7 @@ class DirectTmux(TmuxClient):
                     "created": str(time.time()), "home": home, "environment": json.dumps(environment)}
             for key, value in tags.items():
                 self.call("set", "-p", "-t", pane, "@cagents_" + key, value)
-            self.call("respawn-pane", "-k", "-t", pane, *environment, *([command] if command else []))
+            self.call("respawn-pane", "-k", "-t", pane, *environment, *launch)
             # Publish to the registry only after the final process owns the
             # pane. Otherwise a concurrent refresh observes the startup slot's
             # PID as the agent and immediately has a stale lifecycle target.

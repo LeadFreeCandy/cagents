@@ -5,6 +5,7 @@ not. Every server in these tests is isolated from the user's live conversations.
 """
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -127,9 +128,31 @@ def test_terminal_is_a_persistent_native_pane_scoped_to_each_conversation(direct
         pane = d.run(["display-message", "-p", "-t", "=cagents3:term-1.1", "#{pane_id}"])
         command = d.run(["display-message", "-p", "-t", pane, "#{pane_current_command}"])
         assert command != "tmux", "terminal tabs must use their native shell pane"
+        marker = d.path / (row.name + "-terminal-input")
+        d.run(["send-keys", "-t", pane, f"printf '%s' SHELL_READY > {shlex.quote(str(marker))}", "Enter"])
+        eventually(marker.exists)
+        assert marker.read_text() == "SHELL_READY"
+        assert d.run(["display-message", "-p", "-t", pane, "#{pane_dead}"]) == "0"
         terminals.setdefault(row.name, pane)
         assert terminals[row.name] == pane
     assert terminals[a.name] != terminals[b.name]
+
+
+@pytest.mark.parametrize("default_command", ["", "export CAGENTS_SHELL_DEFAULT=configured; exec /bin/sh"])
+def test_new_conversation_shell_accepts_input_and_keeps_environment(direct, default_command):
+    d = direct
+    d.run(["set", "-g", "default-shell", "/bin/sh"])
+    d.run(["set", "-g", "default-command", default_command])
+    name = d.tmux.new_shell_session(str(d.path), "native-new-shell",
+                                   ["-e", "CAGENTS_TEST_SHELL=kept"])
+    pane = d.tmux.pane(name)
+    marker = d.path / "new-shell-input"
+    d.tmux.send_shell_command(name, f'printf "%s" "$CAGENTS_SESSION_ID:$CAGENTS_TEST_SHELL:${{CAGENTS_SHELL_DEFAULT-unset}}" > {shlex.quote(str(marker))}')
+    eventually(marker.exists)
+    assert marker.read_text() == "native-new-shell:kept:" + ("configured" if default_command else "unset")
+    assert d.run(["display-message", "-p", "-t", pane, "#{pane_dead}"]) == "0"
+    # macOS implements /bin/sh with bash and tmux reports the executable name.
+    assert d.run(["display-message", "-p", "-t", pane, "#{pane_current_command}"]) in {"sh", "bash"}
 
 
 def test_parking_slots_do_not_keep_placeholder_processes_alive(direct):
