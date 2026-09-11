@@ -11,7 +11,7 @@ import pytest
 from cagents import codex_data
 from cagents.app import CagentsApp
 from cagents.claude_data import ParsedSession
-from cagents.codex_rpc import CodexClient
+from cagents.codex_rpc import CodexClient, CodexRpcError
 from cagents.search import search_all_sessions
 from cagents.sessions import SessionRegistry, SessionState, SessionView, Snapshot, derive_state, map_tmux_sessions
 from cagents.store import Store, TrackedSession
@@ -61,6 +61,123 @@ def test_parser_lifecycle_metadata_and_preview(tmp_path):
     assert p.last_timestamp.timestamp() == NOW
     assert p.last_assistant_text == "Fixed and tested."
     assert [item.kind for item in p.preview] == ["user", "tool", "assistant"]
+
+
+@pytest.mark.parametrize("event_format", [False, True])
+def test_setup_messages_do_not_become_titles_preview_or_activity(tmp_path, event_format):
+    def user(text, ts=TS):
+        if event_format:
+            return rec("event_msg", {"type": "user_message", "message": text}, ts)
+        row = message("user", text)
+        row["timestamp"] = ts
+        return row
+
+    setup = "<recommended_plugins>\nPlugin catalog, not a task.\n</recommended_plugins>"
+    path = rollout(tmp_path,
+        user(setup), user("# AGENTS.md instructions for /proj\nProject setup."),
+        user("<environment_context>\n<cwd>/proj</cwd>\n</environment_context>"),
+        user("Fix the widget"),
+        message("assistant", "Fixed.", phase="final_answer"),
+        user(setup, "2026-09-09T12:00:00Z"))
+    parsed = codex_data.parse_session_file(path)
+    assert parsed.title == "Fix the widget"
+    assert [(item.kind, item.text) for item in parsed.preview] == [
+        ("user", "Fix the widget"), ("assistant", "Fixed.")]
+    assert parsed.turn_state == "completed"
+    assert parsed.last_timestamp.timestamp() == NOW
+    assert parsed.last_record_role == "assistant"
+    assert codex_data.scan_transcript(path) == ("/proj", "Fix the widget", ["Fix the widget", "Fixed."])
+
+
+def test_context_and_task_in_the_same_message_preserve_the_task(tmp_path):
+    path = rollout(tmp_path, rec("response_item", {"type": "message", "role": "user", "content": [
+        {"type": "input_text", "text": "<recommended_plugins>Plugin catalog.</recommended_plugins>"},
+        {"type": "input_text", "text": "<environment_context><cwd>/proj</cwd></environment_context>"},
+        {"type": "input_text", "text": "Fix the widget\nKeep the existing API."},
+    ]}))
+    parsed = codex_data.parse_session_file(path)
+    assert parsed.title == "Fix the widget"
+    assert parsed.preview[0].text == "Fix the widget\nKeep the existing API."
+
+
+def test_context_only_thread_uses_id_without_inventing_activity(tmp_path):
+    path = rollout(tmp_path, message("user", "<recommended_plugins>Plugin catalog.</recommended_plugins>"))
+    parsed = codex_data.parse_session_file(path)
+    assert parsed.title == SID[:8]
+    assert not parsed.preview and not parsed.turn_state and parsed.last_timestamp is None
+
+
+@pytest.mark.parametrize("text", ["<request>Fix the widget</request>",
+                                 "Fix <recommended_plugins> rendering", "<div>Example HTML</div>"])
+def test_user_markup_is_not_mistaken_for_setup(tmp_path, text):
+    path = rollout(tmp_path, message("user", text))
+    parsed = codex_data.parse_session_file(path)
+    assert parsed.title == text and parsed.preview[0].text == text
+
+
+def test_saved_codex_names_follow_renames_while_suspended(tmp_path, monkeypatch):
+    root = tmp_path / "codex"
+    rollout(root, message("user", "Original prompt"), message("assistant", "Done", phase="final_answer"))
+    index = root / "session_index.jsonl"
+    index.write_text(json.dumps({"id": SID, "thread_name": "Native conversation name"}) + "\n")
+    store = Store(tmp_path / "state.json")
+    tracked = store.track(KEY, "/proj", TS)
+    tracked.suspended_at = TS
+    registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=tmp_path / "claude", codex_dir=root)
+    registry.codex_client.socket_path.parent.mkdir(parents=True)
+    registry.codex_client.socket_path.touch()
+    def no_rpc(*args):
+        raise AssertionError("Reading a suspended conversation's name must not contact its runtime")
+    monkeypatch.setattr(registry.codex_client, "call", no_rpc)
+    assert registry.refresh(now=NOW + 1).by_id(KEY).title == "Native conversation name"
+    # Only the native name index changes; the rollout and cagents store do not.
+    with index.open("a") as f:
+        f.write(json.dumps({"id": SID, "thread_name": "Renamed in Codex"}) + "\n")
+    view = registry.refresh(now=NOW + 2).by_id(KEY)
+    assert view.title == "Renamed in Codex" and view.last_activity.timestamp() == NOW
+    tracked.label = "My explicit cagents label"
+    assert registry.refresh(now=NOW + 3).by_id(KEY).title == tracked.label
+
+
+def test_native_name_is_available_without_a_rollout(tmp_path):
+    (tmp_path / "session_index.jsonl").write_text(json.dumps({"id": SID, "thread_name": "Saved name"}) + "\n")
+    store = Store(tmp_path / "state.json")
+    store.track(KEY, "/proj", TS)
+    registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=tmp_path / "claude", codex_dir=tmp_path)
+    view = registry.refresh(now=NOW + 1).by_id(KEY)
+    assert view.title == "Saved name" and view.missing
+
+
+def test_name_index_handles_partial_writes_and_keeps_only_tracked_names(tmp_path):
+    index = tmp_path / "session_index.jsonl"
+    index.write_text('\n'.join(["null", "[]", json.dumps({"id": SID, "thread_name": "Saved name"}),
+                                 json.dumps({"id": "untracked", "thread_name": "Not retained"}), '{"partial"']))
+    names = codex_data.SessionNames(tmp_path)
+    assert names.read({KEY}) == {KEY: "Saved name"}
+    assert names.read(set()) == {} and not names._names
+    assert names.read({KEY}) == {KEY: "Saved name"}
+
+
+def test_bad_thread_does_not_block_other_threads_names_or_renames(tmp_path, monkeypatch):
+    rollout(tmp_path, message("user", "Fallback prompt"))
+    store = Store(tmp_path / "state.json")
+    bad_key = "codex:missing-thread"
+    store.track(bad_key, "/proj", TS)
+    store.track(KEY, "/proj", TS)
+    registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=tmp_path / "claude", codex_dir=tmp_path)
+    registry.codex_client.socket_path.parent.mkdir()
+    registry.codex_client.socket_path.touch()
+    calls, name = [], "Native name"
+    def read(method, params):
+        calls.append(params["threadId"])
+        if params["threadId"] == "missing-thread":
+            raise CodexRpcError("thread not found")
+        return {"thread": {"name": name, "status": {"type": "idle"}}}
+    monkeypatch.setattr(registry.codex_client, "call", read)
+    assert registry.refresh(now=NOW + 1).by_id(KEY).title == "Native name"
+    name = "Renamed live"
+    assert registry.refresh(now=NOW + 2).by_id(KEY).title == "Renamed live"
+    assert calls == ["missing-thread", SID, SID]
 
 
 @pytest.mark.parametrize("event, expected", [("task_complete", SessionState.NEEDS_REVIEW),
@@ -119,6 +236,66 @@ def test_discovery_search_and_archive_move(tmp_path):
     assert registry.refresh(now=NOW + 100).by_id(KEY).parsed.path == dest
 
 
+@pytest.mark.parametrize("status", ["active", "idle"])
+def test_open_active_codex_outside_tmux_attaches_to_existing_server(tmp_path, monkeypatch, status):
+    # Live regression: "Analyze strategies for profitability" was active in
+    # the shared server but had no cagents pane. The Claude duplicate-process
+    # guard rejected Enter/preview before Codex could attach its native TUI.
+    app = CagentsApp(store=Store(tmp_path / "state.json"), tmux=FakeTmux(),
+                     codex_dir=tmp_path / "codex home")
+    t = app.store.track(KEY, str(tmp_path), TS)
+    p = ParsedSession(KEY, tmp_path / "rollout", cwd=str(tmp_path), turn_state="running")
+    view = SessionView(KEY, t, p, SessionState.WORKING, live=False)
+    client = app.registry.codex_client
+    client.socket_path.parent.mkdir(parents=True)
+    client.socket_path.touch()
+    calls, launches = [], []
+
+    def read(method, params):
+        calls.append((method, params))
+        return {"thread": {"id": SID, "status": {"type": status}}}
+
+    monkeypatch.setattr(client, "call", read)
+    monkeypatch.setattr(app, "_agent_bin", lambda _: "/bin/codex")
+    monkeypatch.setattr(app, "_spawn_session", lambda directory, args, sid:
+                        launches.append((directory, args, sid)) or "codex-attached")
+    assert app._resume_target(view) == ("codex-attached", "", "")
+    assert calls == [("thread/read", {"threadId": SID})]
+    assert launches == [(str(tmp_path), ["resume", SID, "-C", str(tmp_path),
+                         "--remote", f"unix://{client.socket_path}"], KEY)]
+
+
+@pytest.mark.parametrize("failure", ["missing_socket", "rpc_error", "notLoaded"])
+def test_open_active_codex_never_falls_back_to_a_second_engine(tmp_path, monkeypatch, failure):
+    app = CagentsApp(store=Store(tmp_path / "state.json"), tmux=FakeTmux(), codex_dir=tmp_path)
+    t = app.store.track(KEY, str(tmp_path), TS)
+    view = SessionView(KEY, t, ParsedSession(KEY, tmp_path / "rollout"), SessionState.WORKING, live=False)
+    client = app.registry.codex_client
+    if failure != "missing_socket":
+        client.socket_path.parent.mkdir(parents=True)
+        client.socket_path.touch()
+
+    def read(method, params):
+        if failure == "rpc_error":
+            raise CodexRpcError("unavailable")
+        assert failure == "notLoaded"
+        return {"thread": {"id": SID, "status": {"type": "notLoaded"}}}
+
+    monkeypatch.setattr(client, "call", read)
+    monkeypatch.setattr(app, "_spawn_session", lambda *args: pytest.fail("must not launch a second engine"))
+    name, reason, severity = app._resume_target(view)
+    assert name is None and reason and severity == "warning"
+
+
+def test_open_active_claude_outside_tmux_still_refuses_duplicate_process(tmp_path, monkeypatch):
+    app = CagentsApp(store=Store(tmp_path / "state.json"), tmux=FakeTmux())
+    t = app.store.track(SID, str(tmp_path), TS)
+    view = SessionView(SID, t, ParsedSession(SID, tmp_path / "transcript"), SessionState.WORKING, live=False)
+    monkeypatch.setattr(app, "_spawn_session", lambda *args: pytest.fail("must not duplicate Claude"))
+    name, reason, severity = app._resume_target(view)
+    assert name is None and "running outside" in reason and severity == "warning"
+
+
 def test_namespaces_and_sharing_preserve_codex(tmp_path, monkeypatch):
     monkeypatch.setenv("CAGENTS_SHARED_DB", str(tmp_path / "shared.sqlite3"))
     store = Store(tmp_path / "state.json")
@@ -158,7 +335,7 @@ def test_codex_tmux_command_preserves_args_home_and_identity(tmp_path, monkeypat
     tmux.new_codex_session("/project path", ["resume", SID, "hello $(no)"], KEY, root, "/bin/codex")
     launch = calls[0]
     assert f"CAGENTS_SESSION_ID={KEY}" in launch and f"CODEX_HOME={root}" in launch
-    assert shlex.split(launch[-1]) == ["/bin/codex", "--no-alt-screen", "resume", SID, "hello $(no)"]
+    assert shlex.split(launch[-1]) == ["/bin/codex", "resume", SID, "hello $(no)"]
     assert "--settings" not in launch[-1] and "--session-id" not in launch[-1]
 
 
@@ -166,8 +343,9 @@ def test_codex_tmux_command_preserves_args_home_and_identity(tmp_path, monkeypat
 async def test_app_import_resume_and_shell_spawn(tmp_path, monkeypatch):
     root = tmp_path / "codex"
     rollout(root, message("user", "Fix widget"), message("assistant", "Finished", phase="final_answer"))
+    (root / "session_index.jsonl").write_text(json.dumps({"id": SID, "thread_name": "Renamed widget task"}) + "\n")
     # Use a real existing cwd for resume validation.
-    path = next(root.rglob("*.jsonl"))
+    path = next((root / "sessions").rglob("*.jsonl"))
     path.write_text(path.read_text().replace('"/proj"', json.dumps(str(tmp_path))))
     store = Store(tmp_path / "state.json")
     tmux = FakeTmux()
@@ -179,8 +357,9 @@ async def test_app_import_resume_and_shell_spawn(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_show_new_session", lambda name: None)
     async with app.run_test(size=(120, 35)) as pilot:
         await pilot.pause()
-        app._show_track_modal([(registry.discover_untracked()[0], "[codex] Fix widget", str(tmp_path))])
+        await app._load_track_candidates().wait()
         await pilot.pause()
+        assert app.screen.candidates[0][1] == "Renamed widget task"
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()

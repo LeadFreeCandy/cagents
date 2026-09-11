@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 
 
+class CodexRpcError(RuntimeError):
+    """A request failed after connecting; other threads may still be readable."""
+
+
 class CodexClient:
     def __init__(self, root: Path, binary: str = "codex", timeout: float = 10,
                  socket_path: Path | None = None):
@@ -65,7 +69,7 @@ class CodexClient:
                         if not isinstance(msg, dict) or msg.get("id") != ident or "method" in msg:
                             continue
                         if "error" in msg:
-                            raise RuntimeError(f"Codex {method}: {msg['error']}")
+                            raise CodexRpcError(f"Codex {method}: {msg['error']}")
                         return msg.get("result", {})
 
                 request(1, "initialize", {"clientInfo": {"name": "cagents", "version": "0.1.0"},

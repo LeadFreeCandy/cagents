@@ -269,6 +269,9 @@ def ts_ago(seconds: float) -> str:
 class FakeTmux:
     """Test double for TmuxClient (v2 multi-socket API)."""
 
+    def configure_scrolling(self, socket=None):
+        pass
+
     create_socket = "cagents-sessions"
 
     def __init__(self):

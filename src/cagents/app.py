@@ -139,6 +139,7 @@ class CagentsApp(App):
         Binding("1", "switch_view('queue')", "Queue", show=False),
         Binding("2", "switch_view('grouped')", "Grouped", show=False),
         Binding("3", "switch_view('kanban')", "Kanban", show=False),
+        Binding("ctrl+g", "queue_top", "Top of queue", show=False),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("right", "grow_session", "Grow session", show=False),
         Binding("asterisk", "related", "Related", show=False),
@@ -496,6 +497,7 @@ class CagentsApp(App):
 
     def _viewer_command(self, view: SessionView) -> str:
         socket = view.tmux_socket or self.tmux.create_socket
+        self.tmux.configure_scrolling(socket)
         return nested_attach_command(socket, view.tmux_name)
 
     def _sync_viewer(self) -> None:
@@ -683,6 +685,16 @@ class CagentsApp(App):
         i = VIEW_IDS.index(self.active_view_id)
         self.action_switch_view(VIEW_IDS[(i + 1) % len(VIEW_IDS)])
 
+    def action_queue_top(self) -> None:
+        """Return from any view to the first conversation in queue order."""
+        from .views import SessionList
+
+        self.action_switch_view("queue")
+        listing = self.query_one("#queue-list", SessionList)
+        listing.action_first()
+        if listing.highlighted_session_id:
+            self._record_interaction(listing.highlighted_session_id)
+
     def action_grow_session(self) -> None:
         """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
         focus moves into the session, the rail collapses via the tmux hook."""
@@ -773,12 +785,13 @@ class CagentsApp(App):
         self._show_new_session(name)
 
     def _resume_target(self, view: SessionView) -> tuple[str | None, str, str]:
-        """Validate + spawn `claude --resume <id>` for a dead session.
+        """Open a native CLI for a session without a cagents pane.
         (tmux_name, "", "") on success, or (None, reason, severity) if it
         can't be resumed right now. Shared by the explicit attach path
         (loud on failure) and the passive-preview path (silent — see
         _resume_for_preview)."""
-        if view.state == SessionState.WORKING:
+        args = self._resume_args(view)
+        if view.state == SessionState.WORKING and view.provider != "codex":
             # Actively writing its transcript but hosted somewhere cagents
             # can't see (cmux, a bare terminal). Resuming would put a second
             # live CLI on one conversation — refuse.
@@ -786,6 +799,20 @@ class CagentsApp(App):
                 "This session is running outside cagents' tmux right now — "
                 "attach from wherever it lives, or wait for it to finish."
             ), "warning"
+        if view.state == SessionState.WORKING and view.provider == "codex":
+            # Codex's shared server owns the turn; its TUI is another client.
+            # Explicitly join that server instead of spawning a second engine
+            # against a rollout that may still be written somewhere else.
+            client = self.registry.codex_client
+            try:
+                if not client.socket_path.exists():
+                    raise RuntimeError("the local Codex server is unavailable")
+                thread = client.call("thread/read", {"threadId": view.native_session_id}).get("thread", {})
+                if thread.get("status", {}).get("type") not in ("active", "idle"):
+                    raise RuntimeError("this conversation is not loaded in the local Codex server")
+            except RuntimeError as error:
+                return None, f"Cannot attach to the running Codex conversation: {error}", "warning"
+            args += ["--remote", f"unix://{client.socket_path}"]
         if view.missing:
             return None, (
                 "This session's transcript is gone from its agent's store; nothing to resume."
@@ -795,7 +822,7 @@ class CagentsApp(App):
             return None, f"Project directory no longer exists: {directory}", "error"
         if not self._agent_bin(view.provider):
             return None, f"{view.provider} CLI not found.", "error"
-        name = self._spawn_session(directory, self._resume_args(view), view.session_id)
+        name = self._spawn_session(directory, args, view.session_id)
         return name, "", ""
 
     def _show_new_session(self, tmux_name: str) -> None:
@@ -2074,10 +2101,14 @@ exec {shlex.quote(real)} "$@"
     @work(thread=True, exclusive=True, group="track", exit_on_error=False)
     def _load_track_candidates(self) -> None:
         from .claude_data import parse_session_file
-        from .codex_data import parse_session_file as parse_codex
+        from .codex_data import SessionNames, parse_session_file as parse_codex
 
         candidates = []
-        for discovered in self.registry.discover_untracked()[:200]:
+        discovered_sessions = self.registry.discover_untracked()[:200]
+        names = SessionNames(self.codex_dir).read(
+            s.session_id for s in discovered_sessions if s.provider == "codex"
+        )
+        for discovered in discovered_sessions:
             title = discovered.session_id[:8]
             cwd = ""
             try:
@@ -2089,7 +2120,7 @@ exec {shlex.quote(real)} "$@"
                 cwd = parsed.cwd
             except OSError:
                 pass
-            candidates.append((discovered, title, cwd))
+            candidates.append((discovered, names.get(discovered.session_id) or title, cwd))
         self.call_from_thread(self._show_track_modal, candidates)
 
     def _show_track_modal(self, candidates: list) -> None:
@@ -2264,7 +2295,7 @@ exec {shlex.quote(real)} "$@"
             raise RuntimeError(f"Project directory no longer exists: {directory}")
         args = self._resume_args(view)
         if view.provider == "codex":
-            command = ["env", f"CODEX_HOME={self.codex_dir}", binary, "--no-alt-screen", *args]
+            command = ["env", f"CODEX_HOME={self.codex_dir}", binary, *args]
         else:
             command = [binary, *args, *self._hook_args(view.session_id)]
         return "exec " + shlex.join(command), directory

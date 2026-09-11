@@ -1,5 +1,8 @@
 """Refreshes and rapid navigation must not reset the list or attach intermediate rows."""
 import asyncio
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from rich.text import Text
 from textual.app import App
@@ -8,13 +11,61 @@ from textual.widgets.option_list import Option
 
 from cagents.app import CagentsApp, VIEWER_COALESCE
 from cagents.store import Store
-from cagents.views import SessionList
+from cagents.views import GroupedView, QueueView, SessionList
+from cagents.claude_data import ParsedSession
+from cagents.sessions import SessionState, SessionView, Snapshot
 from conftest import FakeTmux
 
 
 def rows(start=0, changed=False):
     return [Option(Text(f'Conversation {i}' + (' updated' if changed and i == 30 else '')), id=str(i))
             for i in range(start, 80)]
+
+
+@pytest.mark.parametrize("view_type", [QueueView, GroupedView])
+@pytest.mark.parametrize("auto_done", [False, True])
+async def test_compact_rows_keep_ages_visible_after_resizing(tmp_path, view_type, auto_done):
+    class SidebarApp(App):
+        compact = True
+
+        def __init__(self):
+            super().__init__()
+            self.store = Store(tmp_path / "state.json")
+            self.store.settings["conversation_title_width"] = 80
+
+        def compose(self):
+            yield view_type()
+
+    app = SidebarApp()
+    now = datetime.now(timezone.utc)
+    views = []
+    for i in range(40):
+        sid = ("codex:" if i % 2 == 0 else "") + f"session-{i}"
+        tracked = app.store.track(sid, "/proj", now.isoformat())
+        parsed = ParsedSession(sid, tmp_path / "unused", cwd="/proj",
+                               title="東京 widget " * 10, last_timestamp=now - timedelta(minutes=1))
+        views.append(SessionView(sid, tracked, parsed, SessionState.DONE if auto_done else SessionState.NEEDS_REVIEW,
+                                 False, auto_done=auto_done))
+    async with app.run_test(size=(34, 10)) as pilot:
+        view = app.query_one(view_type)
+        view.update_snapshot(Snapshot(views=views))
+        await pilot.pause()
+        listing = app.query_one(SessionList)
+        selected = listing.highlighted_session_id
+        for width in (34, 50, 28, 34):
+            await pilot.resize_terminal(width, 10)
+            await pilot.pause()
+            # Check actual rendered rows, including option padding and scrollbar,
+            # rather than just the Rich Text before Textual clips it.
+            first_row = 1 if view_type is GroupedView else 0
+            for i, icon in enumerate(("›", "✳")):
+                text = listing.render_line(first_row + i).text
+                assert icon in text
+                assert "1m" in text, text
+                assert text.count("…") <= 1, text
+                if auto_done:
+                    assert "Done (auto)" in text, text
+            assert listing.highlighted_session_id == selected
 
 
 async def test_refresh_keeps_option_identity_scroll_and_highlight():

@@ -17,10 +17,56 @@ from .claude_data import (
 )
 
 _ROLLOUT_ID = re.compile(r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")
+_CONTEXT_BLOCK = re.compile(r"^<(environment_context|recommended_plugins)(?:\s[^>]*)?>")
 
 
 def default_codex_dir() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+
+
+class SessionNames:
+    """Codex's own saved names, including renames, without waking a session.
+
+    The index is append-only in normal use; the last entry for an ID wins.
+    Cache only requested IDs and rescan when the index or tracked set changes.
+    """
+
+    def __init__(self, root: Path):
+        self.path = root / "session_index.jsonl"
+        self._stamp = None
+        self._names: dict[str, str] = {}
+
+    def read(self, session_ids) -> dict[str, str]:
+        wanted = frozenset(session_ids)
+        self._names = {sid: name for sid, name in self._names.items() if sid in wanted}
+        if not wanted:
+            self._stamp = None
+            return {}
+        try:
+            stat = self.path.stat()
+            stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size, wanted)
+            if stamp == self._stamp:
+                return self._names.copy()
+            names = {}
+            with self.path.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                        continue
+                    sid = "codex:" + row["id"]
+                    name = row.get("thread_name")
+                    if sid in wanted and isinstance(name, str):
+                        if name.strip():
+                            names[sid] = name.strip()
+                        else:
+                            names.pop(sid, None)
+            self._names, self._stamp = names, stamp
+        except OSError:
+            pass  # retain known names during a transient read failure
+        return self._names.copy()
 
 
 def discover_sessions(codex_dir: Path, min_size: int = 1) -> list[DiscoveredSession]:
@@ -51,6 +97,25 @@ def message_text(payload: dict) -> str:
         return ""
     return "\n".join(b["text"] for b in content if isinstance(b, dict)
                      and isinstance(b.get("text"), str))
+
+
+def user_message_text(text: str) -> str:
+    """Remove known injected context, retaining any task after those blocks.
+
+    Codex stores plugin recommendations and environment setup with the user
+    role too. Neither should supply a title, preview entry, or activity update.
+    Match only known wrappers; a user's XML/HTML task is still a real message.
+    """
+    remaining = text.lstrip()
+    while match := _CONTEXT_BLOCK.match(remaining):
+        closing = f"</{match[1]}>"
+        end = remaining.find(closing, match.end())
+        if end < 0:
+            return ""  # incomplete setup block, not a task
+        remaining = remaining[end + len(closing):].lstrip()
+    if remaining.startswith("# AGENTS.md instructions"):
+        return ""
+    return remaining
 
 
 def records(path: Path, *, full: bool = False, head_bytes=HEAD_BYTES, tail_bytes=TAIL_BYTES):
@@ -150,10 +215,9 @@ def parse_session_file(path: Path, head_bytes=HEAD_BYTES, tail_bytes=TAIL_BYTES,
 
 
 def _message(parsed, preview, role, text, ts):
+    if role == "user":
+        text = user_message_text(text)
     if not text.strip():
-        return
-    # Configuration context is stored as user messages but isn't a user task.
-    if role == "user" and text.lstrip().startswith(("<environment_context>", "# AGENTS.md instructions")):
         return
     if not preview or (preview[-1].kind, preview[-1].text) != (role, text):
         preview.append(PreviewItem(role, text, ts))
@@ -174,7 +238,15 @@ def scan_transcript(path: Path) -> tuple[str, str, list[str]]:
     for record in records(path, full=True):
         p = record["payload"]
         if record.get("type") == "response_item" and p.get("role") in ("user", "assistant"):
-            lines.append(message_text(p))
+            text = message_text(p)
+            if p["role"] == "user":
+                text = user_message_text(text)
         elif record.get("type") == "event_msg" and p.get("type") in ("user_message", "agent_message"):
-            lines.append(str(p.get("message") or ""))
+            text = str(p.get("message") or "")
+            if p["type"] == "user_message":
+                text = user_message_text(text)
+        else:
+            continue
+        if text.strip():
+            lines.append(text)
     return parsed.cwd, parsed.title, lines

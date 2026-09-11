@@ -8,6 +8,7 @@ sync with what Claude actually did (spec §9).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -193,6 +194,7 @@ class SessionView:
     pane_id: str = ""
     pane_pid: int = 0
     pane_command: str = ""
+    native_title: str = ""  # provider-maintained name, available even without a live pane
 
     @property
     def provider(self) -> str:
@@ -234,6 +236,8 @@ class SessionView:
     def title(self) -> str:
         if self.tracked.label:
             return self.tracked.label
+        if self.native_title:
+            return self.native_title
         if self.parsed and self.parsed.title:
             return self.parsed.title
         if self.inherited_title:
@@ -310,6 +314,8 @@ def derive_from_events(
         ts = events.get(kind)
         if not isinstance(ts, (int, float)) or ts <= 0:
             return 0.0
+        if parsed.turn_ended_at and ts <= parsed.turn_ended_at.timestamp():
+            return 0.0
         # A hook event is consumed once the conversation moves past it
         # (e.g. the permission it announced was granted).
         if conversation_ts > ts + EVENT_TOLERANCE:
@@ -364,8 +370,9 @@ def derive_state(
       (see agent_status.py) — authoritative, independent of pane text or
       hooks; busy -> WORKING, waiting -> NEEDS_INPUT. idle alone isn't
       enough to pick a specific state (doesn't distinguish done /
-      needs-review / monitoring / …), so it falls through to everything
-      below exactly as if this signal weren't available.
+      needs-review / monitoring / …), so it uses the finished-state policy
+      without reviving old hooks or unresolved tool records. The registry
+      discards cached statuses when newer transcript/hook activity arrives.
     - live pane showing a permission/question prompt  -> NEEDS_INPUT
       (every NEEDS_INPUT above/below: unless reviewed since the last
       activity — `d` dismisses a needs-you row as done, the open dialog
@@ -377,10 +384,10 @@ def derive_state(
       (the *conversation clock*, never the file mtime: merely resuming or
       attaching a session touches the file without appending anything, and
       must not read as "working")
-    - live with an unanswered tool call               -> NEEDS_INPUT
-      (tool_use recorded, no result, no fresh writes: almost always a
-      permission prompt; a genuinely long-running quiet tool shows its
-      "esc to interrupt" marker in the pane and is caught above)
+    - recorded end of turn                           -> finished-state policy
+    - live with an unanswered tool call               -> WORKING
+      (quiet tools can take arbitrarily long; an actual prompt is required
+      to say NEEDS_INPUT, and native idle/end-of-turn retires stale calls)
     - turn complete (assistant ended its turn):
         reviewed since the last activity              -> DONE
         otherwise                                     -> NEEDS_REVIEW
@@ -431,11 +438,15 @@ def derive_state(
                 return (SessionState.WORKING, _working_detail(parsed))
             if status == "systemError":
                 return (SessionState.STOPPED, "Codex reports an error")
+            if status == "idle" and parsed.turn_state != "interrupted":
+                if not parsed.last_record_role:
+                    return needs_input("at the Codex prompt")
+                return _finished_state(parsed, tracked, now)
         if parsed.turn_state == "completed":
             return _finished_state(parsed, tracked, now)
         if parsed.turn_state == "interrupted":
             return (SessionState.STOPPED, "turn interrupted")
-        if live and (parsed.turn_state == "running" or "esc to interrupt" in pane_text.lower()):
+        if live and (parsed.turn_state == "running" or codex_pane_working(pane_text)):
             return (SessionState.WORKING, _working_detail(parsed))
         if not parsed.last_record_role:
             return needs_input("at the Codex prompt") if live else (SessionState.STOPPED, "empty session")
@@ -452,7 +463,11 @@ def derive_state(
             return (SessionState.WORKING, _working_detail(parsed))
         if status == "waiting":
             return needs_input(str(agent_state.get("waitingFor") or "waiting on you"))
-        # status == "idle", or "busy" but only because a shell/monitor from
+        if status == "idle":
+            if parsed.last_record_role in ("", "user") and parsed.turn_state != "completed":
+                return needs_input("at the prompt")
+            return _finished_state(parsed, tracked, now, pane_text)
+        # "busy" but only because a shell/monitor from
         # an already-finished turn is still going (see
         # _lingering_background_activity): not specific enough on its own
         # — fall through to events/pane heuristics, which is what actually
@@ -473,6 +488,8 @@ def derive_state(
                 return needs_input(detail)
             if pane_shows_working(pane_text):
                 return (SessionState.WORKING, _working_detail(parsed))
+        if parsed.turn_state == "completed":
+            return _finished_state(parsed, tracked, now, pane_text)
         conversation_ts = (
             parsed.last_timestamp.timestamp() if parsed.last_timestamp else None
         )
@@ -497,6 +514,8 @@ def derive_state(
     # Not live in any tmux we can see. If the transcript is being written
     # RIGHT NOW, some other host (e.g. cmux, a bare terminal) is running it:
     # that's working, not stopped — but cagents can't attach to it.
+    if parsed.turn_state == "completed":
+        return _finished_state(parsed, tracked, now)
     conversation_ts = parsed.last_timestamp.timestamp() if parsed.last_timestamp else None
     if conversation_ts is not None and now - conversation_ts < FRESH_WRITE_SECONDS:
         return (SessionState.WORKING, "active outside cagents' tmux")
@@ -514,6 +533,15 @@ def codex_pane_prompt(text: str) -> bool:
         "do you trust the contents of this directory", "press enter to confirm",
         "waiting for your input",
     ))
+
+
+def codex_pane_working(text: str) -> bool:
+    # Codex keeps old output in the normal screen/scrollback. Mentions of
+    # "esc to interrupt" there are not activity; require its current status
+    # row near the input footer (which itself stays visible during work).
+    lines = [line for line in text.lower().splitlines() if line.strip()]
+    tail = "\n".join(lines[-10:])
+    return bool(re.search(r"^\s*•\s+.+\([^()\n]*\besc to interrupt\)\s*$", tail, re.MULTILINE))
 
 
 def _lingering_background_activity(
@@ -845,6 +873,8 @@ class SessionRegistry:
         from .codex_rpc import CodexClient
         self.codex_client = codex_client or CodexClient(self.codex_dir, timeout=2)
         self._codex_retry_at = 0.0
+        self._codex_thread_retry_at: dict[str, float] = {}
+        self._codex_names = codex_data.SessionNames(self.codex_dir)
         self.agents_runner = agents_runner  # injectable for `claude agents --json`
         # Debounce state: a WORKING session must look blocked on two
         # consecutive refreshes before we say "needs you" — a single frame
@@ -879,6 +909,11 @@ class SessionRegistry:
             self._agent_states = fetch_agent_states(runner=self.agents_runner)
             self._agent_states_at = now
         agent_states = self._agent_states
+        codex_ids = {t.session_id for t in self.store.sessions.values()
+                     if t.provider == "codex" and not t.archived}
+        codex_names = self._codex_names.read(codex_ids)
+        self._codex_thread_retry_at = {sid: retry for sid, retry in self._codex_thread_retry_at.items()
+                                      if sid in codex_ids}
 
         pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
         seen_paths: set[Path] = set()
@@ -907,6 +942,7 @@ class SessionRegistry:
 
         views: list[SessionView] = []
         for tracked, parsed in pairs:
+            native_title = codex_names.get(tracked.session_id, "")
             if tracked.provider == "codex" and tracked.idle_stopped_at and parsed and parsed.turn_state == "interrupted":
                 from dataclasses import replace
                 from .store import _parse_iso
@@ -925,16 +961,35 @@ class SessionRegistry:
             pane_text = pane_text_of(tmux) if live else ""
             events = self._load_events(tracked.session_id) if tracked.provider == "claude" else None
             agent_state = agent_states.get(tracked.session_id)
-            if not suspended and tracked.provider == "codex" and now >= self._codex_retry_at and self.codex_client.socket_path.exists():
+            if agent_state and tracked.provider == "claude":
+                # The CLI status is polled more slowly than transcripts. A
+                # cached idle must not hide a new turn, nor cached busy keep
+                # a completed turn alive. mtime only invalidates this cache;
+                # it never counts as conversation activity or implies work.
+                newer_record = parsed is not None and parsed.mtime > self._agent_states_at
+                newer_hook = any(isinstance(ts, (int, float)) and ts > self._agent_states_at
+                                 for key, ts in (events or {}).items()
+                                 if key in ("UserPromptSubmit", "Stop", "Notification"))
+                wrong_process = (tmux is not None and agent_state.get("pid")
+                                 and agent_state["pid"] != tmux.pane_pid)
+                if newer_record or newer_hook or wrong_process:
+                    agent_state = None
+            if (not suspended and tracked.provider == "codex" and now >= self._codex_retry_at
+                    and now >= self._codex_thread_retry_at.get(tracked.session_id, 0)
+                    and self.codex_client.socket_path.exists()):
+                from .codex_rpc import CodexRpcError
                 try:
                     thread = self.codex_client.call("thread/read", {"threadId": tracked.native_session_id})["thread"]
                     agent_state = thread.get("status")
                     if parsed is None:
                         parsed = ParsedSession(tracked.session_id, Path(thread.get("path") or "."),
                                                cwd=thread.get("cwd") or tracked.project_dir)
-                    if thread.get("name"):
-                        from dataclasses import replace
-                        parsed = replace(parsed, title=thread["name"])
+                    if isinstance(thread.get("name"), str) and thread["name"].strip():
+                        native_title = thread["name"].strip()
+                except CodexRpcError:
+                    # A missing/broken thread must not suppress all later
+                    # threads' names and runtime states on every refresh.
+                    self._codex_thread_retry_at[tracked.session_id] = now + 10
                 except (RuntimeError, KeyError, ImportError):
                     self._codex_retry_at = now + 10  # one failed connection, not one per session
             state, detail = derive_state(
@@ -960,6 +1015,7 @@ class SessionRegistry:
                 pane_id=tmux.pane_id if tmux else "",
                 pane_pid=tmux.pane_pid if tmux else 0,
                 pane_command=tmux.pane_command if tmux else "",
+                native_title=native_title,
             )
             from .lifecycle import apply_auto_done
             apply_auto_done(view, self.store.get_setting("auto_done_duration"), now)

@@ -227,9 +227,10 @@ class TestCommands:
     def test_container_setup_binds_no_letter_or_escape_keys(self):
         flat = [" ".join(c) for c in container_setup_commands()]
         assert not any(" Escape " in f" {c} " for c in flat)  # Esc stays Claude's
-        # No key bindings in static setup — the ← cycle comes from
-        # arrow_capture_commands (toggleable); C-t/C-d from ctx binds.
-        assert not any(c.startswith("bind") for c in flat)
+        # Ctrl+G is intentionally reserved for queue navigation. Ordinary
+        # letters and Escape must still reach the native conversation.
+        binds = [c for c in container_setup_commands() if c[0] == "bind"]
+        assert all(c[2].startswith("C-") for c in binds)
         assert any("window-pane-changed" in c for c in flat)
         assert any("status-right" in c for c in flat)  # the statusline
 
@@ -377,6 +378,9 @@ class TestCommands:
         commands = ctx_bind_commands("/venv/bin/cagents-ctx", "/data/context.json")
         flat = [" ".join(c) for c in commands]
         assert any(c.startswith("bind -n C-t run-shell") and "shell" in c for c in flat)
+        # These binds are reapplied when the app starts inside an existing
+        # container; upgrading must install queue navigation there too.
+        assert any(c.startswith("bind -n C-g ") for c in flat)
         assert any(c.startswith("bind -n C-d run-shell") and "diff" in c for c in flat)
 
     def test_should_bootstrap_only_bare_terminal(self):

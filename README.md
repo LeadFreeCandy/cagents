@@ -67,10 +67,15 @@ be toggled there.
 
 Derived fresh on every refresh (~2s), never stored:
 
+Native idle status and recorded turn completion take precedence over stale tool
+calls or submit hooks. Claude's runtime status is cached for up to 10s, but newer
+transcript or hook activity invalidates that cached answer. Long-running quiet
+tools remain working until there is evidence that the turn ended or needs input.
+
 | State | Meaning | How it's detected |
 |---|---|---|
-| working | Claude is doing something | live pane shows a running turn, or the transcript was written to in the last ~20s |
-| needs input | blocked on a human | live pane shows a permission/question prompt, or an unanswered tool call with no recent writes |
+| working | Claude or Codex is running a turn | native busy/active status, a current spinner, or ongoing transcript activity/tool calls without a later completion |
+| needs input | blocked on a human | native waiting status or a live permission/question prompt |
 | needs review | Claude finished; no human has looked | last turn completed, no review newer than the last activity |
 | done | a human accepted the result | reviewed at/after the last activity |
 | stopped | ended without completing | no live tmux session and the transcript ends mid-turn |
@@ -104,6 +109,11 @@ On top of v0.1.0 (which lives on `main`, runnable as `cagents`; this branch is
 `?` inside the app shows the full list. The short version: `1/2/3` views, `j/k` move,
 `enter` attach, `n` new session, `a` track an existing one, `r` reviewed, `e` note,
 `L` label, `x` untrack, `q` quit.
+
+`Ctrl+G` returns to the top conversation in the queue from inside a conversation
+or workspace tab, including full-width chat. Focus returns to the queue; press
+Enter to enter that conversation. With the list focused, `g` / `G` jump to its
+first / last conversation.
 
 ## Install / run
 
@@ -151,8 +161,31 @@ Integration references: [Codex CLI commands](https://learn.chatgpt.com/docs/deve
 and [Codex app server](https://learn.chatgpt.com/docs/app-server).
 
 Conversation rows show a one-column provider icon after the state: `✳` Claude or `›` Codex.
+Titles follow the provider's saved conversation name, including native renames.
+Codex's local name index works even while a conversation is suspended; Claude's
+saved custom/generated titles are read from its transcript. An explicit cagents
+label takes priority, with the first real prompt as the fallback for unnamed threads.
 Settings (`,`) → **Conversation title width** controls the queue/grouped/sidebar
 title limit, now **22** columns by default (previously 44; configurable from 8–120).
+
+In tmux, managed Codex launches and restarts inherit the dashboard terminal's
+foreground/background colors before starting, preserving native message and
+composer shading even when the conversation starts detached.
+
+Scrolling uses native tmux mouse handling. Programs that request mouse input
+receive the wheel directly. Otherwise, the wheel scrolls terminal history one
+line per event, starting with the first tick; scrolling back to the bottom or
+pressing `q` returns to live output. Codex's main view uses this terminal history.
+Cagents does not open its transcript viewer or send substitute CLI keystrokes.
+Managed Codex launches respect its normal terminal mode.
+
+Drag-select text and release to copy directly to the macOS clipboard. The
+highlight stays visible after release; `q` dismisses it, and `⌘V` pastes into
+the conversation. An existing custom tmux copy command is preserved. Clipboard
+updates from native CLIs still pass through every nested terminal. Pasting while
+scrolled back returns to the live prompt and preserves multiline paste as one
+paste, without submitting it. Unbound typing keys also return to the prompt;
+tmux's scrollback navigation and selection keys remain available.
 The proposed, default-off **Recap line** feature is described in
 [the recap design](RECAP_DESIGN.md); it remains pending in [TODO.md](TODO.md).
 
@@ -167,7 +200,16 @@ Agent transcript data is strictly read-only to cagents; native agents own conver
 
 ```sh
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest        # unit + pilot-driven UI tests, no real tmux/~/.claude touched
+.venv/bin/python -m pytest        # unit, UI, and isolated tmux/PTY regression tests
+```
+
+The macOS clipboard tests are opt-in because they exercise the system clipboard.
+This harness restores all original clipboard items and formats afterward (requires
+Swift from the Xcode command-line tools):
+
+```sh
+CAGENTS_MAC_CLIPBOARD_TESTS=1 swift tests/live/preserve_clipboard.swift \
+  "$PWD/.venv/bin/python" -m pytest -q tests/test_clipboard.py -k updates_mac
 ```
 
 Layout: `claude_data.py` (read-only parsing of Claude's store), `tmuxctl.py` (tmux on the

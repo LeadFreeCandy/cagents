@@ -117,7 +117,8 @@ class RowWidths:
     state: int = 10
 
 
-def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX) -> RowWidths:
+def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX,
+               compact_width: int | None = None) -> RowWidths:
     """Fit the title and state columns to the rows being shown. Bounded so a
     single long AI title can't shove every other column off the edge."""
     views = list(views)
@@ -126,10 +127,15 @@ def row_widths(views: Iterable[SessionView], title_width: int = TITLE_MAX) -> Ro
         return RowWidths(title=title_width)
     title = max(cell_len(view.title) for view in views)
     state = max(len(session_style(view)[2]) for view in views)
-    return RowWidths(
-        title=min(title_width, max(TITLE_MIN, title)),
-        state=max(STATE_MIN, state),
-    )
+    title = min(title_width, max(TITLE_MIN, title))
+    if compact_width is not None:
+        # A compact row has two glyphs plus spacing (5), title, space,
+        # age (at least 3), and sometimes the explicit auto-done label.
+        # Fit the title BEFORE Textual clips the whole row and loses its age.
+        suffix = max(1 + max(3, len(human_age(view.last_activity)))
+                     + (len(" Done (auto)") if view.auto_done else 0) for view in views)
+        title = min(title, max(1, compact_width - 5 - suffix))
+    return RowWidths(title=title, state=max(STATE_MIN, state))
 
 
 def _jira_prefix_width(widths: RowWidths) -> int:

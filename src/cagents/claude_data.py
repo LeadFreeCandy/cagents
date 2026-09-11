@@ -145,8 +145,11 @@ class ParsedSession:
     # error.
     compact_count: int = 0
     compacted_tokens: int = 0
-    # Codex emits explicit lifecycle events rather than Claude stop reasons.
+    # Native lifecycle records (Codex task events / Claude turn_duration).
     turn_state: str = ""  # running | completed | interrupted
+    # Separate from conversation activity: completion metadata can follow the
+    # last message. Used to retire hooks from that turn, without moving Done.
+    turn_ended_at: datetime | None = None
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -453,11 +456,19 @@ def parse_session_file(
             continue
 
         if rtype == "system":
+            if record.get("isSidechain"):
+                continue
             agents = record.get("pendingBackgroundAgentCount")
             if isinstance(agents, int):
                 parsed.pending_agents = agents
             subtype = record.get("subtype")
             if subtype == "turn_duration":
+                parsed.turn_state = "completed"
+                parsed.turn_ended_at = _parse_ts(record.get("timestamp"))
+                # Failed/interrupted turns also emit this marker. A bounded
+                # head/tail scan can retain tool calls whose results fell in
+                # the skipped middle; none are foreground work after this.
+                open_tool_uses.clear()
                 duration = record.get("durationMs")
                 if isinstance(duration, int):
                     parsed.last_turn_duration_ms = duration
@@ -474,6 +485,9 @@ def parse_session_file(
             continue
         if record.get("isSidechain"):
             continue
+
+        parsed.turn_state = "running"
+        parsed.turn_ended_at = None
 
         ts = _parse_ts(record.get("timestamp"))
         if ts is not None:

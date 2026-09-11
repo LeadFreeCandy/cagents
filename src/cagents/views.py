@@ -55,6 +55,7 @@ class SessionList(OptionList):
     SessionList {
         text-wrap: nowrap;
         text-overflow: ellipsis;
+        scrollbar-gutter: stable;
     }
     """
 
@@ -64,6 +65,19 @@ class SessionList(OptionList):
         Binding("g", "first", "First", show=False),
         Binding("G", "last", "Last", show=False),
     ]
+
+    @property
+    def prompt_width(self) -> int | None:
+        width = self.scrollable_content_region.width
+        padding = self.get_component_styles("option-list--option").padding.width
+        return max(1, width - padding) if width else None
+
+    def on_resize(self) -> None:
+        # Refit on every compact width change, not only when the app crosses
+        # its compact breakpoint. The list's own layout includes its border,
+        # option padding, and scrollbar, unlike the enclosing terminal width.
+        if getattr(self.app, "compact", False) and isinstance(self.parent, (GroupedView, QueueView)):
+            self.parent.update_snapshot(self.parent.snapshot)
 
     def _interacted(self) -> None:
         sid = self.highlighted_session_id
@@ -242,7 +256,9 @@ class GroupedView(BaseSessionView):
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
         # One set of column widths for the whole list, so rows line up across
         # groups too.
-        widths = row_widths(snapshot.views, self.app.store.get_setting("conversation_title_width"))
+        session_list = self.query_one("#grouped-list", SessionList)
+        widths = row_widths(snapshot.views, self.app.store.get_setting("conversation_title_width"),
+                            compact_width=session_list.prompt_width if compact else None)
         header = self.query_one("#grouped-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:
@@ -265,7 +281,6 @@ class GroupedView(BaseSessionView):
         options = self._pending_options() + options
         if not options:
             options = [_empty_option()]
-        session_list = self.query_one("#grouped-list", SessionList)
         keep_id = None if self._pin_cursor_next else self.selected_id
         self._pin_cursor_next = False
         session_list.rebuild(options, keep_id)
@@ -296,7 +311,9 @@ class QueueView(BaseSessionView):
         ordered = sorted(snapshot.views, key=attention_sort_key)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
-        widths = row_widths(ordered, self.app.store.get_setting("conversation_title_width"))
+        session_list = self.query_one("#queue-list", SessionList)
+        widths = row_widths(ordered, self.app.store.get_setting("conversation_title_width"),
+                            compact_width=session_list.prompt_width if compact else None)
         header = self.query_one("#queue-jira-header", Static)
         header.set_class(show_jira, "shown")
         if show_jira:
@@ -313,7 +330,6 @@ class QueueView(BaseSessionView):
         options = self._pending_options() + options
         if not options:
             options = [_empty_option()]
-        session_list = self.query_one("#queue-list", SessionList)
         keep_id = None if self._pin_cursor_next else self.selected_id
         self._pin_cursor_next = False
         session_list.rebuild(options, keep_id)

@@ -398,12 +398,15 @@ HELP_TEXT = """\
 [bold]cagents — keys[/bold]
 
 [bold cyan]Views[/bold cyan]
-  1 / 2 / 3     grouped · queue · kanban        tab  next view
+  1 / 2 / 3     queue · grouped · kanban        tab  next view
 
 [bold cyan]Navigate[/bold cyan]
+  ctrl+g        return to the first conversation in the queue, even from chat
+  g / G         first / last conversation while the list has focus
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
   mouse         click focuses; wheel scrolls the hovered pane
+  drag          copy on release; selection stays visible (q dismisses it)
   provider      ✳ Claude · › Codex (one-column icons beside session state)
 
 [bold cyan]Tabs (top of the right pane: session · diff · term-1)[/bold cyan]

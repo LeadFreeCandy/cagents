@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,6 +88,43 @@ _MUTATING_COMMANDS = {
 }
 
 
+def terminal_input_commands() -> list[list[str]]:
+    """Native tmux scrolling, selection, clipboard and paste handling.
+
+    Mouse-aware programs receive the original event. Other programs use
+    terminal history, including the first tick. No CLI keys are synthesized.
+    """
+    commands = [
+        # Each enclosing tmux is an application to the next server. The
+        # default 'external' blocks its clipboard writes (including copies
+        # originating in Claude). All layers must accept and relay OSC 52.
+        ["set", "-s", "set-clipboard", "on"],
+        ["bind", "-n", "WheelUpPane", "if", "-F",
+         "#{||:#{mouse_any_flag},#{pane_in_mode}}", "send-keys -M",
+         "copy-mode -e -t = ; send-keys -X -t = -N 1 scroll-up"],
+        ["bind", "-n", "WheelDownPane", "send-keys", "-M"],
+    ]
+    if sys.platform == "darwin":
+        # OSC 52 forwarding alone depends on the terminal accepting it. Copy
+        # selections directly to macOS too; preserve an explicit user copier.
+        commands.append(["if", "-F", "#{==:#{copy-command},}",
+                         "set -s copy-command /usr/bin/pbcopy"])
+    for table in ("copy-mode", "copy-mode-vi"):
+        # Keep the selected text visible after releasing the mouse. The
+        # native copy command writes both tmux's buffer and copy-command.
+        commands.append(["bind", "-T", table, "MouseDragEnd1Pane",
+                         "send-keys", "-X", "-t", "=", "copy-pipe-no-clear"])
+        for key, action in (("WheelUpPane", "scroll-up"), ("WheelDownPane", "scroll-down")):
+            commands.append(["bind", "-T", table, key,
+                             "send-keys", "-X", "-t", "=", "-N", "1", action])
+        # tmux 3.6's paste-start event has no bindable key name. Its Any
+        # fallback can forward the original event, preserving bracketed
+        # paste so multiline text never becomes individual CLI commands.
+        commands.append(["bind", "-T", table, "Any",
+                         "send-keys -X cancel ; send-keys"])
+    return commands
+
+
 class TmuxClient:
     """Thin wrapper over the tmux CLI. Safe to call when no server is
     running (reports an empty world rather than raising)."""
@@ -101,6 +139,7 @@ class TmuxClient:
         self.create_socket = create_socket
         self.tmux_bin = tmux_bin
         self._mouse_enabled: set[str] = set()
+        self._scroll_configured: set[str] = set()
         # CAGENTS_SESSION_ID per live tmux session, keyed by (socket, name,
         # created). It's one `show-environment` subprocess per session per
         # list — dozens of spawns every 2s tick — for a value fixed at
@@ -135,6 +174,8 @@ class TmuxClient:
         except (OSError, subprocess.TimeoutExpired):
             return []
         if proc.returncode != 0:
+            self._mouse_enabled.discard(socket)
+            self._scroll_configured.discard(socket)
             return []  # no server on this socket — normal
         sessions: dict[str, TmuxSession] = {}
         for line in proc.stdout.splitlines():
@@ -240,6 +281,11 @@ class TmuxClient:
         placeholder. Restart supplies a fresh, fully quoted resume command.
         """
         current = self._checked_agent_pane(session_name, session_id, socket, pane_id, pane_pid)
+        self.configure_scrolling(socket)
+        if command and session_id.startswith("codex:"):
+            from .terminal_colors import prepare_command
+
+            command = prepare_command(command, self.tmux_bin)
         target = current.pane_id
         # A dead pane also keeps grouped terminal views alive. This must succeed
         # before we stop anything, or the last window could disappear.
@@ -323,6 +369,7 @@ class TmuxClient:
         import os
 
         socket = socket or self.create_socket
+        self.configure_scrolling(socket)
         env = os.environ.copy()
         env.pop("TMUX", None)  # deliberate nesting is fine once TMUX is unset
         proc = subprocess.run(
@@ -330,6 +377,15 @@ class TmuxClient:
             env=env,
         )
         return proc.returncode
+
+    def configure_scrolling(self, socket: str | None = None) -> None:
+        socket = socket or self.create_socket
+        if socket in self._scroll_configured:
+            return
+        for command in terminal_input_commands():
+            if self._run(socket, *command).returncode:
+                return
+        self._scroll_configured.add(socket)
 
     def send_text(
         self, session_name: str, text: str, submit: bool = True, socket: str | None = None
@@ -378,6 +434,10 @@ class TmuxClient:
         name = self._unique_name(Path(directory).name)
         claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         cmd = " ".join(_shquote(a) for a in [claude_bin, *claude_args])
+        if session_id.startswith("codex:"):
+            from .terminal_colors import prepare_command
+
+            cmd = prepare_command(cmd, self.tmux_bin)
         env_args: list[str] = list(extra_env or ())
         if session_id:
             env_args += ["-e", f"CAGENTS_SESSION_ID={session_id}"]
@@ -398,6 +458,7 @@ class TmuxClient:
         if self.create_socket not in self._mouse_enabled:
             self._run(self.create_socket, "set", "-g", "mouse", "on")
             self._run(self.create_socket, "set", "-g", "status", "off")
+            self.configure_scrolling()
             self._mouse_enabled.add(self.create_socket)
         return name
 
@@ -406,7 +467,7 @@ class TmuxClient:
         # The transport and terminal setup are identical; only the CLI and
         # its environment differ. Codex keeps its own approval/config defaults.
         return self.new_claude_session(
-            directory, ["--no-alt-screen", *args], session_id, codex_bin,
+            directory, args, session_id, codex_bin,
             extra_env=["-e", f"CODEX_HOME={codex_dir}"],
         )
 
@@ -443,6 +504,7 @@ class TmuxClient:
         if self.create_socket not in self._mouse_enabled:
             self._run(self.create_socket, "set", "-g", "mouse", "on")
             self._run(self.create_socket, "set", "-g", "status", "off")
+            self.configure_scrolling()
             self._mouse_enabled.add(self.create_socket)
         return name
 

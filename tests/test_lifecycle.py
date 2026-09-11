@@ -192,7 +192,7 @@ async def test_restart_key_preserves_conversation_and_uses_provider(idle_world):
                        tracked=TrackedSession("codex:" + SID1, str(Path.cwd()), iso(time.time())))
         command, _ = app._resume_command(view)
         assert shlex.split(command)[1:4] == ["env", f"CODEX_HOME={app.codex_dir}", "/opt/bin/codex"]
-        assert ["resume", SID1] == shlex.split(command)[5:7]
+        assert ["resume", SID1] == shlex.split(command)[4:6]
 
 
 async def test_settings_changes_duration_and_persists(idle_world):
@@ -361,7 +361,7 @@ def test_tmux_suspend_targets_exact_pane_and_keeps_windows(monkeypatch):
             raise ProcessLookupError
     monkeypatch.setattr("os.kill", signal)
     client.replace_agent("agent", SID1, socket="test-only", pane_id="%9", pane_pid=222)
-    assert calls[0] == ("test-only", "set-option", "-p", "-t", "%9", "remain-on-exit", "on")
+    assert ("test-only", "set-option", "-p", "-t", "%9", "remain-on-exit", "on") in calls
     assert ("test-only", "respawn-pane", "-k", "-t", "%9", "/usr/bin/true") in calls
     assert calls[-1][-2:] == ("@cagents_suspended", "1")
     assert all(call[1] not in ("kill-session", "kill-server", "kill-window") for call in calls)

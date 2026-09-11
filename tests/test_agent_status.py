@@ -93,9 +93,9 @@ class TestAgentStatePrecedence:
         assert state == SessionState.NEEDS_INPUT
         assert detail == "permission prompt"
 
-    def test_idle_status_falls_through_to_existing_heuristics(self, claude_dir, now):
-        # "idle" alone can't distinguish done/needs-review/monitoring/… —
-        # it must behave exactly as if agent_state weren't passed at all.
+    def test_idle_status_uses_the_existing_finished_state_policy(self, claude_dir, now):
+        # Native idle rules out foreground work; review/background bookkeeping
+        # still determines which particular finished state to display.
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("go").assistant_text("done", ts=ts_ago(300))
         parsed = self._parse(claude_dir, b)

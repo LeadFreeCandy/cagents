@@ -134,6 +134,11 @@ class Sidecar:
         ):
             self._work(option)
 
+        from .tmuxctl import terminal_input_commands
+        for command in terminal_input_commands():
+            self._work(command)
+            self._run(command)
+
         if ctx_prog and context_path:
             import shlex
 
@@ -600,6 +605,10 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "window-status-current-format", ""],
         ["set", "-g", "focus-events", "on"],
         ["set", "-g", "detach-on-destroy", "on"],
+        # Intercept this at the outermost terminal even when the native CLI,
+        # a workspace tab, or scrollback has focus. send-keys targets the rail
+        # directly, so it neither re-enters this binding nor reaches the agent.
+        queue_top_binding(),
         # Re-selecting the focused pane must not trigger another resize.
         # This hook follows actual pane changes for both keys and clicks.
         ["set-hook", "-g", "-u", "after-select-pane"],
@@ -669,6 +678,12 @@ def apply_dim_chat(enable: bool, runner=None) -> None:
             pass
 
 
+def queue_top_binding() -> list[str]:
+    return ["bind", "-n", "C-g",
+            "if -F '#{window_zoomed_flag}' 'resize-pane -Z' ; "
+            "select-pane -t :.0 ; send-keys -t :.0 C-g"]
+
+
 def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
     """C-t (shell in the session's dir) and C-d (diff vs master popup),
     C-t rather than C-s so Claude Code's own ctrl-s binding stays reachable;
@@ -682,6 +697,7 @@ def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
         ["unbind", "-n", "C-s"],
         ["bind", "-n", "C-t", "run-shell", "-b", f"{prog} shell --context {ctx}"],
         ["bind", "-n", "C-d", "run-shell", "-b", f"{prog} diff --context {ctx}"],
+        queue_top_binding(),
     ]
 
 
