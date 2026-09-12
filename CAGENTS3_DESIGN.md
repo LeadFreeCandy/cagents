@@ -73,6 +73,24 @@ their expanded-row and lifecycle coverage remains in place.
 Sidebar QA reproduced 23 failing layout cases before the fix; all 195 relevant
 formatting, UI, lifecycle, navigation, hover, and native-dashboard tests now pass.
 
+Color schemes are selected under Settings → Color scheme. The 28 bundled Vim
+palettes are registered as Textual themes, with matching native tab colors.
+Preview changes are temporary until Enter; Escape restores the actual previous
+theme. The saved scheme is reapplied after workspace creation on dashboard
+restart. Palette changes only set UI colors and tab styles, preserving pane
+identity, geometry, input bindings, agent colors, and drafts.
+
+The initial color tests reproduced 35 failures for missing schemes, persistence,
+preview, and rendering. Native tab-color and real-dashboard tests also failed
+before implementation. QA covers every palette, light and dark themes,
+cancel/save/reload, invalid settings, and native process/draft preservation.
+The palette importer in `tools/import_vim_colors.py` reproduces the bundled data
+from the pinned upstream revision; the built wheel contains all palettes and
+Vim license/credit files and loads them without Vim or runtime downloads.
+The complete suite with installed-CLI QA enabled passes 672 tests (3 opt-in
+checks skipped). Ctrl-G also passed its 8 focused tests across queue views and
+native/nested conversation panes, including zoomed chat.
+
 A real resize still asks the native CLI to redraw. This change removes the extra
 workspace/session relays and automatic focus resizes; it does not claim to remove
 latency inside a CLI's own resize handling. A conversation on another tmux server

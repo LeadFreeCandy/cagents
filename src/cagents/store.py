@@ -86,6 +86,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "background_activity_states": False,
     "auto_done_duration": "7d",
     "conversation_title_width": 22,
+    "color_scheme": "cagents",
     # Verbose debug trace (keys, clicks, tmux commands, state changes)
     # into ctx.log next to state.json. Cheap and invaluable for "it
     # switched tabs on its own" reports — on by default for now.

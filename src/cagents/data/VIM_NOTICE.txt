@@ -1,0 +1,12 @@
+Vim color palette adaptations for cagents
+
+Source: https://github.com/vim/vim/tree/3c8296fc4ff924ae2d05feab945b719e1cfafac3/runtime/colors
+
+The bundled numeric palettes were extracted from Vim highlight groups with
+termguicolors enabled and background=dark before each scheme was loaded.
+Schemes that set background=light retain their light appearance. Vim default
+uses white on black for colors normally inherited from the terminal.
+
+Author and maintainer credits are included in vim_colors.json. The original
+Vim license is included in VIM_LICENSE.txt. The Textual and tmux mapping is
+implemented separately in cagents/themes.py. No Vim code executes at runtime.

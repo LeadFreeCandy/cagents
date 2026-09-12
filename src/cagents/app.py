@@ -169,6 +169,10 @@ class CagentsApp(App):
     ):
         super().__init__()
         self.store = store or Store.load()
+        from .themes import theme_name, vim_themes
+        for theme in vim_themes():
+            self.register_theme(theme)
+        self.theme = theme_name(self.store.get_setting("color_scheme"))
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
         from .codex_data import default_codex_dir
@@ -258,6 +262,8 @@ class CagentsApp(App):
                     shim_env=self._shim_env(),
                 )
                 self._workspace_ready()
+                if self.theme.startswith("vim-"):
+                    self._apply_color_theme(self.theme)
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")
 
@@ -2503,7 +2509,20 @@ exec {shlex.quote(real)} "$@"
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))
 
+    def _apply_color_theme(self, name: str) -> None:
+        self.theme = name
+        apply = getattr(self.sidecar, "apply_theme", None)
+        if apply is not None:
+            try:
+                apply(self.current_theme)
+            except Exception as error:
+                self.notify(f"Could not update tab colors: {error}", severity="warning")
+
     def _setting_changed(self, key: str, value) -> None:
+        if key == "color_scheme":
+            from .themes import theme_name
+            self._apply_color_theme(theme_name(value))
+            return
         if key == "conversation_title_width":
             for view_id in VIEW_IDS:
                 self.query_one(f"#{view_id}").update_snapshot(self.snapshot)

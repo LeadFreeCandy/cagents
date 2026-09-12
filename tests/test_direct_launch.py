@@ -8,6 +8,55 @@ from dashboard_harness import Dashboard
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+def test_real_dashboard_color_scheme_preview_save_cancel_and_reload(tmp_path):
+    from test_color_schemes import VIM_SCHEMES
+    from cagents.modals import SETTINGS_META
+
+    d = Dashboard(tmp_path / "dashboard-artifacts")
+    try:
+        d.launch()
+        pane = d.new_shell()
+        pid = d.pane(pane, "pane_pid")
+        d.send("UNSENT_THEME_DRAFT")
+        d.queue()
+        d.send(",")
+        assert "Color scheme" in d.capture(d.rail)
+        index = [key for key, _, _ in SETTINGS_META].index("color_scheme")
+        d.send(b"\x1b[B" * index)
+        d.send(b"\r")
+        choices = ["cagents", *sorted(VIM_SCHEMES)]
+        d.send(b"\x1b[B" * choices.index("desert"))
+        d.wait(lambda: d.tmux("show-option", "-gqv", "status-style") == "bg=#c2bfa5,fg=#333333",
+               "desert preview did not update native tab colors")
+        assert json.loads(d.state.read_text())["settings"].get("color_scheme", "cagents") == "cagents"
+        assert "48;2;51;51;51" in d.capture(d.rail, ansi=True)
+        d.save_artifacts("desert-preview")
+        d.send(b"\x1b")
+        d.wait(lambda: d.tmux("show-option", "-gqv", "status-style") == "bg=colour236,fg=colour248",
+               "cancel did not restore native tab colors")
+        d.send(b"\r")
+        d.send(b"\x1b[B" * choices.index("peachpuff"))
+        d.send(b"\r")
+        d.wait(lambda: json.loads(d.state.read_text())["settings"].get("color_scheme") == "peachpuff",
+               "chosen color scheme was not saved")
+        d.send(b"\x1b")
+        assert "48;2;255;218;185" in d.capture(d.rail, ansi=True)
+        assert d.pane(pane, "pane_pid") == pid and "UNSENT_THEME_DRAFT" in d.capture(pane)
+        d.save_artifacts("peachpuff-saved")
+        d.queue()
+        d.send("q")
+        d.wait(lambda: d.pane(d.rail, "pane_dead") == "1", "dashboard did not exit")
+        d.launch()
+        assert "48;2;255;218;185" in d.capture(d.rail, ansi=True)
+        assert d.tmux("show-option", "-gqv", "status-style") == "bg=#000000,fg=#ffffff"
+        assert d.pane(pane, "pane_pid") == pid and "UNSENT_THEME_DRAFT" in d.capture(pane)
+        d.assert_no_tmux_messages()
+        d.save_artifacts("peachpuff-reloaded")
+    finally:
+        d.close()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 def test_real_dashboard_collapses_to_icon_and_name_and_restores_details(tmp_path):
     d = Dashboard(tmp_path / "dashboard-artifacts")
     try:

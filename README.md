@@ -171,6 +171,18 @@ Collapsed sidebars show only the status icon and conversation name, using all
 remaining width for the name and truncating it with an ellipsis when necessary.
 Expand the sidebar to see provider, age, and status labels such as **Done (auto)**.
 
+Settings (`,`) → **Color scheme** offers **cagents default** and all 28 schemes
+from [Vim's bundled colors](https://github.com/vim/vim/tree/3c8296fc4ff924ae2d05feab945b719e1cfafac3/runtime/colors):
+blue, catppuccin, darkblue, default, delek, desert, elflord, evening, habamax,
+industry, koehler, lunaperche, morning, murphy, novum, pablo, peachpuff, quiet,
+retrobox, ron, shine, slate, sorbet, torte, unokai, wildcharm, zaibatsu, and zellner.
+Use ↑/↓ to preview, Enter to save, or Escape to restore the previous colors.
+The choice persists across restarts and colors both the dashboard and its native
+tab bar. Existing installations keep the current cagents appearance by default.
+Schemes use Vim's RGB palettes, with light backgrounds retained where the scheme
+selects one. Palettes, credits, and the Vim license are bundled; Vim and network
+access are not needed to use them. Claude and Codex keep their own terminal colors.
+
 In tmux, managed Codex launches and restarts inherit the dashboard terminal's
 foreground/background colors before starting, preserving native message and
 composer shading even when the conversation starts detached.

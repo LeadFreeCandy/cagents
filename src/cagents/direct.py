@@ -286,6 +286,11 @@ def setup_commands():
 class DirectSidecar:
     enabled = staticmethod(Sidecar.enabled)
 
+    def apply_theme(self, theme):
+        from .themes import tab_color_commands
+        for command in tab_color_commands(theme):
+            self._run(command)
+
     def __init__(self, runner=None, own_pane="", client=None):
         self.client = client or DirectTmux()
         self.socket = self.client.create_socket

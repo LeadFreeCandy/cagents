@@ -43,6 +43,11 @@ TABS = ("session", "diff", "term-1", "+term")  # left-to-right (display names)
 
 
 class Sidecar:
+    def apply_theme(self, theme):
+        from .themes import tab_color_commands
+        for command in tab_color_commands(theme):
+            self._work(command)
+
     def __init__(self, runner=None, own_pane: str = "", work_runner=None, session_runner=None):
         # runner: outer-tmux (the container); work_runner: the workspace
         # server that holds the tabs. Both injectable for tests.
