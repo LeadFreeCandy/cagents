@@ -238,3 +238,44 @@ def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypat
     listing[1][1] = "300"  # beta was killed and recreated under the same name
     client.list_sessions()
     assert env_calls[2:] == ["=beta"]
+
+
+def test_list_sessions_notices_when_a_sessions_agent_window_is_gone(monkeypatch):
+    """A cagents session is created around its agent in window 0; the
+    terminal tab is window 1. When the agent exits on its own (`/exit`, not
+    a suspend — no retained pane), window 0 closes but the terminal window
+    keeps the tmux session alive: a husk that still carries the id and whose
+    first listed pane is a shell. The listing must say whether window 0 is
+    still there."""
+    import subprocess
+
+    from cagents.tmuxctl import _FIELD_SEP, _LIST_FORMAT, TmuxClient
+
+    client = TmuxClient(sockets=("claude",), create_socket="claude")
+    fields = _LIST_FORMAT.count(_FIELD_SEP) + 1
+    #      name    created activity attached pid   path           group    command  pane dead susp window
+    rows = [
+        ["alpha", "100", "100", "0", "11", "/proj/alpha", "alpha", "claude", "%1", "0", "0", "0"],
+        ["alpha", "100", "100", "0", "12", "/proj/alpha", "alpha", "zsh", "%2", "0", "0", "1"],
+        ["husk", "200", "200", "0", "13", "/proj/alpha", "husk", "zsh", "%3", "0", "0", "1"],
+    ]
+
+    def fake_run(socket, *args, timeout=5.0):
+        if args[0] == "list-panes":
+            padded = [(row + [""] * fields)[:fields] for row in rows]
+            return subprocess.CompletedProcess(
+                args, 0, stdout="\n".join(_FIELD_SEP.join(r) for r in padded) + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    by_name = {s.name: s for s in client.list_sessions()}
+    assert by_name["alpha"].has_root_window is True
+    assert by_name["husk"].has_root_window is False
+    # The window field is appended, so every earlier field must still parse —
+    # a length check pinned to the old count silently blanks pane identity,
+    # which is what suspend/restart verify against.
+    assert (by_name["alpha"].pane_id, by_name["alpha"].pane_command) == ("%1", "claude")
+    rows[0][9], rows[0][10] = "1", "1"  # dead + suspended
+    dead = {s.name: s for s in client.list_sessions()}["alpha"]
+    assert (dead.pane_dead, dead.suspended) == (True, True)

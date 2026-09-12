@@ -43,6 +43,7 @@ _LIST_FORMAT = _FIELD_SEP.join(
         "#{pane_id}",
         "#{pane_dead}",
         "#{@cagents_suspended}",
+        "#{window_index}",
     ]
 )
 
@@ -62,6 +63,12 @@ class TmuxSession:
     pane_id: str = ""
     pane_dead: bool = False
     suspended: bool = False
+    # A session is created around its agent in window 0; the terminal tab is
+    # window 1 (renumber-windows is off, so 0 stays 0). An agent that exits on
+    # its own — `/exit`, not a suspend, so no retained pane — closes window 0
+    # while the terminal window keeps the session alive. False means exactly
+    # that husk: tagged with the id, first pane a live shell, hosting nothing.
+    has_root_window: bool = True
 
     @property
     def is_view(self) -> bool:
@@ -181,11 +188,17 @@ class TmuxClient:
             self._scroll_configured.discard(socket)
             return []  # no server on this socket — normal
         sessions: dict[str, TmuxSession] = {}
+        root_windows: dict[str, bool] = {}  # name -> a pane in window 0 was listed
         for line in proc.stdout.splitlines():
             parts = line.split(_FIELD_SEP)
-            if len(parts) not in (7, 8, 11):
+            if len(parts) not in (7, 8, 11, 12):
                 continue
             name, created, activity, attached, pane_pid, pane_path, group = parts[:7]
+            window = parts[11] if len(parts) == 12 else ""
+            if window.isdigit():
+                # Recorded before the first-pane shortcut below, so every
+                # pane of the session is seen, not just the one we keep.
+                root_windows[name] = root_windows.get(name, False) or window == "0"
             if name in sessions:
                 continue  # first pane per session is enough
             try:
@@ -199,14 +212,16 @@ class TmuxClient:
                     socket=socket,
                     group=group,
                     pane_command=parts[7] if len(parts) >= 8 else "",
-                    pane_id=parts[8] if len(parts) == 11 else "",
-                    pane_dead=parts[9] == "1" if len(parts) == 11 else False,
-                    suspended=parts[10] == "1" if len(parts) == 11 else False,
+                    pane_id=parts[8] if len(parts) >= 11 else "",
+                    pane_dead=parts[9] == "1" if len(parts) >= 11 else False,
+                    suspended=parts[10] == "1" if len(parts) >= 11 else False,
                 )
             except ValueError:
                 continue
         found = list(sessions.values())
         for sess in found:
+            if sess.name in root_windows:
+                sess.has_root_window = root_windows[sess.name]
             key = (socket, sess.name, sess.created)
             if key not in self._env_cache:
                 self._env_cache[key] = self.get_session_env(
