@@ -765,6 +765,11 @@ def map_tmux_sessions(
     tmux session was created (otherwise it's an older conversation that
     happens to share the directory).
     """
+    # A husk — the agent's window 0 gone, only the terminal tab keeping the
+    # session alive — hosts nothing, not even its own id. Its pane is a live
+    # shell, so pane_dead cannot see this; without it the row reads live and
+    # Enter attaches to that shell instead of resuming the conversation.
+    tmux_sessions = [t for t in tmux_sessions if t.has_root_window]
     result: dict[str, TmuxSession] = {}
     claimed: set[str] = set()
 
