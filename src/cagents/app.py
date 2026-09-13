@@ -473,11 +473,20 @@ class CagentsApp(App):
             self._flush_interactions()
 
     def on_session_interacted(self, event: SessionInteracted) -> None:
-        self._interact_session(event.session_id)
+        self._interact_session(event.session_id, explicit=event.explicit)
 
-    def _interact_session(self, session_id: str) -> None:
+    def _interact_session(self, session_id: str, explicit: bool = False) -> None:
         self._record_interaction(session_id)
         if self._restart_all_pending:
+            return
+        if explicit:
+            # A click selects the row, and selection attaches (OptionSelected
+            # -> _attach), which resumes or wakes it — once. Starting it here
+            # as well put a second CLI on the same transcript.
+            return
+        if not self.store.get_setting("wake_on_browse"):
+            # Passing over a row (pointer, arrow keys) still feeds the idle
+            # clock above, but starts nothing: only a click or Enter does.
             return
         view = self.snapshot.by_id(session_id)
         if view is None:
@@ -525,9 +534,14 @@ class CagentsApp(App):
             return
         if self._restart_all_pending or view.session_id in self._lifecycle_busy:
             return
-        if view.suspended or (view.state == SessionState.DONE and not view.live):
+        wake_on_browse = bool(self.store.get_setting("wake_on_browse"))
+        if view.suspended or (view.state == SessionState.DONE and not view.live) or (
+            not view.live and not wake_on_browse
+        ):
             from .sidecar import _placeholder
-            command = _placeholder("Conversation suspended. Hover or select it to resume.")
+            what = "Conversation suspended." if view.suspended else "Not running."
+            how = "Hover or select it to resume." if wake_on_browse else "Press Enter to resume it."
+            command = _placeholder(f"{what} {how}")
             if command != self._viewer_target:
                 self.sidecar.show_viewer(command)
                 self._viewer_target = command

@@ -610,6 +610,14 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Off by default: all three become needs review.",
     ),
     (
+        "wake_on_browse",
+        "Wake on browse",
+        "Passing over a row — the pointer, or arrow keys moving the highlight — "
+        "starts its agent if it isn't running. Off: only a click or Enter starts "
+        "anything; a dead row's pane says so instead. On by default. With a long "
+        "list of mostly idle conversations, off is what keeps suspension meaningful.",
+    ),
+    (
         "time_ordered_queue",
         "Time-ordered queue",
         "All states rank equally; sessions rise to the top only when their state "

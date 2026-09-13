@@ -84,6 +84,12 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Treat finished turns with lingering tasks as needs-review unless the
     # user opts into separate monitoring/background/shell-running states.
     "background_activity_states": False,
+    # Passing over a row — the pointer, or the highlight moving across it —
+    # starts its agent if it isn't running (a suspended one is woken, a
+    # done one resumed). Off: only a click or Enter starts anything, and a
+    # dead row's pane says so. On by default; with a long list of mostly
+    # idle conversations, off is what keeps suspension meaningful.
+    "wake_on_browse": True,
     "auto_done_duration": "7d",
     "conversation_title_width": 22,
     # Verbose debug trace (keys, clicks, tmux commands, state changes)

@@ -79,10 +79,10 @@ class SessionList(OptionList):
         if getattr(self.app, "compact", False) and isinstance(self.parent, (GroupedView, QueueView)):
             self.parent.update_snapshot(self.parent.snapshot)
 
-    def _interacted(self) -> None:
+    def _interacted(self, explicit: bool = False) -> None:
         sid = self.highlighted_session_id
         if sid:
-            self.post_message(SessionInteracted(sid))
+            self.post_message(SessionInteracted(sid, explicit))
 
     def on_mouse_move(self, event) -> None:
         index = event.style.meta.get("option")
@@ -102,7 +102,7 @@ class SessionList(OptionList):
             self.call_after_refresh(self._interacted)
 
     def on_click(self, event) -> None:
-        self.call_after_refresh(self._interacted)
+        self.call_after_refresh(lambda: self._interacted(explicit=True))
 
     def rebuild(self, options: list[Option], keep_id: str | None) -> None:
         """Patch stable rows in place; rebuild only when membership/order changes.
@@ -162,11 +162,14 @@ class SessionList(OptionList):
 
 
 class SessionInteracted(Message):
-    """Explicit mouse/keyboard input; distinct from a periodic re-highlight."""
+    """Mouse/keyboard input on a row; distinct from a periodic re-highlight.
+    `explicit` is a click — a deliberate choice of that row — as opposed to
+    the pointer passing over it or the highlight moving across it."""
 
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
+    def __init__(self, session_id: str, explicit: bool = False) -> None:
         super().__init__()
+        self.session_id = session_id
+        self.explicit = explicit
 
 
 class SelectionChanged(Message):
