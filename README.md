@@ -80,6 +80,9 @@ tools remain working until there is evidence that the turn ended or needs input.
 | done | a human accepted the result | reviewed at/after the last activity |
 | stopped | ended without completing | no live tmux session and the transcript ends mid-turn |
 
+The provider mark on each row (`✳` Claude, `›` Codex) is lit while a process is running
+for that conversation and dim when nothing is; Enter resumes a dim one.
+
 Liveness comes from tmux: sessions started through `cagents` carry a `CAGENTS_SESSION_ID`
 tmux environment variable and map back exactly; sessions started outside it are matched by
 working directory + transcript recency.
