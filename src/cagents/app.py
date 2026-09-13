@@ -209,6 +209,13 @@ class CagentsApp(App):
         self._restart_all_pending = False
         self._lifecycle_busy: set[str] = set()
         self._wake_after_stop: set[str] = set()
+        # Preview resumes started by an interaction and not yet seen live by a
+        # snapshot. Interactions arrive per hover motion event and per queued
+        # keypress callback; without this, every one of them re-cleared the
+        # once-per-id guard and spawned another CLI onto the same transcript
+        # (eight in one second, seen live). Cleared by the first snapshot that
+        # shows the row live, so a later death + revisit resumes again.
+        self._preview_resuming: set[str] = set()
         self._interaction_dirty = False
         self._idle_poll_running = False
 
@@ -451,6 +458,8 @@ class CagentsApp(App):
         from .lifecycle import last_interaction
         changed = False
         for view in snapshot.views:
+            if view.live:
+                self._preview_resuming.discard(view.session_id)
             tracked = self.store.sessions.get(view.session_id)
             if tracked is None:
                 continue
@@ -490,8 +499,11 @@ class CagentsApp(App):
         elif view.auto_done:
             self.refresh_data()
         elif not view.live and view.state == SessionState.DONE and self.sidecar is not None:
+            if session_id in self._preview_resuming:
+                return  # already on its way; the next refresh will show it live
             self._resumed_for_preview.discard(session_id)
-            self._resume_for_preview(view)
+            if self._resume_for_preview(view):
+                self._preview_resuming.add(session_id)
 
     # -- the viewer pane (sidecar) ---------------------------------------------
 
@@ -625,7 +637,7 @@ class CagentsApp(App):
         except Exception:
             pass
 
-    def _resume_for_preview(self, view: SessionView) -> None:
+    def _resume_for_preview(self, view: SessionView) -> bool:
         """Lazily resume a dead session's real CLI the moment you settle
         on it while browsing. Silent on the expected edge cases (running
         elsewhere, missing transcript, no project dir) — those get loud
@@ -635,22 +647,23 @@ class CagentsApp(App):
         next snapshot to reflect the result rather than retrying on every
         subsequent settle."""
         if view.suspended or self._restart_all_pending or view.session_id in self._lifecycle_busy:
-            return
+            return False
         if view.session_id in self._resumed_for_preview:
-            return
+            return False
         self._resumed_for_preview.add(view.session_id)
         name, _reason, _severity = self._resume_target(view)
         if name is None:
-            return
+            return False
         self.refresh_data()  # so the list picks up "live" as soon as possible
         if view.session_id != self.selected_session_id:
-            return  # hover may resume a Done conversation in the background
+            return True  # hover may resume a Done conversation in the background
         command = self._attach_command(self.tmux.create_socket, name)
         try:
             self.sidecar.show_viewer(command)
             self._viewer_target = command
         except Exception as error:
             self.notify(f"Viewer failed: {error}", severity="error")
+        return True
 
     def _update_preview(self) -> None:
         """The in-app preview — only rendered when there is no sidecar."""

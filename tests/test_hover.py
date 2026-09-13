@@ -109,3 +109,31 @@ def test_background_hover_resume_does_not_reattach_the_visible_pane(tmp_path, mo
     assert suspended.live and not suspended.suspended
     assert app._viewer_target == ("" if selected else "visible-first")
     assert sync.call_count == int(selected)
+
+
+@pytest.mark.parametrize("events", [2, 8])
+def test_repeated_interactions_on_a_dead_done_row_resume_it_once(tmp_path, monkeypatch, events):
+    """Seen live: eight `claude --resume` processes on one conversation inside
+    a second. Every hover motion event (and every queued keypress callback)
+    posts an interaction; for a done-but-dead row _interact_session cleared
+    the once-per-id guard before resuming, and nothing recorded that a resume
+    was already in flight — the row only reads live after the next refresh
+    lands, which under load is many motion events later. Repeats before that
+    must be no-ops; a genuine revisit after the session is seen live (and
+    later dies again) may resume again."""
+    app, (first, done) = hover_app(tmp_path, monkeypatch)
+    done.live, done.state = False, SessionState.DONE
+    app.selected_session_id = first.session_id
+    app.sidecar = Mock()
+    resume = Mock(return_value=("resumed-agent", "", ""))
+    monkeypatch.setattr(app, "_resume_target", resume)
+    for _ in range(events):
+        app._interact_session(done.session_id)
+    resume.assert_called_once_with(done)
+    # The next snapshot shows it live: the in-flight mark clears, so a later
+    # death followed by a revisit resumes again (his original intent).
+    done.live = True
+    app._persist_lifecycle(app.snapshot)
+    done.live = False
+    app._interact_session(done.session_id)
+    assert resume.call_count == 2
