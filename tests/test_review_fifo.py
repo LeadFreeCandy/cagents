@@ -244,3 +244,32 @@ class TestCtrlGBell:
         _app, queue, bells = await self._press(tmp_path, monkeypatch, views, "session-0")
         assert bells == []
         assert queue.highlighted_session_id == "session-1"
+
+
+async def test_ctrl_g_while_pane_is_blurred_does_not_paint_focus(tmp_path, monkeypatch):
+    """Ctrl+G arrives from the chat pane, so the rail app is blurred (tmux
+    focus-events). It must move the highlight without focusing the list —
+    focusing while blurred draws the focused border on an unfocused pane.
+    Focus returns to the list once the pane is focused again."""
+    store = Store(tmp_path / "state.json")
+    app = CagentsApp(store=store, tmux=FakeTmux(), claude_dir=tmp_path / "claude")
+    monkeypatch.setattr(app, "refresh_data", lambda: None)
+    app.snapshot = Snapshot(views=_review_views(store, tmp_path, count=3))
+    async with app.run_test(size=(100, 15)) as pilot:
+        app.query_one(QueueView).update_snapshot(app.snapshot)
+        queue = app.query_one("#queue-list", SessionList)
+        queue.highlighted = queue.get_option_index("session-2")
+        await pilot.pause()
+        app.app_focus = False  # terminal focus went to the conversation pane
+        await pilot.pause()
+        assert app.focused is None
+        # Not pilot.press: the test pilot re-focuses the app on every key,
+        # which a tmux send-keys from another pane never does.
+        app.action_queue_top()
+        await pilot.pause()
+        assert app.active_view_id == "queue"
+        assert queue.highlighted_session_id == "session-0"
+        assert app.focused is None and not queue.has_focus
+        app.app_focus = True  # focus comes back to the rail
+        await pilot.pause()
+        assert queue.has_focus

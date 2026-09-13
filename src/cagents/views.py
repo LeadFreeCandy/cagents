@@ -267,8 +267,14 @@ class BaseSessionView(Widget):
     def update_snapshot(self, snapshot: Snapshot) -> None:
         raise NotImplementedError
 
-    def focus_list(self) -> None:
+    def focus_target(self) -> "SessionList | None":
+        """The list that focus_list() would focus."""
         raise NotImplementedError
+
+    def focus_list(self) -> None:
+        target = self.focus_target()
+        if target is not None:
+            target.focus()
 
 
 def _empty_option() -> Option:
@@ -330,8 +336,8 @@ class GroupedView(BaseSessionView):
         session_list.rebuild(options, keep_id)
         self._emit_selection(session_list.highlighted_session_id)
 
-    def focus_list(self) -> None:
-        self.query_one("#grouped-list", SessionList).focus()
+    def focus_target(self) -> SessionList:
+        return self.query_one("#grouped-list", SessionList)
 
 
 class QueueView(BaseSessionView):
@@ -379,8 +385,8 @@ class QueueView(BaseSessionView):
         session_list.rebuild(options, keep_id)
         self._emit_selection(session_list.highlighted_session_id)
 
-    def focus_list(self) -> None:
-        self.query_one("#queue-list", SessionList).focus()
+    def focus_target(self) -> SessionList:
+        return self.query_one("#queue-list", SessionList)
 
 
 # Kanban columns: (title, states shown, css id)
@@ -475,12 +481,15 @@ class KanbanView(BaseSessionView):
         column = columns[min(self.active_column, len(columns) - 1)]
         return column.query_one(SessionList).highlighted_session_id
 
-    def focus_list(self) -> None:
+    def focus_target(self) -> SessionList | None:
         columns = self._columns()
         if not columns:
-            return
+            return None
         column = columns[min(self.active_column, len(columns) - 1)]
-        column.query_one(SessionList).focus()
+        return column.query_one(SessionList)
+
+    def focus_list(self) -> None:
+        super().focus_list()
         self._emit_selection(self._current_selection())
 
     def _move_column(self, delta: int) -> None:

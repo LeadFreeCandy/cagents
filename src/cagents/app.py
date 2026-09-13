@@ -706,7 +706,17 @@ class CagentsApp(App):
         self.query_one("#body").set_class(view_id == "kanban", "kanban")
         view = self.current_view()
         view.update_snapshot(self.snapshot)
-        view.focus_list()
+        if self.app_focus:
+            view.focus_list()
+        else:
+            # The key came from another tmux pane (Ctrl-G in the chat): the
+            # rail is blurred and Textual has cleared focus. Focusing now
+            # would paint the focused border on a pane that isn't focused;
+            # instead queue the list up for when focus returns to the rail
+            # (Textual restores this widget on the next AppFocus).
+            target = view.focus_target()
+            if target is not None:
+                self._last_focused_on_app_blur = target
 
     def action_next_view(self) -> None:
         i = VIEW_IDS.index(self.active_view_id)
