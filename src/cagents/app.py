@@ -476,6 +476,12 @@ class CagentsApp(App):
         self._interact_session(event.session_id, explicit=event.explicit)
 
     def _interact_session(self, session_id: str, explicit: bool = False) -> None:
+        if not explicit and not self.store.get_setting("wake_on_browse"):
+            # Passing over a row (pointer, arrow keys) is inert: it starts
+            # nothing and doesn't count as touching the row, or a pointer
+            # sweep would reset the idle clock — and defer suspension — for
+            # every row it crossed. Only a click or Enter touches a row.
+            return
         self._record_interaction(session_id)
         if self._restart_all_pending:
             return
@@ -483,10 +489,6 @@ class CagentsApp(App):
             # A click selects the row, and selection attaches (OptionSelected
             # -> _attach), which resumes or wakes it — once. Starting it here
             # as well put a second CLI on the same transcript.
-            return
-        if not self.store.get_setting("wake_on_browse"):
-            # Passing over a row (pointer, arrow keys) still feeds the idle
-            # clock above, but starts nothing: only a click or Enter does.
             return
         view = self.snapshot.by_id(session_id)
         if view is None:

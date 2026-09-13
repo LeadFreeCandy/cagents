@@ -133,10 +133,13 @@ async def test_wake_on_browse_off_only_click_or_enter_starts_a_row(tmp_path, mon
         await pilot.pause(0.3)
         assert listing.highlighted_session_id == done.session_id
         assert resume.call_count == 0, "arrowing onto it started it"
-        assert done.tracked.last_interacted_at  # the idle clock still notices you
+        # Inert means inert: passing over a row must not reset its idle
+        # clock either, or a pointer sweep defers every row's suspension.
+        assert not done.tracked.last_interacted_at
         await pilot.click(listing, offset=offset)
         await pilot.pause(0.3)
         assert resume.call_count == 1, "click must start it"
+        assert done.tracked.last_interacted_at  # a click is a real touch
 
 
 async def test_wake_on_browse_off_enter_still_resumes(tmp_path, monkeypatch):
