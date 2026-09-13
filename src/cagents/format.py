@@ -92,9 +92,15 @@ def session_style(view: SessionView) -> tuple[str, str, str]:
     return glyph, style, label
 
 
-def provider_icon(provider: str) -> Text:
-    """Text-presentation glyphs that each occupy one terminal cell."""
-    return Text("›", style="cyan") if provider == "codex" else Text("✳", style="dark_orange")
+def provider_icon(provider: str, live: bool = True) -> Text:
+    """Text-presentation glyphs that each occupy one terminal cell.
+
+    The mark doubles as the residency indicator: lit while a CLI process is
+    resident for the row, dimmed when nothing is running (Enter resumes).
+    State names attention, not residency — a done row may be either — and
+    ☾ marks only cagents' own suspensions; this is the one cue for the rest."""
+    glyph, colour = ("›", "cyan") if provider == "codex" else ("✳", "dark_orange")
+    return Text(glyph, style=colour if live else "dim")
 
 
 # Jira columns (session_row / jira_header must stay in lockstep on width).
@@ -170,7 +176,7 @@ def session_row(
     )
     row.append(f"{label:<{widths.state}}", style=style)
     row.append(" ")
-    row.append_text(provider_icon(view.provider))
+    row.append_text(provider_icon(view.provider, live=view.live))
     row.append(f"{human_age(view.last_activity, now):>4} ", style="dim")
     if show_jira:
         row.append(f"{view.jira_key or '—':<{JIRA_KEY_WIDTH}}", style="dim magenta" if view.jira_key else "dim")
@@ -226,7 +232,7 @@ def kanban_card(view: SessionView, now: datetime | None = None) -> Text:
     glyph, style, _ = session_style(view)
     card = Text()
     card.append(f"{glyph} ", style=style)
-    card.append_text(provider_icon(view.provider))
+    card.append_text(provider_icon(view.provider, live=view.live))
     card.append(" ")
     card.append(_truncate(view.title, 60), style="bold")
     card.append("\n  ")
