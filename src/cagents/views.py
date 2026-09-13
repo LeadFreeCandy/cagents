@@ -98,7 +98,12 @@ class SessionList(OptionList):
     def on_key(self, event) -> None:
         # Navigation is applied by OptionList's key handler. Rebuilds never
         # pass through here, so a timer cannot masquerade as human input.
-        if event.key in ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right"):
+        if event.key == "right":
+            # → walks into the conversation: explicit, like a click. The app's
+            # binding attaches (and starts a dormant row) — once; the
+            # interaction must not start it a second time.
+            self.call_after_refresh(lambda: self._interacted(explicit=True))
+        elif event.key in ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left"):
             self.call_after_refresh(self._interacted)
 
     def on_click(self, event) -> None:

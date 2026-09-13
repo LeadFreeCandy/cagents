@@ -729,12 +729,21 @@ class CagentsApp(App):
 
     def action_grow_session(self) -> None:
         """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
-        focus moves into the session, the rail collapses via the tmux hook."""
-        if self.sidecar is not None:
+        focus moves into the session, the rail collapses via the tmux hook.
+
+        Walking in is entering the conversation, so this is the attach path
+        (as Enter is): a dormant row is started, the visit is recorded, and
+        a live one is shown and focused. Merely moving focus left a dormant
+        row's placeholder on screen and its idle clock untouched."""
+        if self.sidecar is None:
+            return
+        if self.selected_view() is None:
             try:
                 self.sidecar.focus_session()
             except Exception as error:
                 self.notify(f"Layout failed: {error}", severity="warning")
+            return
+        self._attach()
 
     # -- attaching (the core of the core loop) ---------------------------------
 
