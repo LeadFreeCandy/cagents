@@ -115,6 +115,20 @@ or workspace tab, including full-width chat. Focus returns to the queue; press
 Enter to enter that conversation. With the list focused, `g` / `G` jump to its
 first / last conversation.
 
+Needs-review conversations line up oldest first, and `Ctrl+G` from one of them
+counts it as looked at: it goes to the back of the line, so repeated `Ctrl+G`
+walks the whole review backlog in order. The terminal bell rings when there is
+no other conversation needing you to go to. The setting "Review oldest first"
+turns this off (newest response on top, no re-queueing). `Ctrl+G` never moves
+focus or resizes the split: the conversation pane keeps its width (or full
+width) and simply starts showing the queue's first conversation.
+
+Done conversations go to sleep after an hour idle, and browsing past one in the
+list never wakes it — only `Enter` or `→` on it does, so scrolling a long done
+list costs no memory. `:sleep` puts every idle conversation to sleep right now;
+visiting a row wakes it again (a done one on `Enter` / `→`). Conversations
+still working are left alone.
+
 ## Install / run
 
 ```sh

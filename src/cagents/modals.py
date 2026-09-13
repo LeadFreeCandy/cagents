@@ -402,6 +402,8 @@ HELP_TEXT = """\
 
 [bold cyan]Navigate[/bold cyan]
   ctrl+g        return to the first conversation in the queue, even from chat
+                (a needs-review conversation left this way goes to the back
+                of the review line; bell = nothing else needs you)
   g / G         first / last conversation while the list has focus
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
@@ -490,10 +492,13 @@ class CommandModal(ModalScreen[str | None]):
             yield Label(": command")
             yield Static(
                 "restart — restart running tracked agents and cagents. "
-                "Interrupts current work; preserves history. Suspended sessions stay asleep.",
+                "Interrupts current work; preserves history. Suspended sessions stay asleep.\n"
+                "sleep — put every idle conversation to sleep now (frees memory). "
+                "Visiting a row wakes it again; a done one wakes on Enter or →. "
+                "Conversations still working are left alone.",
                 classes="hint",
             )
-            yield Input(placeholder="restart")
+            yield Input(placeholder="restart | sleep")
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
@@ -607,7 +612,7 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Auto done duration",
         "Mark idle conversations Done (auto). Default 7d; applies to existing history. "
         "Enter cycles; off disables. New input reopens auto-done conversations. "
-        "Done conversations suspend after 1h idle; hover or select to resume.",
+        "Done conversations sleep after 1h idle; Enter or → wakes one.",
     ),
     (
         "background_activity_states",
@@ -621,6 +626,13 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "All states rank equally; sessions rise to the top only when their state "
         "changes (e.g. working → needs review). Keeps active work above a backlog "
         "of stale unreviewed sessions.",
+    ),
+    (
+        "review_oldest_first",
+        "Review oldest first",
+        "Needs-review conversations line up oldest first (a FIFO queue), and Ctrl+G on "
+        "one sends it to the back of the line. Off: newest response on top. Ignored "
+        "while Time-ordered queue is on.",
     ),
     (
         "debug_log",

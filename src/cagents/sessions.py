@@ -188,6 +188,12 @@ class SessionView:
     # stays put while nothing meaningful has changed, only reshuffling
     # when a rank actually changes. See SessionRegistry._state_since.
     rank_stable_since: float = 0.0
+    # review_oldest_first (and not time_ordered_queue): NEEDS_REVIEW rows sort
+    # as a FIFO line by max(last response, review_bumped_at) — see
+    # views.attention_sort_key. Copied onto the view so the sort key stays a
+    # pure function of the row.
+    review_fifo: bool = False
+    review_bumped_at: float = 0.0  # epoch seconds of tracked.review_bumped_at
     auto_done: bool = False
     done_at: float = 0.0
     suspended: bool = False
@@ -1026,7 +1032,8 @@ class SessionRegistry:
             view.rank_stable_since = view.done_at if view.state == SessionState.DONE else self._state_since[tracked.session_id]
             view.did_line, view.needs_line = derive_did_needs(view.state, view.state_detail, parsed, pane_text)
             if suspended:
-                view.state_detail += " · suspended — hover to resume"
+                view.state_detail += (" · asleep — Enter to resume" if view.state == SessionState.DONE
+                                      else " · asleep — select to resume")
             views.append(view)
 
         # Lineage: resolve forks/handoffs against what's visible.
@@ -1058,13 +1065,19 @@ class SessionRegistry:
         # a new message arriving, ...). Active work stays near the top; a
         # backlog of long-unreviewed sessions sinks instead of pinning
         # itself above everything by state alone.
+        review_fifo = bool(self.store.get_setting("review_oldest_first"))
         if self.store.get_setting("time_ordered_queue"):
+            review_fifo = False
             for view in views:
                 view.attention_rank = 0
         else:
             rank_map = attention_rank_map(self.store.get_setting("state_order"))
             for view in views:
                 view.attention_rank = rank_map[view.state]
+        from .lifecycle import timestamp
+        for view in views:
+            view.review_fifo = review_fifo
+            view.review_bumped_at = timestamp(view.tracked.review_bumped_at)
 
         # Stable, human-friendly default order: project, then newest first.
         views.sort(

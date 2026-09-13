@@ -482,10 +482,16 @@ class CagentsApp(App):
         self._interact_session(event.session_id)
 
     def _interact_session(self, session_id: str) -> None:
+        """Hover / keyboard visit / click on a row. Wakes a sleeping
+        conversation — EXCEPT a Done one: scrolling down a long done list
+        must not spin up (or reopen) one CLI per row. Done conversations
+        wake only on Enter or → (_attach / action_grow_session)."""
+        view = self.snapshot.by_id(session_id)
+        if view is not None and view.state == SessionState.DONE:
+            return
         self._record_interaction(session_id)
         if self._restart_all_pending:
             return
-        view = self.snapshot.by_id(session_id)
         if view is None:
             return
         if session_id in self._lifecycle_busy:
@@ -493,11 +499,6 @@ class CagentsApp(App):
             return
         if view.suspended:
             self._begin_lifecycle(view, "resume")
-        elif view.auto_done:
-            self.refresh_data()
-        elif not view.live and view.state == SessionState.DONE and self.sidecar is not None:
-            self._resumed_for_preview.discard(session_id)
-            self._resume_for_preview(view)
 
     # -- the viewer pane (sidecar) ---------------------------------------------
 
@@ -533,7 +534,11 @@ class CagentsApp(App):
             return
         if view.suspended or (view.state == SessionState.DONE and not view.live):
             from .sidecar import _placeholder
-            command = _placeholder("Conversation suspended. Hover or select it to resume.")
+            command = _placeholder(
+                "Conversation asleep. Press Enter or → to wake it."
+                if view.state == SessionState.DONE else
+                "Conversation asleep. Select it to wake it."
+            )
             if command != self._viewer_target:
                 self.sidecar.show_viewer(command)
                 self._viewer_target = command
@@ -708,18 +713,47 @@ class CagentsApp(App):
         self.action_switch_view(VIEW_IDS[(i + 1) % len(VIEW_IDS)])
 
     def action_queue_top(self) -> None:
-        """Return from any view to the first conversation in queue order."""
+        """Return from any view to the first conversation in queue order.
+
+        With review_oldest_first, a needs-review conversation being left this
+        way counts as looked at: it goes to the back of the review line, so
+        repeated Ctrl+G walks the whole backlog oldest-first. Rings the bell
+        when there is no OTHER conversation in an alert state to go to."""
         from .views import SessionList
 
+        current = self.selected_view()
+        somewhere_to_go = any(
+            v.state in ALERT_STATES and (current is None or v.session_id != current.session_id)
+            for v in self.snapshot.views
+        )
+        if (
+            current is not None
+            and current.state == SessionState.NEEDS_REVIEW
+            and current.review_fifo
+        ):
+            now = utcnow()
+            self.store.bump_review(current.session_id, now.isoformat())
+            current.review_bumped_at = now.timestamp()
+            for view_id in VIEW_IDS:
+                self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
+        if not somewhere_to_go:
+            self.bell()
         self.action_switch_view("queue")
         listing = self.query_one("#queue-list", SessionList)
         listing.action_first()
-        if listing.highlighted_session_id:
-            self._record_interaction(listing.highlighted_session_id)
+        landed = self.snapshot.by_id(listing.highlighted_session_id or "")
+        if landed is not None and landed.state != SessionState.DONE:
+            self._record_interaction(landed.session_id)
 
     def action_grow_session(self) -> None:
         """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
-        focus moves into the session, the rail collapses via the tmux hook."""
+        focus moves into the session, the rail collapses via the tmux hook.
+        On a sleeping (or dead) conversation it is the other explicit wake
+        key besides Enter: resume it, then walk in."""
+        view = self.selected_view()
+        if view is not None and (view.suspended or not view.live):
+            self._attach()
+            return
         if self.sidecar is not None:
             try:
                 self.sidecar.focus_session()
@@ -2338,8 +2372,11 @@ exec {shlex.quote(real)} "$@"
         return bool(view and should_suspend(view, time.time()))
 
     def _replace_instance(self, view: SessionView, operation: str) -> bool:
-        command, directory = (None, "") if operation == "suspend" else self._resume_command(view)
-        if operation != "suspend" and view.missing:
+        """operation: "suspend" (idle policy, re-validated), "sleep" (:sleep —
+        an explicit request, so no idle check), "resume" or "restart"."""
+        sleeping = operation in ("suspend", "sleep")
+        command, directory = (None, "") if sleeping else self._resume_command(view)
+        if not sleeping and view.missing:
             raise RuntimeError("No saved conversation to resume yet; start the agent in its terminal.")
         if operation == "resume" and not view.tmux_name:
             name, reason, _ = self._resume_target(view)
@@ -2347,12 +2384,12 @@ exec {shlex.quote(real)} "$@"
                 raise RuntimeError(reason)
             view.tmux_name, view.tmux_socket = name, self.tmux.create_socket
             return True
-        if operation == "suspend":
+        if sleeping:
             # A new transcript write since the snapshot makes this decision
             # obsolete. Give the next refresh a chance to classify that work.
             if view.parsed and view.parsed.path.is_file() and view.parsed.path.stat().st_mtime > view.parsed.mtime:
                 raise RuntimeError("Conversation changed; suspension deferred.")
-            if not self.call_from_thread(self._suspend_still_valid, view.session_id):
+            if operation == "suspend" and not self.call_from_thread(self._suspend_still_valid, view.session_id):
                 return False
         if view.provider == "codex" and view.live:
             import shlex
@@ -2390,6 +2427,8 @@ exec {shlex.quote(real)} "$@"
                     operation = "cancel"
         except Exception as exc:
             error = str(exc)
+        if operation == "sleep":
+            operation = "suspend"  # same end state and bookkeeping as an idle suspend
         self.call_from_thread(self._lifecycle_finished, view, operation, focus, error)
 
     def _lifecycle_finished(self, view: SessionView, operation: str, focus: bool, error: str) -> None:
@@ -2448,6 +2487,38 @@ exec {shlex.quote(real)} "$@"
         self.notify(f"Restarting {view.title}…")
         self._begin_lifecycle(view, "resume" if view.suspended else "restart")
 
+    # States whose agent is mid-flight: :sleep leaves these alone rather than
+    # killing work in progress. Re-run it once they have finished.
+    _BUSY_STATES = (SessionState.WORKING, SessionState.SHELL_RUNNING,
+                    SessionState.MONITORING, SessionState.BACKGROUND)
+
+    def action_sleep_all(self) -> None:
+        """:sleep — park every idle live conversation now (memory), without
+        waiting for the 1h idle policy. Each wakes when you visit its row
+        again; a Done one only on Enter / → (see _interact_session)."""
+        if self._restart_all_pending:
+            self.notify("Wait for :restart to finish, then retry :sleep.", severity="warning")
+            return
+        self._flush_interactions()
+        slept = busy = 0
+        for view in self.snapshot.views:
+            if not view.live or view.suspended or view.missing or not view.tmux_name:
+                continue
+            if view.session_id in self._lifecycle_busy:
+                continue
+            if view.state in self._BUSY_STATES:
+                busy += 1
+                continue
+            self._begin_lifecycle(view, "sleep")
+            slept += 1
+        if not slept:
+            message = "Nothing to put to sleep."
+        else:
+            message = f"Putting {slept} conversation{'s' if slept != 1 else ''} to sleep."
+        if busy:
+            message += f" {busy} still working — left alone."
+        self.notify(message, severity="warning" if busy else "information")
+
     def action_restart_all(self) -> None:
         if self._restart_all_pending or self._lifecycle_busy:
             self.notify("Wait for the current session operation to finish, then retry :restart.", severity="warning")
@@ -2501,10 +2572,13 @@ exec {shlex.quote(real)} "$@"
     def _command_submitted(self, command: str | None) -> None:
         if not command:
             return
-        if command.strip().removeprefix(":") == "restart":
+        name = command.strip().removeprefix(":")
+        if name == "restart":
             self.action_restart_all()
+        elif name == "sleep":
+            self.action_sleep_all()
         else:
-            self.notify(f"Unknown command: {command}. Available: restart", severity="warning")
+            self.notify(f"Unknown command: {command}. Available: restart, sleep", severity="warning")
 
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))

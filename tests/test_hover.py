@@ -80,7 +80,10 @@ async def test_hover_keeps_selection_and_viewer_until_click_or_keyboard(tmp_path
 
 
 @pytest.mark.parametrize("selected", [False, True])
-def test_hover_resumes_stopped_done_without_showing_an_unselected_conversation(tmp_path, monkeypatch, selected):
+def test_hover_leaves_a_stopped_done_conversation_alone(tmp_path, monkeypatch, selected):
+    """Browsing past a Done conversation (stopped or asleep) never resumes
+    it, records no interaction, and never touches the viewer — Enter / →
+    are the only wake keys, so a long done list costs no memory."""
     app, (first, done) = hover_app(tmp_path, monkeypatch)
     done.live, done.state = False, SessionState.DONE
     app.selected_session_id = done.session_id if selected else first.session_id
@@ -89,12 +92,17 @@ def test_hover_resumes_stopped_done_without_showing_an_unselected_conversation(t
     resume = Mock(return_value=("resumed-agent", "", ""))
     monkeypatch.setattr(app, "_resume_target", resume)
     app._interact_session(done.session_id)
+    resume.assert_not_called()
+    assert not done.tracked.last_interacted_at
+    assert app.selected_session_id == (done.session_id if selected else first.session_id)
+    assert app.sidecar.show_viewer.call_count == 0
+    assert app._viewer_target == "visible-first"
+    # The explicit path still resumes it.
+    app.selected_session_id = done.session_id
+    monkeypatch.setattr(app, "_show_new_session", Mock())
+    app.action_grow_session()
     resume.assert_called_once_with(done)
     assert done.tracked.last_interacted_at
-    assert app.selected_session_id == (done.session_id if selected else first.session_id)
-    assert app.sidecar.show_viewer.call_count == int(selected)
-    if not selected:
-        assert app._viewer_target == "visible-first"
 
 
 @pytest.mark.parametrize("selected", [False, True])

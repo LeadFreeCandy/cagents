@@ -162,7 +162,7 @@ def test_selection_survives_release_and_unicode_paste_preserves_draft(terminal, 
     assert d.run(["display-message", "-p", "-t", a.pane_id, "#{pane_in_mode}"]) == "0"
 
 
-def test_ctrl_g_from_zoomed_agent_reaches_queue_only(terminal):
+def test_ctrl_g_from_zoomed_agent_reaches_queue_without_unzooming(terminal):
     t, d = terminal, terminal.d
     a, received = t.agent()
     rail_keys = d.path / "rail-keys"
@@ -173,9 +173,11 @@ def test_ctrl_g_from_zoomed_agent_reaches_queue_only(terminal):
     d.run(["respawn-pane", "-k", "-t", d.rail, shlex.join([sys.executable, str(recorder), str(rail_keys)])])
     d.run(queue_top_binding())
     d.sidecar.hide_rail()
+    before = d.run(["display-message", "-p", "#{pane_id}:#{window_zoomed_flag}"])
+    assert before.endswith(":1") and not before.startswith(d.rail)
     t.write(b"\x07")
-    assert d.run(["display-message", "-p", "#{pane_id}:#{window_zoomed_flag}"]) == d.rail + ":0"
     eventually(lambda: rail_keys.exists() and rail_keys.read_bytes() == b"\x07")
+    assert d.run(["display-message", "-p", "#{pane_id}:#{window_zoomed_flag}"]) == before
     assert received.read_bytes() == b""
 
 

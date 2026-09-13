@@ -684,9 +684,11 @@ def apply_dim_chat(enable: bool, runner=None) -> None:
 
 
 def queue_top_binding() -> list[str]:
-    return ["bind", "-n", "C-g",
-            "if -F '#{window_zoomed_flag}' 'resize-pane -Z' ; "
-            "select-pane -t :.0 ; send-keys -t :.0 C-g"]
+    """Ctrl+G anywhere in the container: hand the key to the rail app and
+    nothing else. No select-pane (the focus hook would re-size the split)
+    and no un-zoom: the conversation pane keeps its focus and its width,
+    and simply starts showing the queue's first conversation."""
+    return ["bind", "-n", "C-g", "send-keys -t :.0 C-g"]
 
 
 def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:

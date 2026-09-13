@@ -81,6 +81,11 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # sessions bubble up only when their state CHANGES (working -> review,
     # etc.), so recent activity beats a pile of stale needs-review rows.
     "time_ordered_queue": False,
+    # Needs-review is a FIFO line: the longest-waiting response on top, and
+    # Ctrl+G on a needs-review conversation sends it to the back. Off: the
+    # historical order, newest response on top. Ignored while
+    # time_ordered_queue is on (that mode owns the whole ordering).
+    "review_oldest_first": True,
     # Treat finished turns with lingering tasks as needs-review unless the
     # user opts into separate monitoring/background/shell-running states.
     "background_activity_states": False,
@@ -173,6 +178,11 @@ class TrackedSession:
     suspended_at: str = ""  # agent stopped; explicit interaction may resume it
     idle_stopped_at: str = ""  # ignore Codex's own shutdown event as new work
     idle_activity_at: str = ""  # conversation clock immediately before that stop
+    # Ctrl+G from a needs-review conversation: the user has looked at it and
+    # moved on without accepting it, so with review_oldest_first it goes to
+    # the back of the review line. A timestamp so a later response (or a
+    # later bump) naturally wins — see views.attention_sort_key.
+    review_bumped_at: str = ""  # ISO 8601
 
     @property
     def provider(self) -> str:
@@ -221,6 +231,7 @@ class TrackedSession:
             "suspended_at": self.suspended_at,
             "idle_stopped_at": self.idle_stopped_at,
             "idle_activity_at": self.idle_activity_at,
+            "review_bumped_at": self.review_bumped_at,
         }
 
     @classmethod
@@ -251,6 +262,7 @@ class TrackedSession:
             suspended_at=str(data.get("suspended_at", "")),
             idle_stopped_at=str(data.get("idle_stopped_at", "")),
             idle_activity_at=str(data.get("idle_activity_at", "")),
+            review_bumped_at=str(data.get("review_bumped_at", "")),
         )
 
 
@@ -373,6 +385,14 @@ class Store:
         if tracked is not None:
             tracked.reviewed_at = when
             tracked.auto_done_at = ""
+            self.save()
+
+    def bump_review(self, session_id: str, when: str) -> None:
+        """Ctrl+G left this needs-review session without accepting it: send
+        it to the back of the review line (review_oldest_first)."""
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.review_bumped_at = when
             self.save()
 
     def clear_reviewed(self, session_id: str) -> None:

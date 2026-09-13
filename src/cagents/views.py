@@ -35,10 +35,23 @@ def attention_sort_key(view) -> tuple:
     pre-existing session shares one timestamp, and without a further tiebreak
     the review queue silently degrades to project order. last_activity breaks
     that tie — frozen for finished sessions, so "needs review" reads as a real
-    queue: newest response on top."""
+    queue: newest response on top.
+
+    review_fifo (review_oldest_first setting, default on): NEEDS_REVIEW rows
+    are instead a FIFO line — the longest-waiting response first, keyed on
+    the LATER of the last response and review_bumped_at (Ctrl+G sending a
+    looked-at conversation to the back). last_activity rather than
+    rank_stable_since so the order survives an app restart. Every row of the
+    rank shares this key shape (rank is unique per state outside
+    time_ordered_queue, which switches review_fifo off), so it never mixes
+    with the newest-first tuple above."""
+    state = getattr(view, "state", None)
+    if state == SessionState.NEEDS_REVIEW and getattr(view, "review_fifo", False):
+        finished = view.last_activity.timestamp() if view.last_activity else 0.0
+        return (view.attention_rank, max(finished, getattr(view, "review_bumped_at", 0.0)), 0.0)
     return (
         view.attention_rank,
-        -(view.done_at if getattr(view, "state", None) == SessionState.DONE else view.rank_stable_since),
+        -(view.done_at if state == SessionState.DONE else view.rank_stable_since),
         -(view.last_activity.timestamp() if view.last_activity else 0.0),
     )
 
@@ -95,11 +108,40 @@ class SessionList(OptionList):
         # the selected one. OptionList handles selection on click/key input.
         self.post_message(SessionInteracted(option.id))
 
+    _NAV_KEYS = ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right")
+
     def on_key(self, event) -> None:
         # Navigation is applied by OptionList's key handler. Rebuilds never
         # pass through here, so a timer cannot masquerade as human input.
-        if event.key in ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right"):
-            self.call_after_refresh(self._interacted)
+        if event.key not in self._NAV_KEYS:
+            return
+        if self._key_moves_highlight(event.key):
+            # The highlight moves AFTER this handler (and after the next
+            # refresh), so reading it now would report the row being LEFT.
+            # The visit is posted from on_option_list_option_highlighted.
+            self._nav_pending = True
+        else:
+            self.call_after_refresh(self._interacted)  # re-visit of the same row
+
+    def _key_moves_highlight(self, key: str) -> bool:
+        index, count = self.highlighted, self.option_count
+        if index is None or count == 0:
+            return False
+        if key in ("j", "down", "pagedown"):
+            return index < count - 1
+        if key in ("k", "up", "pageup"):
+            return index > 0
+        if key in ("g", "home"):
+            return index != 0
+        if key in ("G", "end"):
+            return index != count - 1
+        return False  # ← / →: kanban columns or the pane size, never this list's row
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if getattr(self, "_nav_pending", False):
+            self._nav_pending = False
+            if event.option.id is not None:
+                self.post_message(SessionInteracted(event.option.id))
 
     def on_click(self, event) -> None:
         self.call_after_refresh(self._interacted)
@@ -110,6 +152,7 @@ class SessionList(OptionList):
         Clearing OptionList resets its scroll and emits transient highlights.
         Avoid both during refreshes and width changes.
         """
+        self._nav_pending = False  # a key that ended up not moving the row
         old_index = self.highlighted
         old_scroll = self.scroll_offset
         same_rows = len(options) == self.option_count and all(
