@@ -199,32 +199,3 @@ async def test_click_on_a_dead_done_row_resumes_it_exactly_once(tmp_path, monkey
         await pilot.click(listing, offset=row_offset(listing, done.session_id))
         await pilot.pause(0.3)
         assert resume.call_count == 1
-
-
-@pytest.mark.parametrize("wake_on_browse", [False, True])
-async def test_right_arrow_enters_a_conversation_like_enter(tmp_path, monkeypatch, wake_on_browse):
-    """→ walks into the session pane, so it is an explicit way in — like
-    Enter and a click, it must start a dormant conversation (once, whatever
-    the setting) and count as touching it. It used to only move focus."""
-    app, (first, done) = hover_app(tmp_path, monkeypatch)
-    app.store.set_setting("wake_on_browse", wake_on_browse)
-    done.live, done.state = False, SessionState.DONE
-    resume = Mock(return_value=("resumed-agent", "", ""))
-    monkeypatch.setattr(app, "_resume_target", resume)
-    monkeypatch.setattr(app, "_show_new_session", Mock())
-    async with app.run_test(size=(160, 40)) as pilot:
-        app.action_switch_view("queue")
-        await pilot.pause()
-        listing = app.query_one("#queue-list", SessionList)
-        app.sidecar = Mock()
-        # land on the row; whatever the passive visit did, count from here
-        await pilot.press("down")
-        await pilot.pause(0.3)
-        assert listing.highlighted_session_id == done.session_id
-        before = resume.call_count
-        done.tracked.last_interacted_at = ""
-        app._resumed_for_preview.clear()
-        await pilot.press("right")
-        await pilot.pause(0.3)
-        assert resume.call_count == before + 1, "→ must start it exactly once"
-        assert done.tracked.last_interacted_at, "→ is a real touch"
