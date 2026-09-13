@@ -700,6 +700,22 @@ class CagentsApp(App):
 
     # -- view switching --------------------------------------------------------
 
+    def validate_app_focus(self, value: bool) -> bool:
+        """tmux, not Textual, decides whether the rail is focused.
+
+        Textual flips app_focus back to True on ANY key or click while
+        blurred (App.on_event) — a fair guess for a plain terminal, but a
+        tmux `send-keys` (Ctrl-G from the conversation pane) delivers a key
+        to a pane that is NOT active. Left alone, that guess re-focused the
+        list and painted its focused border while the conversation pane held
+        the real focus. A real FocusIn arrives only after tmux has made the
+        rail active, so asking tmux resolves both cases."""
+        if value and self.sidecar is not None:
+            focused = getattr(self.sidecar, "rail_focused", None)
+            if focused is not None and not focused():
+                return False
+        return value
+
     def action_switch_view(self, view_id: str) -> None:
         self.active_view_id = view_id
         self.query_one("#views", ContentSwitcher).current = view_id

@@ -338,6 +338,18 @@ class Sidecar:
         if self.own_pane:
             self._run(["select-pane", "-t", self.own_pane])
 
+    def rail_focused(self) -> bool:
+        """Is the rail the container's active pane? tmux is the authority on
+        focus — see CagentsApp.validate_app_focus. Fails open (True) when
+        there is nothing to ask, so a broken query degrades to Textual's own
+        behaviour rather than a permanently blurred list."""
+        if not self.own_pane:
+            return True
+        try:
+            return self._run(["display-message", "-p", "-t", self.own_pane, "#{pane_active}"]).strip() != "0"
+        except Exception:
+            return True
+
     def hide_rail(self) -> None:
         """Zoom the viewer to full width and focus it."""
         if self.pane_id and self._pane_alive():

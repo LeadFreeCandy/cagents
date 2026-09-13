@@ -415,6 +415,15 @@ class DirectSidecar:
     def focus_rail(self):
         self._run(["select-pane", "-t", self.own_pane])
 
+    def rail_focused(self):
+        """See Sidecar.rail_focused: tmux decides whether the rail is focused."""
+        if not self.own_pane:
+            return True
+        try:
+            return self._option(self.own_pane, "pane_active").strip() != "0"
+        except Exception:
+            return True
+
     def hide_rail(self):
         self.focus_pane()
         if self._option(":.1", "window_zoomed_flag") != "1":
