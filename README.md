@@ -254,6 +254,29 @@ Restarts of saved conversations use a fresh local Codex runtime. A new thread
 without a saved first message retains its existing server connection.
 
 
+## A worktree per conversation
+
+Settings (`,`) → **Worktree per conversation**, off by default. With it on,
+every conversation you start goes into its own linked git worktree of the
+directory it opened in — `<repo>-worktrees/cagents-<n>`, branch `cagents/<n>`,
+branched off the mainline (remote-tracking ref first) — and the Claude or Codex
+CLI runs there instead of in the shared checkout.
+
+That is what makes the diff and terminal tabs trustworthy: both act on the
+conversation's own directory, so the diff is this conversation's work rather
+than whatever the checkout happens to be on, the terminal tab stops warning that
+it opened somewhere shared, and PR association (`o`) — which refuses a shared
+checkout on purpose, because the branch there is whoever touched it last —
+starts finding the right PR.
+
+Resumed conversations are never moved, a directory that is already a worktree is
+used as-is, and a repo that can't grow one opens the conversation where you typed
+it and says why. Worktrees of the same repo group under that repo in the grouped
+view. **`:worktrees`** lists the ones cagents grew with what removing each would
+cost and removes the highlighted one after a confirm; uncommitted changes or a
+conversation still pointed at it refuse, and only a branch git agrees is merged
+is deleted with its directory.
+
 ## cagents3 native panes
 
 Run `cagents3` from the main checkout to use the single-server native

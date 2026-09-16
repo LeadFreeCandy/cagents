@@ -66,6 +66,44 @@ constraint, not taste. Newest epochs last.
   sessions are resumed first with a fixed ~4s boot wait — known weak point; the proper
   fix is the hooks-as-push-channel idea in `IDEAS.md`.
 
+## 4b. A worktree per conversation (auto_worktree, Sep 16)
+
+Per-todo worktrees came back without the todos: the setting grows one per
+*conversation* instead, at the single point every conversation cagents starts
+passes through — `_handle_spawn_request`, where the shim reports the `$PWD` the
+user typed `claude` in. Off by default; resumes and already-linked directories
+are passed through untouched; a git failure is reported and the conversation
+opens where it was asked for.
+
+- **The branch is cut off a remote-tracking ref**, not the checked-out HEAD:
+  otherwise every conversation inherits whatever branch the shared checkout was
+  left on. That needed a new `base_ref` rather than `default_branch`, whose
+  origin/HEAD lookup keeps only the last path component ("origin/main" ->
+  "main") and so resolves to the *local* branch — fine as a merge-base name,
+  wrong as a starting point. `default_branch` is left alone; changing it would
+  change every diff.
+- **Naming carries no session identity** (`<repo>-worktrees/cagents-<n>`, branch
+  `cagents/<n>`): no name exists at spawn time, and Claude's session id isn't
+  minted until after the directory has to be chosen. The number is the lowest
+  whose directory *and* branch are free, so pruning hands it back.
+- **`owning_repo` reads the layout, not git.** Grouping and the
+  new-conversation shortcuts both key off project_dir, so without a
+  worktree->repo map every conversation became its own group and the shortcuts
+  offered five worktrees of one repo. It runs per row per refresh, which rules
+  out the two subprocesses `worktree_status` would cost.
+- **`git worktree add` runs in a worker.** On a monorepo it is tens of seconds
+  of checkout; the UI thread cannot hold that.
+- **Found by real-transport QA, not by unit tests** (tests/live/
+  test_worktree_spawn.py, real CLI + real tmux): `store.track` deliberately
+  ignores an id it already holds, and `n` tracks the conversation against the
+  *shell's* directory before `claude` is ever typed — so project_dir stayed the
+  shared checkout until the first transcript record landed. `set_project_dir`
+  moves it explicitly.
+- **Pruning is `:worktrees`, not automatic.** Dirty or still in use refuses; the
+  branch survives unless git itself calls it merged (`-d`, never `-D`). The
+  checkouts to look in come from the store, since untracking the conversation
+  leaves nothing else pointing at its worktree.
+
 ## 5. Sidecar (the always-present rail)
 
 - **The rail is the default**, after the user hit fullscreen takeover: bare launch

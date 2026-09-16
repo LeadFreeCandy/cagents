@@ -153,6 +153,7 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 | `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
 | `ctrl+r` | restart the selected Claude/Codex process, resuming the same conversation |
 | `:restart` | restart running tracked agents and reload cagents; interrupts in-flight work, keeps history, terminal tabs, and suspended sessions |
+| `:worktrees` | the worktrees **Worktree per conversation** grew, newest-prunable first, with what removing one would cost; `enter` removes the highlighted one after a confirm |
 | `,` `?` `q` | settings / help / quit |
 
 ## Reliability guarantees (each one earned the hard way)
@@ -185,6 +186,27 @@ and sidebar. It defaults to **22 columns**, half the previous 44, and accepts
 The one-column provider icons are **`✳` Claude** and **`›` Codex**, after the state
 label (or after the state glyph in the compact rail and kanban). The same icons
 appear in the track/search pickers.
+
+**Worktree per conversation** (off) starts every conversation you create in its
+own linked worktree of the directory it opens in: `<repo>-worktrees/cagents-<n>`
+on branch `cagents/<n>`, branched off the mainline (origin/HEAD, then
+origin/main, origin/master, then local — a remote ref, so a checkout nobody has
+pulled in a week doesn't become the starting point). Nothing else is ever
+checked out there, which is what the diff tab, the terminal tab, and PR lookup
+all want: each of them is only as reliable as "this directory is this
+conversation's own", and in a shared checkout none of them can be. The terminal
+tab stops warning, the diff is this conversation's work rather than whatever the
+checkout is on, and `o`'s PR lookup — which refuses a shared checkout outright,
+since the branch there is whoever touched it last — starts answering.
+
+Resuming never relocates a conversation (`--resume`, `--continue`, `codex
+resume`, `codex fork`), a directory that is already a worktree is used as it
+stands, and a repo that can't grow one says so and opens in the directory you
+typed. Worktrees of one repo group under that repo in the grouped view, and the
+new-conversation shortcuts offer the repo, not five worktrees of it. Prune with
+`:worktrees`; a worktree with uncommitted changes or a conversation still
+pointed at it refuses, and a removed branch survives unless git agrees it is
+merged.
 
 Sidebar rail (on) · toast notifications (off; errors always show) · arrow layout keys
 (on) · desktop notifications (off; with terminal-notifier installed, clicking one
