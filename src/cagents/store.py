@@ -160,6 +160,9 @@ class TrackedSession:
     jira_status: str = ""  # board column, e.g. "In Review"
     jira_assignee: str = ""
     jira_checked_at: str = ""  # ISO 8601, last successful lookup
+    # Chosen by hand (O on a session with no card), so the poller stops
+    # deriving this session's key from its PR and only refreshes it.
+    jira_pinned: bool = False
     # Lineage (spec §9's "lightweight relationships").
     parent_id: str = ""
     relation: str = ""  # "fork" | "handoff" | ""
@@ -212,6 +215,7 @@ class TrackedSession:
             "jira_status": self.jira_status,
             "jira_assignee": self.jira_assignee,
             "jira_checked_at": self.jira_checked_at,
+            "jira_pinned": self.jira_pinned,
             "parent_id": self.parent_id,
             "relation": self.relation,
             "snoozed_until": self.snoozed_until,
@@ -242,6 +246,7 @@ class TrackedSession:
             jira_status=str(data.get("jira_status", "")),
             jira_assignee=str(data.get("jira_assignee", "")),
             jira_checked_at=str(data.get("jira_checked_at", "")),
+            jira_pinned=bool(data.get("jira_pinned", False)),
             parent_id=str(data.get("parent_id", "")),
             relation=str(data.get("relation", "")),
             snoozed_until=str(data.get("snoozed_until", "")),
@@ -452,12 +457,29 @@ class Store:
             tracked.jira_checked_at = when
             self.save()
 
+    def pin_jira_key(self, session_id: str, key: str) -> None:
+        """A card chosen by hand. Status and assignee stay empty until the
+        next poll fills them in."""
+        tracked = self.sessions.get(session_id)
+        if tracked is not None:
+            tracked.jira_key = key
+            tracked.jira_status = ""
+            tracked.jira_assignee = ""
+            tracked.jira_checked_at = ""
+            tracked.jira_pinned = True
+            self.save()
+
     def clear_jira_info(self, session_id: str) -> None:
         """Derived, not stored (spec §9): once a poll can no longer find
         any legitimate PR/key to derive from, the card must actually
         clear — not sit there as stale, unverifiable leftover data from
-        whatever the last successful derivation happened to find."""
+        whatever the last successful derivation happened to find.
+
+        A pinned key is the exception: a human said which card this is,
+        which is better evidence than anything the poller can derive."""
         tracked = self.sessions.get(session_id)
+        if tracked is not None and tracked.jira_pinned:
+            return
         if tracked is not None and tracked.jira_key:
             tracked.jira_key = ""
             tracked.jira_status = ""

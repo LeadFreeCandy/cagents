@@ -28,6 +28,7 @@ from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 
 from . import gitops
 from . import jira
+from . import linkscan
 from .claude_data import default_claude_dir, utcnow
 from .ctx import CONTEXT_FILE, write_context
 from .diffview import DiffResult, DiffScreen
@@ -39,6 +40,7 @@ from .modals import (
     HandoffModal,
     InputModal,
     CommandModal,
+    LinkCandidateModal,
     RelatedModal,
     SearchModal,
     SettingsModal,
@@ -1542,6 +1544,12 @@ exec {shlex.quote(real)} "$@"
         changed = False
         for view in views:
             tracked = view.tracked
+            if tracked.jira_pinned and tracked.jira_key:
+                # Picked by hand, so skip derivation entirely and only
+                # refresh the board state.
+                if self._refresh_pinned_jira(tracked):
+                    changed = True
+                continue
             # Re-derived fresh every poll, never trusted from cache — a
             # session's *recorded* PR can change after its jira_key was
             # first set (confirmed live: a session that incidentally
@@ -1597,6 +1605,22 @@ exec {shlex.quote(real)} "$@"
             )
         if changed:
             self.call_from_thread(self.refresh_data)
+
+    def _refresh_pinned_jira(self, tracked) -> bool:
+        try:
+            issue = jira.fetch_issue(tracked.jira_key, fetch=self.jira_fetch)
+        except jira.JiraError:
+            return False  # transient; the pin itself is unaffected
+        if (issue.status, issue.assignee) == (tracked.jira_status, tracked.jira_assignee):
+            return False
+        self.store.set_jira_info(
+            tracked.session_id,
+            tracked.jira_key,
+            issue.status,
+            issue.assignee,
+            utcnow().isoformat(),
+        )
+        return True
 
     # -- desktop notifications / click-select ------------------------------------
 
@@ -2232,24 +2256,75 @@ exec {shlex.quote(real)} "$@"
         elif view.tracked.pr_url:
             url, label = view.tracked.pr_url, "PR"
         if not url:
-            self.push_screen(
-                InputModal(
-                    "No PR recorded for this session — paste one to associate",
-                    placeholder="https://github.com/owner/repo/pull/123",
-                ),
-                lambda text: self._pr_associated(view.session_id, text, open_after=True),
-            )
+            candidates = self._pr_candidates(view)
+            if candidates:
+                self.push_screen(
+                    LinkCandidateModal(
+                        "No PR linked — which one is this session's?",
+                        candidates,
+                        paste_label="none of these — paste one instead",
+                    ),
+                    lambda chosen: self._pr_candidate_chosen(view.session_id, chosen),
+                )
+                return
+            self._prompt_for_pr(view.session_id)
             return
         self._open_url(url, label)
+
+    def _pr_candidates(self, view) -> list:
+        if view.parsed is None:
+            return []
+        return linkscan.pr_candidates(view.parsed.path, project_dir=view.project_dir)
+
+    def _prompt_for_pr(self, session_id: str) -> None:
+        self.push_screen(
+            InputModal(
+                "No PR recorded for this session — paste one to associate",
+                placeholder="https://github.com/owner/repo/pull/123",
+            ),
+            lambda text: self._pr_associated(session_id, text, open_after=True),
+        )
+
+    def _pr_candidate_chosen(self, session_id: str, chosen: str | None) -> None:
+        if not chosen:
+            return
+        if chosen == LinkCandidateModal.PASTE_INSTEAD:
+            self._prompt_for_pr(session_id)
+            return
+        self._pr_associated(session_id, chosen, open_after=True)
 
     def action_open_jira(self) -> None:
         view = self.selected_view()
         if view is None:
             return
-        if not view.jira_key:
+        if view.jira_key:
+            self._open_url(view.jira_url, f"Jira {view.jira_key}")
+            return
+        candidates = self._jira_candidates(view)
+        if not candidates:
             self.notify("No Jira card linked to this session yet.", severity="warning")
             return
-        self._open_url(view.jira_url, f"Jira {view.jira_key}")
+        self.push_screen(
+            LinkCandidateModal("No Jira card linked — which one is this session's?", candidates),
+            lambda chosen: self._jira_candidate_chosen(view.session_id, chosen),
+        )
+
+    def _jira_candidates(self, view) -> list:
+        if view.parsed is None:
+            return []
+        return linkscan.jira_candidates(view.parsed.path, branch=view.parsed.git_branch)
+
+    def _jira_candidate_chosen(self, session_id: str, chosen: str | None) -> None:
+        if not chosen:
+            return
+        self._checkpoint("Jira association")
+        self.store.pin_jira_key(session_id, chosen)
+        url = jira.browse_url(chosen)
+        if url:
+            self._open_url(url, f"Jira {chosen}")
+        else:
+            self.notify(f"Linked {chosen} — set JIRA_SITE to open it.", severity="warning")
+        self.refresh_data()
 
     def _open_url(self, url: str, label: str) -> None:
         import subprocess

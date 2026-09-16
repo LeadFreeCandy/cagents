@@ -428,6 +428,9 @@ HELP_TEXT = """\
   *             related — visit this session's forks/handoffs/parent
   D             diff review screen — comment on lines, send comments to the agent
   o             open the newest recorded link (PR, artifact)
+  O             open this session's Jira card
+                with nothing linked yet, both rank the PRs / cards the
+                conversation mentions and link the one you pick (z undoes it)
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
@@ -922,6 +925,70 @@ class RelatedModal(ModalScreen[str | None]):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LinkCandidateModal(ModalScreen[str | None]):
+    """Nothing linked yet (o / O), so pick from what the conversation
+    itself mentions — ranked, with why. Dismisses with the chosen value,
+    or PASTE_INSTEAD to fall through to typing one by hand."""
+
+    PASTE_INSTEAD = "\x00paste"
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    LinkCandidateModal { align: center middle; }
+    LinkCandidateModal > Vertical {
+        width: 84; max-width: 95%; height: auto; max-height: 70%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    LinkCandidateModal Label { text-style: bold; }
+    LinkCandidateModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, title: str, candidates: list, paste_label: str = "") -> None:
+        """candidates: linkscan.Candidate, likeliest first."""
+        super().__init__()
+        self.title_text = title
+        self.candidates = candidates
+        self.paste_label = paste_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self.title_text)
+            yield Static("enter — use it · esc — cancel", classes="hint")
+            yield OptionList(id="candidate-list")
+
+    def on_mount(self) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#candidate-list", OptionList)
+        for index, candidate in enumerate(self.candidates):
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(f" {candidate.likelihood:>4.0%}  ", style="bold cyan")
+            row.append(f"{candidate.label[:22]:<22} ", style="bold")
+            row.append(", ".join(candidate.reasons[:2])[:34], style="dim")
+            option_list.add_option(Option(row, id=str(index)))
+        if self.paste_label:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("        ")
+            row.append(self.paste_label, style="dim italic")
+            option_list.add_option(Option(row, id=self.PASTE_INSTEAD))
+        option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # These option ids are row numbers, not session ids: let one reach
+        # the app's own list handler and it hijacks the selection.
+        event.stop()
+        chosen = event.option.id or ""
+        if chosen == self.PASTE_INSTEAD:
+            self.dismiss(chosen)
+            return
+        self.dismiss(self.candidates[int(chosen)].value)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
