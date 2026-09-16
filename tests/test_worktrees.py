@@ -414,3 +414,128 @@ class TestWorktreesReadAsOneProject:
         app = CagentsApp(store=store, registry=registry, tmux=FakeTmux(), claude_dir=claude_dir)
 
         assert app._recent_directories() == [str(repo)]
+
+
+# --------------------------------------------------------- :worktrees ------
+
+
+class TestWorktreesCommand:
+    async def _open(self, app, pilot, command: str = "worktrees"):
+        await pilot.press(":")
+        await pilot.pause()
+        app.screen.query_one("Input").value = command
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.2)
+
+    def _rows(self, app) -> list[str]:
+        option_list = app.screen.query_one("#worktree-list")
+        return [
+            str(option_list.get_option_at_index(i).prompt)
+            for i in range(option_list.option_count)
+        ]
+
+    async def test_lists_only_cagents_worktrees_with_their_state(
+        self, world, repo: Path
+    ):
+        app, store, tmux = world
+        clean = create_worktree(str(repo))
+        ahead = Path(create_worktree(str(repo)))
+        (ahead / "app.py").write_text("def main():\n    return 2\n", "utf-8")
+        _git(ahead, "commit", "-q", "-am", "landed nothing yet")
+        mine = repo.parent / "hand-rolled"
+        _git(repo, "worktree", "add", "-q", "-b", "mine", str(mine))
+        store.remember_worktree_repo(str(repo))
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot)
+
+            rendered = self._rows(app)
+            assert len(rendered) == 2
+            assert any("cagents-1" in r and "clean, merged" in r for r in rendered)
+            assert any("cagents-2" in r and "1 commit ahead" in r for r in rendered)
+            assert not any("hand-rolled" in r for r in rendered)
+            assert Path(clean).exists()
+
+    async def test_enter_removes_a_clean_worktree_after_confirming(self, world, repo: Path):
+        app, store, tmux = world
+        worktree = Path(create_worktree(str(repo)))
+        store.remember_worktree_repo(str(repo))
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.2)
+
+            assert not worktree.exists()
+            assert cagents_worktrees(str(repo)) == []
+
+    async def test_a_worktree_a_conversation_still_uses_is_refused(
+        self, claude_dir: Path, tmp_path: Path, now: float, repo: Path
+    ):
+        worktree = create_worktree(str(repo))
+        TB(SID1, worktree).ai_title("Live work").user("go").assistant_text("ok").write(
+            claude_dir, mtime=now - 60
+        )
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, worktree, "2026-08-18T09:00:00+00:00")
+        store.remember_worktree_repo(str(repo))
+        registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
+        app = CagentsApp(store=store, registry=registry, tmux=FakeTmux(), claude_dir=claude_dir)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot)
+
+            assert any("still working here" in row for row in self._rows(app))
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+
+            assert Path(worktree).exists()
+
+    async def test_dirty_worktree_is_refused_without_a_confirm(self, world, repo: Path):
+        app, store, tmux = world
+        worktree = Path(create_worktree(str(repo)))
+        (worktree / "app.py").write_text("def main():\n    return 2\n", "utf-8")
+        store.remember_worktree_repo(str(repo))
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot)
+            assert any("dirty (1 file)" in row for row in self._rows(app))
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.2)
+
+            assert worktree.exists()
+
+    async def test_finds_worktrees_after_their_conversation_was_untracked(
+        self, world, repo: Path
+    ):
+        # The whole reason the store remembers the checkout: untracking the
+        # conversation leaves nothing else pointing at its worktree.
+        app, store, tmux = world
+        worktree = create_worktree(str(repo))
+        store.remember_worktree_repo(str(repo))
+        assert not [t for t in store.sessions.values() if t.project_dir == worktree]
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot)
+
+            assert any("cagents-1" in row for row in self._rows(app))
+
+    async def test_an_unknown_command_opens_nothing(self, world):
+        app, store, tmux = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await self._open(app, pilot, command="nonsense")
+            assert len(app.query("#worktree-list")) == 0

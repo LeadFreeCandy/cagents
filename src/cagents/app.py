@@ -45,6 +45,7 @@ from .modals import (
     SearchModal,
     SettingsModal,
     TrackModal,
+    WorktreeModal,
 )
 from .notifier import notify_desktop, read_select_request
 from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
@@ -73,6 +74,18 @@ COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 VIEW_IDS = ["queue", "grouped", "kanban"]
 
 ALERT_STATES = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
+
+
+def _worktree_state(worktree: gitops.CagentsWorktree, occupied: bool) -> str:
+    """What removing this worktree would cost, in one phrase."""
+    if occupied:
+        return "a conversation is still working here"
+    if worktree.dirty_files:
+        return f"dirty ({worktree.dirty_files} file{'s' if worktree.dirty_files > 1 else ''})"
+    if worktree.commits_ahead:
+        commits = worktree.commits_ahead
+        return f"{commits} commit{'s' if commits > 1 else ''} ahead of the mainline"
+    return "clean, merged" if worktree.merged else "clean"
 
 
 def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
@@ -185,6 +198,8 @@ class CagentsApp(App):
         # reports one, so that spawn reuses this exact id (already tracked,
         # already the list row waiting on it) instead of minting a new one.
         self._pending_new_terminals: set[str] = set()
+        # What the rows of the open :worktrees list point at.
+        self._worktree_rows: list[tuple[gitops.CagentsWorktree, str]] = []
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
@@ -2688,10 +2703,115 @@ exec {shlex.quote(real)} "$@"
     def _command_submitted(self, command: str | None) -> None:
         if not command:
             return
-        if command.strip().removeprefix(":") == "restart":
+        name = command.strip().removeprefix(":")
+        if name == "restart":
             self.action_restart_all()
+        elif name == "worktrees":
+            self._load_worktrees()
         else:
-            self.notify(f"Unknown command: {command}. Available: restart", severity="warning")
+            self.notify(
+                f"Unknown command: {command}. Available: restart, worktrees",
+                severity="warning",
+            )
+
+    def _worktree_repos(self) -> list[str]:
+        """The checkouts to look for conversation worktrees in: the ones
+        cagents recorded growing one in, plus any a tracked conversation is
+        currently living in a worktree of — which is what finds worktrees
+        from before that bookkeeping existed."""
+        repos: list[str] = []
+        candidates = [
+            *self.store.worktree_repos,
+            *(gitops.owning_repo(t.project_dir) for t in self.store.sessions.values()),
+        ]
+        for candidate in candidates:
+            if candidate and candidate not in repos and Path(candidate).is_dir():
+                repos.append(candidate)
+        return repos
+
+    @work(thread=True, group="worktrees", exit_on_error=False)
+    def _load_worktrees(self) -> None:
+        """git, not cagents' bookkeeping, is the source of truth for what
+        still exists — one you removed by hand just stops being listed."""
+        found: list[tuple[gitops.CagentsWorktree, str]] = []
+        for repo in self._worktree_repos():
+            for worktree in gitops.cagents_worktrees(repo):
+                found.append((worktree, repo))
+        self.call_from_thread(self._show_worktrees, found)
+
+    def _show_worktrees(self, found: list[tuple[gitops.CagentsWorktree, str]]) -> None:
+        if not found:
+            self.notify(
+                "No conversation worktrees yet — turn on 'Worktree per conversation' "
+                "in settings (,) and start a conversation."
+            )
+            return
+        occupied = set()
+        for view in self.snapshot.views:
+            occupied.update((view.work_dir, view.project_dir))
+        # Safe to prune first, so the common case is one enter away.
+        found.sort(key=lambda pair: (
+            pair[0].path in occupied, pair[0].dirty_files > 0, pair[0].commits_ahead
+        ))
+        self._worktree_rows = found
+        repos = {repo for _worktree, repo in found}
+        rows = [
+            (
+                f"{Path(repo).name}/{Path(worktree.path).name}"
+                if len(repos) > 1 else Path(worktree.path).name,
+                _worktree_state(worktree, worktree.path in occupied),
+                self._worktree_prunable(worktree, occupied),
+            )
+            for worktree, repo in found
+        ]
+        self.push_screen(WorktreeModal(rows), self._worktree_chosen)
+
+    @staticmethod
+    def _worktree_prunable(worktree: gitops.CagentsWorktree, occupied: set[str]) -> bool:
+        """Unmerged commits do not block a removal — the branch outlives the
+        directory. Uncommitted work and a conversation still pointed at it
+        do: git refuses the first, and the second would break resuming."""
+        return worktree.dirty_files == 0 and worktree.path not in occupied
+
+    def _worktree_chosen(self, index: int | None) -> None:
+        if index is None:
+            return
+        worktree, repo = self._worktree_rows[index]
+        occupied = set()
+        for view in self.snapshot.views:
+            occupied.update((view.work_dir, view.project_dir))
+        name = Path(worktree.path).name
+        if not self._worktree_prunable(worktree, occupied):
+            self.notify(
+                f"{name} is {_worktree_state(worktree, worktree.path in occupied)} — "
+                "commit or untrack it first.",
+                severity="warning",
+                timeout=10,
+            )
+            return
+        cost = (
+            f"Its branch {worktree.branch} keeps {worktree.commits_ahead} commit(s) "
+            "the mainline lacks; only the directory goes."
+            if worktree.commits_ahead else
+            f"Nothing to lose: {_worktree_state(worktree, False)}."
+        )
+        self.push_screen(
+            ConfirmModal(f"Remove the worktree {name}?\n\n{cost}"),
+            lambda ok: self._remove_worktree_worker(repo, worktree.path, worktree.branch)
+            if ok else None,
+        )
+
+    @work(thread=True, group="worktrees", exit_on_error=False)
+    def _remove_worktree_worker(self, repo: str, path: str, branch: str) -> None:
+        try:
+            gitops.remove_worktree(repo, path, branch)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify, f"Kept it — {error}", severity="error", timeout=12
+            )
+            return
+        self.call_from_thread(self.notify, f"Removed {Path(path).name}.")
+        self.call_from_thread(self.refresh_data)
 
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))

@@ -446,6 +446,7 @@ HELP_TEXT = """\
                 default, enable in settings)
   ctrl+r        restart the selected agent, resuming the same conversation
   :restart      restart running tracked agents and the dashboard
+  :worktrees    the worktrees cagents grew, and prune one
 
   ,             settings · ? this help · q quit\
 """
@@ -494,7 +495,8 @@ class CommandModal(ModalScreen[str | None]):
             yield Label(": command")
             yield Static(
                 "restart — restart running tracked agents and cagents. "
-                "Interrupts current work; preserves history. Suspended sessions stay asleep.",
+                "Interrupts current work; preserves history. Suspended sessions stay asleep.\n"
+                "worktrees — list the worktrees cagents grew per conversation and prune one.",
                 classes="hint",
             )
             yield Input(placeholder="restart")
@@ -505,6 +507,59 @@ class CommandModal(ModalScreen[str | None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         self.dismiss(text or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class WorktreeModal(ModalScreen[int | None]):
+    """`:worktrees` — the worktrees the auto_worktree setting grew, and what
+    removing one would cost. Dismisses with the index of the row to remove.
+
+    Rows are prepared by the caller: only it knows which worktree a
+    tracked conversation is still working in."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    WorktreeModal { align: center middle; }
+    WorktreeModal > Vertical {
+        width: 84; max-width: 95%; height: auto; max-height: 70%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    WorktreeModal Label { text-style: bold; }
+    WorktreeModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, rows: list[tuple[str, str, bool]]) -> None:
+        """rows: (label, state, prunable), most prunable first."""
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Conversation worktrees")
+            yield Static("enter — remove it · esc — close", classes="hint")
+            yield OptionList(id="worktree-list")
+
+    def on_mount(self) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#worktree-list", OptionList)
+        for index, (label, state, prunable) in enumerate(self.rows):
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(" ● " if prunable else " ○ ", style="green" if prunable else "dim")
+            row.append(f"{label[:38]:<38} ", style="bold" if prunable else "")
+            row.append(state, style="dim")
+            option_list.add_option(Option(row, id=str(index)))
+        option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Row numbers, not session ids: one reaching the app's own list
+        # handler would hijack the selection.
+        event.stop()
+        self.dismiss(int(event.option.id or 0))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
