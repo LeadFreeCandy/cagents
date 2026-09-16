@@ -1,0 +1,2446 @@
+{
+  "commit": "3c8296fc4ff924ae2d05feab945b719e1cfafac3",
+  "files": [
+    "blue.vim",
+    "catppuccin.vim",
+    "darkblue.vim",
+    "default.vim",
+    "delek.vim",
+    "desert.vim",
+    "elflord.vim",
+    "evening.vim",
+    "habamax.vim",
+    "industry.vim",
+    "koehler.vim",
+    "lunaperche.vim",
+    "morning.vim",
+    "murphy.vim",
+    "novum.vim",
+    "pablo.vim",
+    "peachpuff.vim",
+    "quiet.vim",
+    "retrobox.vim",
+    "ron.vim",
+    "shine.vim",
+    "slate.vim",
+    "sorbet.vim",
+    "torte.vim",
+    "unokai.vim",
+    "wildcharm.vim",
+    "zaibatsu.vim",
+    "zellner.vim"
+  ],
+  "url": "https://github.com/vim/vim/tree/3c8296fc4ff924ae2d05feab945b719e1cfafac3/runtime/colors",
+  "palettes": {
+    "blue": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#008787",
+          "fg": "#000087",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#008787",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#d70000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#5fffff",
+          "fg": "#000087",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffffff",
+          "fg": "#008787",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#5fffff",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#5fffff",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#008787",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#878787",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000087",
+          "fg": "#ffd700",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#bcbcbc",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#d787d7",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#000000",
+          "fg": "#ffd700",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "",
+          "fg": "#5fffff",
+          "reverse": 0
+        }
+      }
+    },
+    "catppuccin": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#364143",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#181825",
+          "fg": "#6c7086",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#45475a",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "",
+          "fg": "#f38ba8",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#11111b",
+          "fg": "#cdd6f4",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#313244",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#89b4fa",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#45475a",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#181825",
+          "fg": "#9399b2",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#9399b2",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#1e1e2e",
+          "fg": "#cdd6f4",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#cba6f7",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#f2cdcd",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#f9e2af",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#3e5767",
+          "fg": "#cdd6f4",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "",
+          "fg": "#b4befe",
+          "reverse": 0
+        }
+      }
+    },
+    "darkblue": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#808080",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#ffffff",
+          "fg": "#8080ff",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "",
+          "fg": "#ffa0a0",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#c0c0c0",
+          "fg": "#000040",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffffff",
+          "fg": "#0030ff",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#006400",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#90f020",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#0030ff",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000040",
+          "fg": "#c0c0c0",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff60",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#90fff0",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#0030ff",
+          "fg": "#90fff0",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#c0c0c0",
+          "fg": "#000040",
+          "reverse": 0
+        }
+      }
+    },
+    "default": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#00008b",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "",
+          "fg": "",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#575757",
+          "fg": "#d3d3d3",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ff0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "",
+          "fg": "",
+          "reverse": 1
+        },
+        "PmenuSel": {
+          "bg": "#a9a9a9",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#ff00ff",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "",
+          "fg": "",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff60",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#40ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "",
+          "fg": "",
+          "reverse": 1
+        }
+      }
+    },
+    "delek": {
+      "dark": 0,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#00008b",
+          "fg": "#ffd700",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#d0d0d0",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#00008b",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#00008b",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#add8e6",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#ee0000",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#0000ff",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#008b8b",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "#ffffff",
+          "fg": "#cd00cd",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#cd00cd",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#00008b",
+          "fg": "#ffff00",
+          "reverse": 0
+        }
+      }
+    },
+    "desert": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#c2bfa5",
+          "fg": "#7f7f8c",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#6b8e24",
+          "fg": "#f0e68c",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#c2bfa5",
+          "fg": "#333333",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#f0e68c",
+          "fg": "#333333",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#9acd32",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#666666",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#666666",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#6dceeb",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#333333",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#f0e68c",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#89fb98",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#cd5c5c",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#7f7f8c",
+          "fg": "#f0e68c",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#c2bfa5",
+          "fg": "#333333",
+          "reverse": 0
+        }
+      }
+    },
+    "elflord": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#00cdcd",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#a9a9a9",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#cd0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#00ffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#00cdcd",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#444444",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#aa4444",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#40ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#00ffff",
+          "fg": "#000000",
+          "reverse": 0
+        }
+      }
+    },
+    "evening": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#d3d3d3",
+          "fg": "#333333",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#999999",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ff0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#ffffff",
+          "fg": "#333333",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#bebebe",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#4d4d4d",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#333333",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff60",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#ffffff",
+          "fg": "#333333",
+          "reverse": 0
+        }
+      }
+    },
+    "habamax": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#273923",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#767676",
+          "fg": "#1c1c1c",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#1a3456",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#1c1c1c",
+          "fg": "#af5f5f",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#9e9e9e",
+          "fg": "#1c1c1c",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#585858",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#87af87",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#585858",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#3a3a3a",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#767676",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#1c1c1c",
+          "fg": "#c7c7c7",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#af87af",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#87afaf",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#d75f87",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#374a44",
+          "fg": "",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#9e9e9e",
+          "fg": "#9e9e9e",
+          "reverse": 0
+        }
+      }
+    },
+    "industry": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#6c6c6c",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#6c6c6c",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ff0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#dadada",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#5fd75f",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#444444",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#00afaf",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#ff00ff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#dadada",
+          "fg": "#000000",
+          "reverse": 0
+        }
+      }
+    },
+    "koehler": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#e5e5e5",
+          "fg": "#0000ff",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#666666",
+          "fg": "",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#cd0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#ffffff",
+          "fg": "#0000ff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#00cdcd",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#444444",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff60",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#40ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#ff0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#ffffff",
+          "fg": "#0000ff",
+          "reverse": 0
+        }
+      }
+    },
+    "lunaperche": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#273923",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#767676",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#104070",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff5f5f",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#000000",
+          "fg": "#c6c6c6",
+          "reverse": 1
+        },
+        "PmenuSel": {
+          "bg": "#4e4e4e",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#5fd75f",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#585858",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#303030",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#5fafff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#c6c6c6",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#e4e4e4",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff5f5f",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#3a4a3a",
+          "fg": "",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#c6c6c6",
+          "fg": "#c6c6c6",
+          "reverse": 0
+        }
+      }
+    },
+    "morning": {
+      "dark": 0,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#bcbcbc",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#d0d0d0",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#e4e4e4",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#000000",
+          "fg": "#eeeeee",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#b2b2b2",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#0000ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#e4e4e4",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#008787",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#6a0dad",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#6a0dad",
+          "fg": "#e4e4e4",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#000000",
+          "fg": "#eeeeee",
+          "reverse": 0
+        }
+      }
+    },
+    "murphy": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#3a3a3a",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#005f00",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ff0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#00008b",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#005f00",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#444444",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#ffa700",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#87ff87",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ffa700",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#0000ff",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#00008b",
+          "fg": "#ffffff",
+          "reverse": 0
+        }
+      }
+    },
+    "novum": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#005523",
+          "fg": "#eef1f8",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#2c2e33",
+          "fg": "#c4c6cd",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#4f5258",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "",
+          "fg": "#ffc0b9",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#4f5258",
+          "fg": "#e0e2ea",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "",
+          "fg": "",
+          "reverse": 1
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#8cf8f7",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#4f5258",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#2c2e33",
+          "fg": "#e0e2ea",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#9b9ea4",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#14161b",
+          "fg": "#e0e2ea",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#e0e2ea",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#a6dbff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#fce094",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#6b5300",
+          "fg": "#eef1f8",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#14161b",
+          "fg": "#e0e2ea",
+          "reverse": 0
+        }
+      }
+    },
+    "pablo": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#a9a9a9",
+          "fg": "#00008b",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#cd0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#0000ee",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#e5e5e5",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#5c5cff",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#7f7f7f",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#303030",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#808080",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#c0c000",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#00c0c0",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#c0c000",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#0000ee",
+          "fg": "#ffff00",
+          "reverse": 0
+        }
+      }
+    },
+    "peachpuff": {
+      "dark": 0,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#737373",
+          "fg": "#ffdab9",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#cccccc",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#000000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#f5c195",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "#ffdab9",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#cd0000",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#ffaf87",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#406090",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#ffdab9",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#008b8b",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "#ffdab9",
+          "fg": "#cd00cd",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#cd00cd",
+          "fg": "#ffdab9",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#000000",
+          "fg": "#ffdab9",
+          "reverse": 0
+        }
+      }
+    },
+    "quiet": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#000000",
+          "fg": "#00af00",
+          "reverse": 1
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#707070",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#000000",
+          "fg": "#ffaf00",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "#000000",
+          "fg": "#dadada",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#dadada",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#dadada",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#585858",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#a8a8a8",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#707070",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#000000",
+          "fg": "#00afff",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "#000000",
+          "fg": "#707070",
+          "reverse": 0
+        }
+      }
+    },
+    "retrobox": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#273923",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#a89984",
+          "fg": "#3c3836",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#2a405a",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#fb5944",
+          "fg": "#1c1c1c",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#ebdbb2",
+          "fg": "#504945",
+          "reverse": 1
+        },
+        "PmenuSel": {
+          "bg": "#504945",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#fabd2f",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#7c6f64",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#3c3836",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#928374",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#1c1c1c",
+          "fg": "#ebdbb2",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#fb5944",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#83a598",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#fb5944",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#3a4a3a",
+          "fg": "",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#1c1c1c",
+          "fg": "#504945",
+          "reverse": 0
+        }
+      }
+    },
+    "ron": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#00008b",
+          "fg": "#add8e6",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "",
+          "fg": "",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#0000ff",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#00cdcd",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#a9a9a9",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#444444",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#00ff00",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#add8e6",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#00ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#a9a9a9",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#0000ff",
+          "fg": "#00ffff",
+          "reverse": 0
+        }
+      }
+    },
+    "shine": {
+      "dark": 0,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#a8a8a8",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#a8a8a8",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#000000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff60",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "#ffffff",
+          "fg": "#006400",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#767676",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#a8a8a8",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#a8a8a8",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#008b8b",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "#ffffff",
+          "fg": "#6a0dad",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#6a0dad",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#000000",
+          "fg": "#000000",
+          "reverse": 0
+        }
+      }
+    },
+    "slate": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#afaf87",
+          "fg": "#666666",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#5f8700",
+          "fg": "#d7d787",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#000000",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#afaf87",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#d7d787",
+          "fg": "#262626",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#00875f",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#666666",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#4a4a4a",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#666666",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#262626",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#5f87d7",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#ff8787",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff8787",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#d7875f",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#afaf87",
+          "fg": "#000000",
+          "reverse": 0
+        }
+      }
+    },
+    "sorbet": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#000000",
+          "fg": "#00af5f",
+          "reverse": 1
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#8787af",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#000000",
+          "fg": "#ffaf00",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "#000000",
+          "fg": "#ff5f5f",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#d7d7ff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#d7d7ff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#5f5f87",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#a6a8b1",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#af87d7",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#161821",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#87afd7",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#87d75f",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#dadada",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#000000",
+          "fg": "#00afff",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "",
+          "fg": "#5f5f87",
+          "reverse": 0
+        }
+      }
+    },
+    "torte": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#e5e5e5",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#a9a9a9",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#cd0000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#0000ee",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#2e8b57",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#7f7f7f",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#303030",
+          "fg": "#cccccc",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#80a0ff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#cccccc",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffff60",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#40ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#000000",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "#0000ee",
+          "fg": "#000000",
+          "reverse": 0
+        }
+      }
+    },
+    "unokai": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "",
+          "fg": "#5faf5f",
+          "reverse": 1
+        },
+        "StatusLineNC": {
+          "bg": "#74705d",
+          "fg": "#282923",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#282923",
+          "fg": "#a1efe4",
+          "reverse": 1
+        },
+        "ErrorMsg": {
+          "bg": "#000000",
+          "fg": "#f92672",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#bababa",
+          "fg": "#282923",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#8a8a8a",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#81af24",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#8a8a8a",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#585858",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#74705d",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#282923",
+          "fg": "#f8f8f2",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#f92672",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#66d9ef",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#f92672",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#282923",
+          "fg": "#66d9ef",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "#bababa",
+          "fg": "#bababa",
+          "reverse": 0
+        }
+      }
+    },
+    "wildcharm": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#273923",
+          "fg": "",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#767676",
+          "reverse": 1
+        },
+        "Visual": {
+          "bg": "#204060",
+          "fg": "",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#d7005f",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#000000",
+          "fg": "#9e9e9e",
+          "reverse": 1
+        },
+        "PmenuSel": {
+          "bg": "#585858",
+          "fg": "",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#00d75f",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#585858",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#303030",
+          "fg": "",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#767676",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#000000",
+          "fg": "#d0d0d0",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#00afff",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#ff87ff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ffaf00",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#3a4a3a",
+          "fg": "",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#9e9e9e",
+          "fg": "#9e9e9e",
+          "reverse": 0
+        }
+      }
+    },
+    "zaibatsu": {
+      "dark": 1,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#362b49",
+          "fg": "#87ff00",
+          "reverse": 1
+        },
+        "StatusLineNC": {
+          "bg": "#afaab6",
+          "fg": "#0e0024",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#5fd7ff",
+          "fg": "#0e0024",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#d70000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLine": {
+          "bg": "#ffffff",
+          "fg": "#0e0024",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#afafff",
+          "fg": "#0e0024",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "",
+          "fg": "#87ffff",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#afafff",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#ffffff",
+          "fg": "#0e0024",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#afafff",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#0e0024",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#ffafff",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#87ffff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "",
+          "fg": "#ffafff",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#0e0024",
+          "fg": "#87ffff",
+          "reverse": 1
+        },
+        "VertSplit": {
+          "bg": "",
+          "fg": "#afafff",
+          "reverse": 0
+        }
+      }
+    },
+    "zellner": {
+      "dark": 0,
+      "groups": {
+        "DiffAdd": {
+          "bg": "#5f875f",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "StatusLineNC": {
+          "bg": "#000000",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "Visual": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "ErrorMsg": {
+          "bg": "#ffffff",
+          "fg": "#ff0000",
+          "reverse": 1
+        },
+        "StatusLine": {
+          "bg": "#a9a9a9",
+          "fg": "#ffff00",
+          "reverse": 0
+        },
+        "PmenuSel": {
+          "bg": "#ffff00",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "MoreMsg": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "LineNr": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Pmenu": {
+          "bg": "#dadada",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Comment": {
+          "bg": "",
+          "fg": "#ff0000",
+          "reverse": 0
+        },
+        "Normal": {
+          "bg": "#ffffff",
+          "fg": "#000000",
+          "reverse": 0
+        },
+        "Statement": {
+          "bg": "",
+          "fg": "#a52a2a",
+          "reverse": 0
+        },
+        "Identifier": {
+          "bg": "",
+          "fg": "#0000ff",
+          "reverse": 0
+        },
+        "WarningMsg": {
+          "bg": "#ffffff",
+          "fg": "#a020f0",
+          "reverse": 0
+        },
+        "Search": {
+          "bg": "#a020f0",
+          "fg": "#ffffff",
+          "reverse": 0
+        },
+        "VertSplit": {
+          "bg": "#a9a9a9",
+          "fg": "#ffff00",
+          "reverse": 0
+        }
+      }
+    }
+  },
+  "credits": {
+    "blue": "Name:         blue\nDescription:  Colorscheme with a blue background\nAuthor:       Original author Steven Vertigan <steven@vertigan.wattle.id.au>\nMaintainer:   Original maintainer Steven Vertigan <steven@vertigan.wattle.id.au>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "catppuccin": "Name:         Catppuccin Latte (for light) and Mocha (for dark)\nDescription:  Soothing pastel theme for the high-spirited!\nAuthor:       The Catppuccin Community <catppuccin.com>\nMaintainer:   Mao-Yining <mao.yining@outlook.com>\nURL:          https://github.com/vim/colorschemes\nLast Change:  2026 Jul 21",
+    "darkblue": "Name:         darkblue\nDescription:  For those who prefer dark background\nAuthor:       Original author Bohdan Vlasyuk <bohdan@vstu.edu.ua>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "default": "Vim color file\nMaintainer:\tThe Vim Project <https://github.com/vim/vim>\nLast Change:\t2023 Aug 10\nFormer Maintainer:\tBram Moolenaar <Bram@vim.org>\nThis is the default color scheme.  It doesn't define the Normal\nhighlighting, it uses whatever the colors used to be.\nSet 'background' back to the default.  The value can't always be estimated\nand is then guessed.",
+    "delek": "Name:         delek\nDescription:  Light background colorscheme.\nAuthor:       Original author David Schweikert <david@schweikert.ch>\nMaintainer:   Original maintainer David Schweikert <david@schweikert.ch>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "desert": "Name:         desert\nDescription:  Light background colorscheme.\nAuthor:       Original author Hans Fugal <hans@fugal.net>\nMaintainer:   Original maintainer Hans Fugal <hans@fugal.net>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Aug 20",
+    "elflord": "Name:         elflord\nAuthor:       original author Ron Aaron <ron@ronware.org>\nMaintainer:   original maintainer Ron Aaron <ron@ronware.org>\nURL:          https://www.github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "evening": "Name:         evening\nDescription:  This color scheme uses a dark grey background.\nAuthor:       Original author Bram Moolenaar <Bram@vim.org>\nMaintainer:   Original maintainer Steven Vertigan <steven@vertigan.wattle.id.au>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "habamax": "Name:         habamax\nDescription:  Hubba hubba hubba.\nAuthor:       Maxim Kim <habamax@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Aug 19",
+    "industry": "Name:         industry\nDescription:  \"industry\" stands for 'industrial' color scheme.\nAuthor:       Original author Shian Lee.\nMaintainer:   Original maintainer Shian Lee.\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "koehler": "Name:         koehler\nAuthor:       original author Ron Aaron <ron@ronware.org>\nMaintainer:   original maintainer Ron Aaron <ron@ronware.org>\nURL:          https://www.github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 27",
+    "lunaperche": "Name:         Perch\u00e8 il sole a Milano? Portofino? Dimmi la luna perch\u00e8?\nDescription:  White(perch\u00e8 il sole)/Black(la luna perch\u00e8?) background colorscheme.\nAuthor:       Maxim Kim <habamax@gmail.com>\nURL:          https://www.github.com/vim/colorschemes\nLast Change:  2026 Jul 28",
+    "morning": "Name:         morning\nDescription:  Colorscheme with light grey background.\nAuthor:       Original author Bram Moolenaar <Bram@vim.org>\nMaintainer:   Original maintainer Bram Moolenaar <Bram@vim.org>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "murphy": "Name:         murphy\nDescription:  Green foreground black background.\nAuthor:       Original author Ron Aaron <ron@ronware.org>.\nMaintainer:   Original maintainer Ron Aaron <ron@ronware.org>.\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "novum": "Name:         novum\nDescription:  port of nvim dev_theme\nAuthor:       Charan Mandati <charancuz008@gmail.com>\nLicense:      Vim License (see `:help license`)`\nLast Change:  2026 Jul 21",
+    "pablo": "Name:         pablo\nAuthor:       Ron Aaron <ron@ronware.org>\nMaintainer:   Original maintainerRon Aaron <ron@ronware.org>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "peachpuff": "Name:         peachpuff\nDescription:  This color scheme uses a peachpuff background (what you've expected when it's \" called peachpuff?).\nAuthor:       Original author David Ne\\v{c}as (Yeti) <yeti@physics.muni.cz>\nMaintainer:   Original maintainer David Ne\\v{c}as (Yeti) <yeti@physics.muni.cz>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "quiet": "Name:         quiet\nDescription:  A mostly monochrome colorscheme, with a few niceties.\nAuthor:       Maxence Weynans <neutaaaaan@gmail.com>\nMaintainer:   Maxence Weynans <neutaaaaan@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Vim License (see `:help license`)`\nLast Change:  2026 Jul 21",
+    "retrobox": "Name:         Retro Box\nDescription:  Retro groove color scheme similar to gruvbox originally designed by morhetz <morhetz@gmail.com>\nAuthor:       Maxim Kim <habamax@gmail.com>, ported from gruvbox8 of Lifepillar <lifepillar@lifepillar.me>\nURL:          https://www.github.com/vim/colorschemes\nLast Change:  2026 Jul 28",
+    "ron": "Name:         ron\nAuthor:       original author Ron Aaron <ron@ronware.org>\nMaintainer:   original maintainer Ron Aaron <ron@ronware.org>\nURL:          https://www.github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 May 30",
+    "shine": "Name:         shine\nDescription:  Light colorscheme inspired by normal text editors.\nAuthor:       Original author is Yasuhiro Matsumoto <mattn.jp@gmail.com>\nMaintainer:   Original maintainer is Yasuhiro Matsumoto <mattn.jp@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 27",
+    "slate": "Name:         slate\nDescription:  Remake of slate\nAuthor:       Original maintainer Ralph Amissah <ralph@amissah.com>\nMaintainer:   Original maintainer Ralph Amissah <ralph@amissah.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Aug 20",
+    "sorbet": "Name:         sorbet\nDescription:  A shallow grave, a monument to the ruined age.\nAuthor:       Maxence Weynans <neutaaaaan@gmail.com>\nMaintainer:   Maxence Weynans <neutaaaaan@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Vim License (see `:help license`)`\nLast Change:  2026 Jul 21",
+    "torte": "Name:         torte\nDescription:  Remake of torte (grey on black)\nAuthor:       Original maintainer Thorsten Maerz <info@netztorte.de>\nMaintainer:   Original maintainer Thorsten Maerz <info@netztorte.de>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 24",
+    "unokai": "Name:         unokai\nDescription:  Color scheme similar to Monokai originally created by Wimer Hazenberg for TextMate\nAuthor:       k-37 <60838818+k-37@users.noreply.github.com>\nURL:          https://github.com/vim/colorschemes\nLast Change:  2026 Jul 21",
+    "wildcharm": "Name:         Wild Charm\nDescription:  Vibrant and playful.\nAuthor:       Maxim Kim <habamax@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Aug 12",
+    "zaibatsu": "Name:         zaibatsu\nDescription:  \"If you believe the journalists, he's the single wealthiest individual, period. As rich as some zaibatsu. But there's the catch, really: is he an individual? In the sense that you are, or I am? No.\" -- William Gibson, Count Zero\nAuthor:       Romain Lafourcade <romainlafourcade@gmail.com>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Jul 21",
+    "zellner": "Name:         zellner\nDescription:  Light background colorscheme.\nAuthor:       Original author Ron Aaron <ron@ronware.org>\nMaintainer:   Original maintainer Ron Aaron <ron@ronware.org>\nURL:          https://github.com/vim/colorschemes\nLicense:      Same as Vim\nLast Change:  2026 Apr 27"
+  }
+}

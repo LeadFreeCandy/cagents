@@ -686,11 +686,12 @@ class TestUndo:
             assert len(tmux.sessions) == sessions_before  # the terminal lives on
 
 
-async def test_review_queue_orders_newest_response_first(world):
-    """Within the needs-review rank, the most recent response sits on top —
-    even right after an app restart, when every session's in-memory
-    rank_stable_since is identical (the bug: the queue degraded to project
-    order)."""
+async def test_review_queue_order_follows_review_oldest_first_setting(world):
+    """Within the needs-review rank the order must be a real queue even right
+    after an app restart, when every session's in-memory rank_stable_since
+    is identical (the old bug: the queue degraded to project order). The
+    default (review_oldest_first on) is FIFO: the longest-waiting response on
+    top; with the setting off it is the historical newest-response-first."""
     from cagents.views import attention_sort_key
 
     app, store, tmux, _claude_dir = world
@@ -710,12 +711,21 @@ async def test_review_queue_orders_newest_response_first(world):
             v.parsed.last_timestamp = datetime(
                 2026, 8, 17, 10, i, tzinfo=timezone.utc
             )
-        ordered = sorted(review, key=attention_sort_key)
-        stamps = [v.last_activity for v in ordered]
-        assert stamps == sorted(stamps, reverse=True), (
-            "review items must be a queue: newest response first"
-        )
+        assert all(v.review_fifo for v in review), "default is oldest-first"
+        stamps = [v.last_activity for v in sorted(review, key=attention_sort_key)]
+        assert stamps == sorted(stamps), "review items must be FIFO: oldest response first"
         assert stamps[0] != stamps[-1]
+
+        store.set_setting("review_oldest_first", False)
+        app.refresh_data()
+        await pilot.pause(0.3)
+        review = [v for v in app.snapshot.views if v.state.value == "needs review"]
+        assert not any(v.review_fifo for v in review)
+        for i, v in enumerate(review):
+            v.rank_stable_since = 1000.0
+            v.parsed.last_timestamp = datetime(2026, 8, 17, 10, i, tzinfo=timezone.utc)
+        stamps = [v.last_activity for v in sorted(review, key=attention_sort_key)]
+        assert stamps == sorted(stamps, reverse=True), "setting off: newest response first"
 
 
 async def test_state_invariant_violation_is_logged_and_surfaced(world, monkeypatch):

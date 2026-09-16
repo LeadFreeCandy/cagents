@@ -138,7 +138,7 @@ def idle_world(claude_dir, tmp_path, monkeypatch):
     return app, store, tmux, path
 
 
-async def test_first_launch_auto_done_suspends_and_hover_resumes_once(idle_world):
+async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world):
     app, store, tmux, path = idle_world
     before = path.read_bytes()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -157,7 +157,15 @@ async def test_first_launch_auto_done_suspends_and_hover_resumes_once(idle_world
             await pilot.pause()
         assert len(tmux.replacements) == 1
         assert not store.sessions[SID1].last_interacted_at
+        # Neither does browsing past it: a done conversation stays asleep on hover.
         await pilot.hover("#queue-list", offset=(8, 1))
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(tmux.replacements) == 1
+        assert not store.sessions[SID1].last_interacted_at
+        # Enter is the explicit wake: resume once, reopen, transcript untouched.
+        await pilot.press("enter")
         await pilot.pause()
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -249,16 +257,21 @@ async def test_restart_failure_preserves_dashboard_and_reports_error(idle_world,
         assert any("Restart incomplete" in message and "agent changed" in message for message in notices)
 
 
-async def test_keyboard_selection_wakes_and_startup_rebuild_does_not(idle_world):
+async def test_keyboard_selection_leaves_done_asleep_and_right_arrow_wakes(idle_world):
     app, store, tmux, _ = idle_world
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert len(tmux.replacements) == 1
-        await pilot.press("down")  # explicit keyboard visit, even on the only row
+        await pilot.press("down")  # explicit keyboard visit — still just browsing
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert len(tmux.replacements) == 1
+        await pilot.press("right")  # → walks into the conversation: wakes it
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert len(tmux.replacements) == 2
+        assert "--resume" in tmux.replacements[-1][2]["command"]
 
 
 def test_suspended_codex_stays_done_without_polling_shared_server(tmp_path):

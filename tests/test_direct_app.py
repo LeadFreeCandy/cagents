@@ -7,6 +7,22 @@ from cagents.store import Store
 from test_direct_panes import direct
 
 
+def test_color_scheme_updates_native_tabs_without_touching_conversation(direct):
+    d = direct
+    row = d.spawn("theme-native")
+    d.show(row)
+    app = CagentsApp(store=d.app.store, tmux=d.tmux, sidecar=d.sidecar)
+    before = d.run(["list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}:#{pane_width}:#{pane_height}"])
+    app._setting_changed("color_scheme", "desert")
+    assert d.run(["show-option", "-gqv", "status-style"]) == "bg=#c2bfa5,fg=#333333"
+    assert "bg=#f0e68c,fg=#333333" in d.run(["show-option", "-gqv", "window-status-current-format"])
+    app._setting_changed("color_scheme", "cagents")
+    assert d.run(["show-option", "-gqv", "status-style"]) == "bg=colour236,fg=colour248"
+    assert "bg=colour31,fg=colour231" in d.run(["show-option", "-gqv", "window-status-current-format"])
+    assert d.run(["list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}:#{pane_width}:#{pane_height}"]) == before
+    assert d.visible() == row.pane_id and "UNSENT_DRAFT" in d.tmux.capture_pane(row.name)
+
+
 def test_quit_detaches_without_killing_agent_server(tmp_path, monkeypatch):
     calls = []
     sidecar = SimpleNamespace(detach=lambda: calls.append("detach"))

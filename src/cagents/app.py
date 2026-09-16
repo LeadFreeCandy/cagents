@@ -184,6 +184,10 @@ class CagentsApp(App):
     ):
         super().__init__()
         self.store = store or Store.load()
+        from .themes import theme_name, vim_themes
+        for theme in vim_themes():
+            self.register_theme(theme)
+        self.theme = theme_name(self.store.get_setting("color_scheme"))
         self.tmux = tmux or TmuxClient()
         self.claude_dir = claude_dir or default_claude_dir()
         from .codex_data import default_codex_dir
@@ -275,6 +279,8 @@ class CagentsApp(App):
                     shim_env=self._shim_env(),
                 )
                 self._workspace_ready()
+                if self.theme.startswith("vim-"):
+                    self._apply_color_theme(self.theme)
             except Exception as error:
                 self.notify(f"Workspace setup failed: {error}", severity="error")
 
@@ -493,10 +499,16 @@ class CagentsApp(App):
         self._interact_session(event.session_id)
 
     def _interact_session(self, session_id: str) -> None:
+        """Hover / keyboard visit / click on a row. Wakes a sleeping
+        conversation — EXCEPT a Done one: scrolling down a long done list
+        must not spin up (or reopen) one CLI per row. Done conversations
+        wake only on Enter or → (_attach / action_grow_session)."""
+        view = self.snapshot.by_id(session_id)
+        if view is not None and view.state == SessionState.DONE:
+            return
         self._record_interaction(session_id)
         if self._restart_all_pending:
             return
-        view = self.snapshot.by_id(session_id)
         if view is None:
             return
         if session_id in self._lifecycle_busy:
@@ -504,11 +516,6 @@ class CagentsApp(App):
             return
         if view.suspended:
             self._begin_lifecycle(view, "resume")
-        elif view.auto_done:
-            self.refresh_data()
-        elif not view.live and view.state == SessionState.DONE and self.sidecar is not None:
-            self._resumed_for_preview.discard(session_id)
-            self._resume_for_preview(view)
 
     # -- the viewer pane (sidecar) ---------------------------------------------
 
@@ -544,7 +551,11 @@ class CagentsApp(App):
             return
         if view.suspended or (view.state == SessionState.DONE and not view.live):
             from .sidecar import _placeholder
-            command = _placeholder("Conversation suspended. Hover or select it to resume.")
+            command = _placeholder(
+                "Conversation asleep. Press Enter or → to wake it."
+                if view.state == SessionState.DONE else
+                "Conversation asleep. Select it to wake it."
+            )
             if command != self._viewer_target:
                 self.sidecar.show_viewer(command)
                 self._viewer_target = command
@@ -706,31 +717,86 @@ class CagentsApp(App):
 
     # -- view switching --------------------------------------------------------
 
+    def validate_app_focus(self, value: bool) -> bool:
+        """tmux, not Textual, decides whether the rail is focused.
+
+        Textual flips app_focus back to True on ANY key or click while
+        blurred (App.on_event) — a fair guess for a plain terminal, but a
+        tmux `send-keys` (Ctrl-G from the conversation pane) delivers a key
+        to a pane that is NOT active. Left alone, that guess re-focused the
+        list and painted its focused border while the conversation pane held
+        the real focus. A real FocusIn arrives only after tmux has made the
+        rail active, so asking tmux resolves both cases."""
+        if value and self.sidecar is not None:
+            focused = getattr(self.sidecar, "rail_focused", None)
+            if focused is not None and not focused():
+                return False
+        return value
+
     def action_switch_view(self, view_id: str) -> None:
         self.active_view_id = view_id
         self.query_one("#views", ContentSwitcher).current = view_id
         self.query_one("#body").set_class(view_id == "kanban", "kanban")
         view = self.current_view()
         view.update_snapshot(self.snapshot)
-        view.focus_list()
+        if self.app_focus:
+            view.focus_list()
+        else:
+            # The key came from another tmux pane (Ctrl-G in the chat): the
+            # rail is blurred and Textual has cleared focus. Focusing now
+            # would paint the focused border on a pane that isn't focused;
+            # instead queue the list up for when focus returns to the rail
+            # (Textual restores this widget on the next AppFocus).
+            target = view.focus_target()
+            if target is not None:
+                self._last_focused_on_app_blur = target
 
     def action_next_view(self) -> None:
         i = VIEW_IDS.index(self.active_view_id)
         self.action_switch_view(VIEW_IDS[(i + 1) % len(VIEW_IDS)])
 
     def action_queue_top(self) -> None:
-        """Return from any view to the first conversation in queue order."""
+        """Return from any view to the first conversation in queue order.
+
+        With review_oldest_first, a needs-review conversation being left this
+        way counts as looked at: it goes to the back of the review line, so
+        repeated Ctrl+G walks the whole backlog oldest-first. Rings the bell
+        when there is no OTHER conversation in an alert state to go to."""
         from .views import SessionList
 
+        current = self.selected_view()
+        somewhere_to_go = any(
+            v.state in ALERT_STATES and (current is None or v.session_id != current.session_id)
+            for v in self.snapshot.views
+        )
+        if (
+            current is not None
+            and current.state == SessionState.NEEDS_REVIEW
+            and current.review_fifo
+        ):
+            now = utcnow()
+            self.store.bump_review(current.session_id, now.isoformat())
+            current.review_bumped_at = now.timestamp()
+            for view_id in VIEW_IDS:
+                self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
+        if not somewhere_to_go:
+            self.bell()
         self.action_switch_view("queue")
         listing = self.query_one("#queue-list", SessionList)
         listing.action_first()
-        if listing.highlighted_session_id:
-            self._record_interaction(listing.highlighted_session_id)
+        landed = self.snapshot.by_id(listing.highlighted_session_id or "")
+        if landed is not None and landed.state != SessionState.DONE:
+            self._record_interaction(landed.session_id)
 
     def action_grow_session(self) -> None:
         """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
-        focus moves into the session, the rail collapses via the tmux hook."""
+        focus moves into the session, the rail collapses via the tmux hook.
+        On a sleeping (or dead) conversation it is the other explicit wake
+        key besides Enter: resume it, then walk in."""
+        view = self.selected_view()
+        if view is not None and (view.suspended or not view.live):
+            self._attach()
+            return
         if self.sidecar is not None:
             try:
                 self.sidecar.focus_session()
@@ -2540,8 +2606,11 @@ exec {shlex.quote(real)} "$@"
         return bool(view and should_suspend(view, time.time()))
 
     def _replace_instance(self, view: SessionView, operation: str) -> bool:
-        command, directory = (None, "") if operation == "suspend" else self._resume_command(view)
-        if operation != "suspend" and view.missing:
+        """operation: "suspend" (idle policy, re-validated), "sleep" (:sleep —
+        an explicit request, so no idle check), "resume" or "restart"."""
+        sleeping = operation in ("suspend", "sleep")
+        command, directory = (None, "") if sleeping else self._resume_command(view)
+        if not sleeping and view.missing:
             raise RuntimeError("No saved conversation to resume yet; start the agent in its terminal.")
         if operation == "resume" and not view.tmux_name:
             name, reason, _ = self._resume_target(view)
@@ -2549,12 +2618,12 @@ exec {shlex.quote(real)} "$@"
                 raise RuntimeError(reason)
             view.tmux_name, view.tmux_socket = name, self.tmux.create_socket
             return True
-        if operation == "suspend":
+        if sleeping:
             # A new transcript write since the snapshot makes this decision
             # obsolete. Give the next refresh a chance to classify that work.
             if view.parsed and view.parsed.path.is_file() and view.parsed.path.stat().st_mtime > view.parsed.mtime:
                 raise RuntimeError("Conversation changed; suspension deferred.")
-            if not self.call_from_thread(self._suspend_still_valid, view.session_id):
+            if operation == "suspend" and not self.call_from_thread(self._suspend_still_valid, view.session_id):
                 return False
         if view.provider == "codex" and view.live:
             import shlex
@@ -2592,6 +2661,8 @@ exec {shlex.quote(real)} "$@"
                     operation = "cancel"
         except Exception as exc:
             error = str(exc)
+        if operation == "sleep":
+            operation = "suspend"  # same end state and bookkeeping as an idle suspend
         self.call_from_thread(self._lifecycle_finished, view, operation, focus, error)
 
     def _lifecycle_finished(self, view: SessionView, operation: str, focus: bool, error: str) -> None:
@@ -2650,6 +2721,38 @@ exec {shlex.quote(real)} "$@"
         self.notify(f"Restarting {view.title}…")
         self._begin_lifecycle(view, "resume" if view.suspended else "restart")
 
+    # States whose agent is mid-flight: :sleep leaves these alone rather than
+    # killing work in progress. Re-run it once they have finished.
+    _BUSY_STATES = (SessionState.WORKING, SessionState.SHELL_RUNNING,
+                    SessionState.MONITORING, SessionState.BACKGROUND)
+
+    def action_sleep_all(self) -> None:
+        """:sleep — park every idle live conversation now (memory), without
+        waiting for the 1h idle policy. Each wakes when you visit its row
+        again; a Done one only on Enter / → (see _interact_session)."""
+        if self._restart_all_pending:
+            self.notify("Wait for :restart to finish, then retry :sleep.", severity="warning")
+            return
+        self._flush_interactions()
+        slept = busy = 0
+        for view in self.snapshot.views:
+            if not view.live or view.suspended or view.missing or not view.tmux_name:
+                continue
+            if view.session_id in self._lifecycle_busy:
+                continue
+            if view.state in self._BUSY_STATES:
+                busy += 1
+                continue
+            self._begin_lifecycle(view, "sleep")
+            slept += 1
+        if not slept:
+            message = "Nothing to put to sleep."
+        else:
+            message = f"Putting {slept} conversation{'s' if slept != 1 else ''} to sleep."
+        if busy:
+            message += f" {busy} still working — left alone."
+        self.notify(message, severity="warning" if busy else "information")
+
     def action_restart_all(self) -> None:
         if self._restart_all_pending or self._lifecycle_busy:
             self.notify("Wait for the current session operation to finish, then retry :restart.", severity="warning")
@@ -2706,11 +2809,13 @@ exec {shlex.quote(real)} "$@"
         name = command.strip().removeprefix(":")
         if name == "restart":
             self.action_restart_all()
+        elif name == "sleep":
+            self.action_sleep_all()
         elif name == "worktrees":
             self._load_worktrees()
         else:
             self.notify(
-                f"Unknown command: {command}. Available: restart, worktrees",
+                f"Unknown command: {command}. Available: restart, sleep, worktrees",
                 severity="warning",
             )
 
@@ -2816,7 +2921,20 @@ exec {shlex.quote(real)} "$@"
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))
 
+    def _apply_color_theme(self, name: str) -> None:
+        self.theme = name
+        apply = getattr(self.sidecar, "apply_theme", None)
+        if apply is not None:
+            try:
+                apply(self.current_theme)
+            except Exception as error:
+                self.notify(f"Could not update tab colors: {error}", severity="warning")
+
     def _setting_changed(self, key: str, value) -> None:
+        if key == "color_scheme":
+            from .themes import theme_name
+            self._apply_color_theme(theme_name(value))
+            return
         if key == "conversation_title_width":
             for view_id in VIEW_IDS:
                 self.query_one(f"#{view_id}").update_snapshot(self.snapshot)

@@ -286,6 +286,11 @@ def setup_commands():
 class DirectSidecar:
     enabled = staticmethod(Sidecar.enabled)
 
+    def apply_theme(self, theme):
+        from .themes import tab_color_commands
+        for command in tab_color_commands(theme):
+            self._run(command)
+
     def __init__(self, runner=None, own_pane="", client=None):
         self.client = client or DirectTmux()
         self.socket = self.client.create_socket
@@ -409,6 +414,15 @@ class DirectSidecar:
 
     def focus_rail(self):
         self._run(["select-pane", "-t", self.own_pane])
+
+    def rail_focused(self):
+        """See Sidecar.rail_focused: tmux decides whether the rail is focused."""
+        if not self.own_pane:
+            return True
+        try:
+            return self._option(self.own_pane, "pane_active").strip() != "0"
+        except Exception:
+            return True
 
     def hide_rail(self):
         self.focus_pane()

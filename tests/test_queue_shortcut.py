@@ -45,7 +45,11 @@ async def test_ctrl_g_selects_first_queue_row(tmp_path, monkeypatch, start_view)
 
 
 @pytest.mark.parametrize("zoomed", [False, True])
-def test_ctrl_g_from_nested_conversation_reveals_rail_without_agent_input(terminal, zoomed):
+def test_ctrl_g_from_nested_conversation_reaches_rail_without_moving_focus(terminal, zoomed):
+    """Ctrl+G from inside a conversation reaches the rail app without the
+    agent seeing it, and leaves the layout exactly as it was: the chat keeps
+    focus and its width (or zoom) — Ctrl+G switches the conversation shown,
+    it does not switch you to the list."""
     t = terminal
     rail_input = t.directory / "rail-input"
     program = t.directory / "rail.py"
@@ -59,7 +63,10 @@ def test_ctrl_g_from_nested_conversation_reveals_rail_without_agent_input(termin
     if zoomed:
         t.tmux(t.outer, "resize-pane", "-Z", "-t", viewer)
     t.drain(.3)
+    before = t.tmux(t.outer, "display-message", "-p", "#{pane_index}:#{window_zoomed_flag}:#{pane_width}").strip()
+    assert before.startswith("1:1:" if zoomed else "1:0:")
     t.write(b"\x07")
-    assert t.tmux(t.outer, "display-message", "-p", "#{pane_index}:#{window_zoomed_flag}").strip() == "0:0"
+    t.drain(.3)
+    assert t.tmux(t.outer, "display-message", "-p", "#{pane_index}:#{window_zoomed_flag}:#{pane_width}").strip() == before
     assert rail_input.read_bytes() == b"\x07"
     assert t.received.read_bytes() == b""

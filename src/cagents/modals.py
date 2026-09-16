@@ -402,6 +402,8 @@ HELP_TEXT = """\
 
 [bold cyan]Navigate[/bold cyan]
   ctrl+g        return to the first conversation in the queue, even from chat
+                (a needs-review conversation left this way goes to the back
+                of the review line; bell = nothing else needs you)
   g / G         first / last conversation while the list has focus
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
@@ -496,10 +498,13 @@ class CommandModal(ModalScreen[str | None]):
             yield Static(
                 "restart — restart running tracked agents and cagents. "
                 "Interrupts current work; preserves history. Suspended sessions stay asleep.\n"
+                "sleep — put every idle conversation to sleep now (frees memory). "
+                "Visiting a row wakes it again; a done one wakes on Enter or →. "
+                "Conversations still working are left alone.\n"
                 "worktrees — list the worktrees cagents grew per conversation and prune one.",
                 classes="hint",
             )
-            yield Input(placeholder="restart")
+            yield Input(placeholder="restart | sleep")
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
@@ -586,6 +591,12 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Collapsed sidebars use the available width. Enter to set 8–120 columns.",
     ),
     (
+        "color_scheme",
+        "Color scheme",
+        "Choose cagents default or a bundled Vim scheme. Arrow keys preview; "
+        "Enter saves; Escape restores your previous colors.",
+    ),
+    (
         "notifications",
         "Toast notifications",
         "Bottom-right popups for routine events. Errors and warnings always show.",
@@ -660,7 +671,7 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Auto done duration",
         "Mark idle conversations Done (auto). Default 7d; applies to existing history. "
         "Enter cycles; off disables. New input reopens auto-done conversations. "
-        "Done conversations suspend after 1h idle; hover or select to resume.",
+        "Done conversations sleep after 1h idle; Enter or → wakes one.",
     ),
     (
         "auto_worktree",
@@ -683,6 +694,13 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "All states rank equally; sessions rise to the top only when their state "
         "changes (e.g. working → needs review). Keeps active work above a backlog "
         "of stale unreviewed sessions.",
+    ),
+    (
+        "review_oldest_first",
+        "Review oldest first",
+        "Needs-review conversations line up oldest first (a FIFO queue), and Ctrl+G on "
+        "one sends it to the back of the line. Off: newest response on top. Ignored "
+        "while Time-ordered queue is on.",
     ),
     (
         "debug_log",
@@ -729,6 +747,50 @@ EXTERNAL_UPDATE_SETTINGS_META: list[tuple[str, str, str]] = [
         "edits, ...) not already covered by the triggers above.",
     ),
 ]
+
+class ColorSchemeModal(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = """
+    ColorSchemeModal { align: center middle; background: $background; }
+    ColorSchemeModal > Vertical {
+        width: 48; max-width: 95%; height: auto; max-height: 90%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    ColorSchemeModal #color-schemes { height: auto; max-height: 24; }
+    ColorSchemeModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, current, preview):
+        super().__init__()
+        self.current, self.preview = current, preview
+
+    def compose(self):
+        with Vertical():
+            yield Label("Color scheme")
+            yield Static("↑/↓ preview · Enter save · Esc cancel", classes="hint")
+            yield OptionList(id="color-schemes")
+
+    def on_mount(self):
+        from .themes import COLOR_SCHEMES
+        listing = self.query_one(OptionList)
+        with self.prevent(OptionList.OptionHighlighted):
+            listing.add_options(Option("cagents default" if name == "cagents" else name, id=name)
+                                for name in COLOR_SCHEMES)
+            listing.highlighted = listing.get_option_index(self.current if self.current in COLOR_SCHEMES else "cagents")
+        listing.focus()
+
+    def on_option_list_option_highlighted(self, event):
+        if event.option.id == event.option_list.get_option_at_index(event.option_list.highlighted).id:
+            self.preview(event.option.id)
+        event.stop()
+
+    def on_option_list_option_selected(self, event):
+        event.stop()
+        self.dismiss(event.option.id)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
 
 class SettingsModal(ModalScreen[None]):
     """`,` — three tabs: General toggles, External-update triggers, and
@@ -854,6 +916,11 @@ class SettingsModal(ModalScreen[None]):
         if key is None:
             return
         current = self.store.get_setting(key)
+        if key == "color_scheme":
+            previous_theme = self.app.theme
+            self.app.push_screen(ColorSchemeModal(current, lambda value: self.on_change(key, value)),
+                                 lambda value: self._color_scheme_submitted(value, previous_theme))
+            return
         if key == "conversation_title_width":
             self.app.push_screen(InputModal("Conversation title width (8–120 columns)", initial=str(current)),
                                  self._title_width_submitted)
@@ -867,6 +934,14 @@ class SettingsModal(ModalScreen[None]):
         self.store.set_setting(key, value)
         self._refill(list_id, self._meta_for(list_id), keep=key)
         self.on_change(key, value)
+
+    def _color_scheme_submitted(self, value, previous_theme):
+        if value is None:
+            self.app._apply_color_theme(previous_theme)
+            return
+        self.store.set_setting("color_scheme", value)
+        self._refill("#settings-list", SETTINGS_META, keep="color_scheme")
+        self.on_change("color_scheme", value)
 
     def _title_width_submitted(self, text: str | None) -> None:
         if text is None:

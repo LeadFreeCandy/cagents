@@ -115,6 +115,20 @@ or workspace tab, including full-width chat. Focus returns to the queue; press
 Enter to enter that conversation. With the list focused, `g` / `G` jump to its
 first / last conversation.
 
+Needs-review conversations line up oldest first, and `Ctrl+G` from one of them
+counts it as looked at: it goes to the back of the line, so repeated `Ctrl+G`
+walks the whole review backlog in order. The terminal bell rings when there is
+no other conversation needing you to go to. The setting "Review oldest first"
+turns this off (newest response on top, no re-queueing). `Ctrl+G` never moves
+focus or resizes the split: the conversation pane keeps its width (or full
+width) and simply starts showing the queue's first conversation.
+
+Done conversations go to sleep after an hour idle, and browsing past one in the
+list never wakes it — only `Enter` or `→` on it does, so scrolling a long done
+list costs no memory. `:sleep` puts every idle conversation to sleep right now;
+visiting a row wakes it again (a done one on `Enter` / `→`). Conversations
+still working are left alone.
+
 ## Install / run
 
 ```sh
@@ -170,6 +184,18 @@ title limit, now **22** columns by default (previously 44; configurable from 8�
 Collapsed sidebars show only the status icon and conversation name, using all
 remaining width for the name and truncating it with an ellipsis when necessary.
 Expand the sidebar to see provider, age, and status labels such as **Done (auto)**.
+
+Settings (`,`) → **Color scheme** offers **cagents default** and all 28 schemes
+from [Vim's bundled colors](https://github.com/vim/vim/tree/3c8296fc4ff924ae2d05feab945b719e1cfafac3/runtime/colors):
+blue, catppuccin, darkblue, default, delek, desert, elflord, evening, habamax,
+industry, koehler, lunaperche, morning, murphy, novum, pablo, peachpuff, quiet,
+retrobox, ron, shine, slate, sorbet, torte, unokai, wildcharm, zaibatsu, and zellner.
+Use ↑/↓ to preview, Enter to save, or Escape to restore the previous colors.
+The choice persists across restarts and colors both the dashboard and its native
+tab bar. Existing installations keep the current cagents appearance by default.
+Schemes use Vim's RGB palettes, with light backgrounds retained where the scheme
+selects one. Palettes, credits, and the Vim license are bundled; Vim and network
+access are not needed to use them. Claude and Codex keep their own terminal colors.
 
 In tmux, managed Codex launches and restarts inherit the dashboard terminal's
 foreground/background colors before starting, preserving native message and

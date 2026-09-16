@@ -125,9 +125,15 @@ class Dashboard:
         self.pump(.5)
 
     def queue(self):
+        """Focus the rail (a click on it). Ctrl-G deliberately does NOT move
+        focus any more — it only changes which conversation the pane shows —
+        so the harness selects the rail pane itself, then presses Ctrl-G to
+        land on the queue's first row like a user would."""
+        self.tmux("select-pane", "-t", self.rail)
+        self.wait(lambda: self.active == self.rail, "rail pane did not take focus")
         self.send(b"\x07")
-        self.wait(lambda: self.active == self.rail, "Ctrl-G did not reach the queue")
         self.pump(.3)
+        assert self.active == self.rail, "Ctrl-G must leave focus where it was"
         self.assert_no_tmux_messages()
 
     def check_shell_input(self):

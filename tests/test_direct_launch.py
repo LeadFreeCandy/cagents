@@ -8,6 +8,55 @@ from dashboard_harness import Dashboard
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+def test_real_dashboard_color_scheme_preview_save_cancel_and_reload(tmp_path):
+    from test_color_schemes import VIM_SCHEMES
+    from cagents.modals import SETTINGS_META
+
+    d = Dashboard(tmp_path / "dashboard-artifacts")
+    try:
+        d.launch()
+        pane = d.new_shell()
+        pid = d.pane(pane, "pane_pid")
+        d.send("UNSENT_THEME_DRAFT")
+        d.queue()
+        d.send(",")
+        assert "Color scheme" in d.capture(d.rail)
+        index = [key for key, _, _ in SETTINGS_META].index("color_scheme")
+        d.send(b"\x1b[B" * index)
+        d.send(b"\r")
+        choices = ["cagents", *sorted(VIM_SCHEMES)]
+        d.send(b"\x1b[B" * choices.index("desert"))
+        d.wait(lambda: d.tmux("show-option", "-gqv", "status-style") == "bg=#c2bfa5,fg=#333333",
+               "desert preview did not update native tab colors")
+        assert json.loads(d.state.read_text())["settings"].get("color_scheme", "cagents") == "cagents"
+        assert "48;2;51;51;51" in d.capture(d.rail, ansi=True)
+        d.save_artifacts("desert-preview")
+        d.send(b"\x1b")
+        d.wait(lambda: d.tmux("show-option", "-gqv", "status-style") == "bg=colour236,fg=colour248",
+               "cancel did not restore native tab colors")
+        d.send(b"\r")
+        d.send(b"\x1b[B" * choices.index("peachpuff"))
+        d.send(b"\r")
+        d.wait(lambda: json.loads(d.state.read_text())["settings"].get("color_scheme") == "peachpuff",
+               "chosen color scheme was not saved")
+        d.send(b"\x1b")
+        assert "48;2;255;218;185" in d.capture(d.rail, ansi=True)
+        assert d.pane(pane, "pane_pid") == pid and "UNSENT_THEME_DRAFT" in d.capture(pane)
+        d.save_artifacts("peachpuff-saved")
+        d.queue()
+        d.send("q")
+        d.wait(lambda: d.pane(d.rail, "pane_dead") == "1", "dashboard did not exit")
+        d.launch()
+        assert "48;2;255;218;185" in d.capture(d.rail, ansi=True)
+        assert d.tmux("show-option", "-gqv", "status-style") == "bg=#000000,fg=#ffffff"
+        assert d.pane(pane, "pane_pid") == pid and "UNSENT_THEME_DRAFT" in d.capture(pane)
+        d.assert_no_tmux_messages()
+        d.save_artifacts("peachpuff-reloaded")
+    finally:
+        d.close()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 def test_real_dashboard_collapses_to_icon_and_name_and_restores_details(tmp_path):
     d = Dashboard(tmp_path / "dashboard-artifacts")
     try:
@@ -91,5 +140,45 @@ def test_real_dashboard_new_conversation_quit_and_relaunch_preserve_panes(tmp_pa
         assert d.agents() == before
         assert "Traceback" not in d.capture(d.rail)
         assert len(d.tmux("list-clients", "-F", "#{client_pid}").splitlines()) == 1
+    finally:
+        d.close()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+def test_real_dashboard_list_border_tracks_tmux_focus_across_ctrl_g(tmp_path):
+    """The rail's focused border must agree with tmux's active pane. Ctrl-G
+    from a conversation is delivered by send-keys with the rail NOT active:
+    the list must look exactly as it does when blurred, and look focused
+    again only once the rail pane really is active."""
+    import re
+
+    def border_rows(d):
+        lines = d.capture(d.rail, ansi=True).splitlines()
+        return [re.sub(r"\x1b\[7m|\x1b\[27m", "", line) for line in lines[1:4]]
+
+    d = Dashboard(tmp_path / "dashboard-artifacts")
+    try:
+        d.launch()
+        shell = d.new_shell()
+        d.tmux("select-pane", "-t", d.rail)
+        d.wait(lambda: d.active == d.rail, "rail did not take focus")
+        d.pump(.6)
+        focused_look = border_rows(d)
+        d.tmux("select-pane", "-t", shell)
+        d.wait(lambda: d.active == shell, "shell did not take focus")
+        d.pump(.6)
+        blurred_look = border_rows(d)
+        assert focused_look != blurred_look, "fixture: focus must be visible on the list"
+
+        d.send(b"\x07")
+        d.pump(.8)
+        assert d.active == shell, "Ctrl-G must not move tmux focus"
+        assert border_rows(d) == blurred_look, "list drawn focused while the rail pane is inactive"
+
+        d.tmux("select-pane", "-t", d.rail)
+        d.wait(lambda: d.active == d.rail, "rail did not take focus")
+        d.pump(.6)
+        assert border_rows(d) == focused_look
+        d.assert_no_tmux_messages()
     finally:
         d.close()
