@@ -2230,7 +2230,10 @@ exec {shlex.quote(real)} "$@"
                 severity="warning",
             )
             return
-        self.push_screen(SearchModal(self.claude_dir, self.codex_dir), self._search_chosen)
+        names = [(v.session_id, v.project_dir, v.title) for v in self.snapshot.views]
+        self.push_screen(
+            SearchModal(self.claude_dir, self.codex_dir, names=names), self._search_chosen
+        )
 
     def _search_chosen(self, result) -> None:
         if result is None:
