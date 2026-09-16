@@ -429,8 +429,9 @@ HELP_TEXT = """\
   D             diff review screen — comment on lines, send comments to the agent
   o             open the newest recorded link (PR, artifact)
   O             open this session's Jira card
-                with nothing linked yet, both rank the PRs / cards the
-                conversation mentions and link the one you pick (z undoes it)
+                unlinked, each tries the other's link first (a PR's title
+                names its card; a card finds its PRs), then ranks what the
+                conversation itself mentions for you to pick (z undoes it)
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]

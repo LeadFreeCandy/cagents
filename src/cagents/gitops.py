@@ -384,6 +384,43 @@ def find_pr_url(directory: str, runner=None, expected_branch: str = "") -> str:
     return url
 
 
+def prs_referencing(text: str, directory: str, runner=None, limit: int = 10) -> list[str]:
+    """PR urls in `directory`'s repo that mention `text` — how a Jira key
+    finds the PRs written for it, the reverse of pr_jira_sources.
+
+    Closed and merged PRs count: the card's PR is just as often already
+    landed. `text` is passed as its own argv element, never a shell
+    string. Any failure is '[]' — a search that finds nothing and a gh
+    that cannot run are the same answer to the caller."""
+    if not text.strip():
+        return []
+    run = runner or _gh_runner_default
+    try:
+        out = run(
+            [
+                "gh", "pr", "list",
+                "--search", text,
+                "--state", "all",
+                "--limit", str(limit),
+                "--json", "url",
+            ],
+            directory,
+        )
+    except Exception:
+        return []
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [
+        str(item["url"])
+        for item in data
+        if isinstance(item, dict) and str(item.get("url", "")).startswith("http")
+    ]
+
+
 def pr_jira_sources(pr_url: str, runner=None) -> tuple[str, str, str]:
     """(title, body, branch) of a specific PR, by URL — the text a Jira key
     search checks in order. Takes the URL directly (like pr_status), not a

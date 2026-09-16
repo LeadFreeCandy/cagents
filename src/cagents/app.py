@@ -2256,25 +2256,48 @@ exec {shlex.quote(real)} "$@"
         elif view.tracked.pr_url:
             url, label = view.tracked.pr_url, "PR"
         if not url:
-            candidates = self._pr_candidates(view)
-            if candidates:
-                self.push_screen(
-                    LinkCandidateModal(
-                        "No PR linked — which one is this session's?",
-                        candidates,
-                        paste_label="none of these — paste one instead",
-                    ),
-                    lambda chosen: self._pr_candidate_chosen(view.session_id, chosen),
-                )
+            # A linked card knows its own PRs — ask GitHub before falling
+            # back to whatever the transcript happens to mention.
+            if view.jira_key:
+                self._prs_from_card_worker(view.session_id, view.jira_key, view.project_dir)
                 return
-            self._prompt_for_pr(view.session_id)
+            self._offer_pr_candidates(view)
             return
         self._open_url(url, label)
 
-    def _pr_candidates(self, view) -> list:
+    @work(thread=True, exclusive=True, group="prsearch", exit_on_error=False)
+    def _prs_from_card_worker(self, session_id: str, card_key: str, directory: str) -> None:
+        found = gitops.prs_referencing(card_key, directory, runner=self.gh_runner)
+        self.call_from_thread(self._prs_from_card_found, session_id, found)
+
+    def _prs_from_card_found(self, session_id: str, found: list[str]) -> None:
+        view = self.snapshot.by_id(session_id)
+        if view is not None:
+            self._offer_pr_candidates(view, card_prs=found)
+
+    def _offer_pr_candidates(self, view, card_prs: list[str] | tuple = ()) -> None:
+        candidates = self._pr_candidates(view, card_prs=card_prs)
+        if not candidates:
+            self._prompt_for_pr(view.session_id)
+            return
+        self.push_screen(
+            LinkCandidateModal(
+                "No PR linked — which one is this session's?",
+                candidates,
+                paste_label="none of these — paste one instead",
+            ),
+            lambda chosen: self._pr_candidate_chosen(view.session_id, chosen),
+        )
+
+    def _pr_candidates(self, view, card_prs: list[str] | tuple = ()) -> list:
         if view.parsed is None:
             return []
-        return linkscan.pr_candidates(view.parsed.path, project_dir=view.project_dir)
+        return linkscan.pr_candidates(
+            view.parsed.path,
+            project_dir=view.project_dir,
+            card_key=view.jira_key,
+            card_prs=card_prs,
+        )
 
     def _prompt_for_pr(self, session_id: str) -> None:
         self.push_screen(
@@ -2300,6 +2323,36 @@ exec {shlex.quote(real)} "$@"
         if view.jira_key:
             self._open_url(view.jira_url, f"Jira {view.jira_key}")
             return
+        # A linked PR names its own card in its title/body/branch — the
+        # same derivation the poller does, so it needs no confirming.
+        pr_url = self._recorded_pr_url(view)
+        if pr_url:
+            self._jira_from_pr_worker(view.session_id, pr_url)
+            return
+        self._offer_jira_candidates(view)
+
+    @work(thread=True, exclusive=True, group="jiraderive", exit_on_error=False)
+    def _jira_from_pr_worker(self, session_id: str, pr_url: str) -> None:
+        title, body, branch = gitops.pr_jira_sources(pr_url, runner=self.gh_runner)
+        self.call_from_thread(
+            self._jira_from_pr_found, session_id, jira.extract_jira_key(title, body, branch)
+        )
+
+    def _jira_from_pr_found(self, session_id: str, key: str) -> None:
+        view = self.snapshot.by_id(session_id)
+        if view is None:
+            return
+        if not key:
+            self._offer_jira_candidates(view)
+            return
+        # Not pinned: the poller can re-derive this itself, and should
+        # keep doing so as the PR changes.
+        self._checkpoint("Jira association")
+        self.store.set_jira_info(session_id, key, "", "", "")
+        self._open_jira_key(key, "from the linked PR")
+        self.refresh_data()
+
+    def _offer_jira_candidates(self, view) -> None:
         candidates = self._jira_candidates(view)
         if not candidates:
             self.notify("No Jira card linked to this session yet.", severity="warning")
@@ -2308,6 +2361,13 @@ exec {shlex.quote(real)} "$@"
             LinkCandidateModal("No Jira card linked — which one is this session's?", candidates),
             lambda chosen: self._jira_candidate_chosen(view.session_id, chosen),
         )
+
+    def _open_jira_key(self, key: str, whence: str) -> None:
+        url = jira.browse_url(key)
+        if url:
+            self._open_url(url, f"Jira {key}")
+        else:
+            self.notify(f"Linked {key} {whence} — set JIRA_SITE to open it.", severity="warning")
 
     def _jira_candidates(self, view) -> list:
         if view.parsed is None:
@@ -2319,11 +2379,7 @@ exec {shlex.quote(real)} "$@"
             return
         self._checkpoint("Jira association")
         self.store.pin_jira_key(session_id, chosen)
-        url = jira.browse_url(chosen)
-        if url:
-            self._open_url(url, f"Jira {chosen}")
-        else:
-            self.notify(f"Linked {chosen} — set JIRA_SITE to open it.", severity="warning")
+        self._open_jira_key(chosen, "by hand")
         self.refresh_data()
 
     def _open_url(self, url: str, label: str) -> None:

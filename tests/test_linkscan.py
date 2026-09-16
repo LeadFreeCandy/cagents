@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import SID1, TranscriptBuilder
+from conftest import SID1, SID2, TranscriptBuilder
 
 from cagents import linkscan
 
@@ -100,6 +100,39 @@ class TestPRCandidates:
         candidates = linkscan.pr_candidates(path)
         assert [c.value for c in candidates] == ["https://github.com/o/r/pull/7"]
         assert candidates[0].label == "PR #7"
+
+    def test_prs_that_reference_the_linked_card_lead(self, claude_dir: Path):
+        """GitHub said these reference the session's card, which beats
+        anything the transcript merely happens to mention."""
+        path = _write(
+            TranscriptBuilder(SID1, "/proj/alpha").user(
+                "compare against https://github.com/o/alpha/pull/3"
+            ),
+            claude_dir,
+        )
+        candidates = linkscan.pr_candidates(
+            path,
+            project_dir="/proj/alpha",
+            card_key="OWNER-663",
+            card_prs=["https://github.com/o/alpha/pull/8"],
+        )
+        assert candidates[0].value == "https://github.com/o/alpha/pull/8"
+        assert any("OWNER-663" in reason for reason in candidates[0].reasons)
+
+    def test_a_card_match_the_transcript_also_mentions_adds_up(self, claude_dir: Path):
+        path = _write(
+            TranscriptBuilder(SID1, "/proj/alpha").user("working on https://github.com/o/alpha/pull/8"),
+            claude_dir,
+        )
+        both, card_only = linkscan.pr_candidates(
+            path, card_key="OWNER-663", card_prs=["https://github.com/o/alpha/pull/8"]
+        ), linkscan.pr_candidates(
+            _write(TranscriptBuilder(SID2, "/proj/alpha").user("go"), claude_dir),
+            card_key="OWNER-663",
+            card_prs=["https://github.com/o/alpha/pull/8"],
+        )
+        assert both[0].weight > card_only[0].weight  # corroboration, not a duplicate row
+        assert len(both) == 1
 
     def test_likelihood_leaves_room_for_none_of_these(self, claude_dir: Path):
         """A single weak mention must not read as a certainty."""

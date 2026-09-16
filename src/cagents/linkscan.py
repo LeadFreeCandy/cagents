@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,9 +58,23 @@ class Candidate:
     likelihood: float = 0.0  # share of the evidence, "none of these" held back
 
 
-def pr_candidates(path: Path, project_dir: str = "") -> list[Candidate]:
-    """PR URLs this conversation mentions, likeliest first."""
+def pr_candidates(
+    path: Path,
+    project_dir: str = "",
+    card_key: str = "",
+    card_prs: Sequence[str] = (),
+) -> list[Candidate]:
+    """PR URLs this conversation mentions, likeliest first.
+
+    `card_prs` are PRs GitHub says reference `card_key` (the session's
+    linked Jira card) — evidence from outside the transcript, so they
+    become candidates even if the conversation never names them.
+    """
     evidence = _collect(_mark_created(_read(path)), _pr_in)
+    for url in card_prs:
+        for value, label in _pr_in(url):
+            entry = evidence.setdefault(value, _Evidence(label=label))
+            entry.extra.append((5.0, f"references {card_key}" if card_key else "references the card"))
     repo = _repo_name(project_dir)
     for value, entry in evidence.items():
         if repo and _same_repo(value, repo):

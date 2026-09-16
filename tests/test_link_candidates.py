@@ -6,6 +6,7 @@ what it finds, and the pick is what gets stored and opened.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -195,3 +196,111 @@ class TestJiraCandidates:
             await pilot.pause()
             assert not isinstance(app.screen, LinkCandidateModal)
             assert not store.sessions[SID2].jira_key
+
+
+class TestCrossDerivation:
+    """A linked PR names the card, and a linked card finds the PRs. Each
+    key uses the other's link before falling back to the transcript."""
+
+    @pytest.fixture
+    def linked_pr(self, world):
+        app, store, _ = world
+        store.set_pr_url(SID1, "https://github.com/o/alpha/pull/42")
+        return app, store
+
+    async def test_O_takes_the_card_from_the_linked_prs_title(self, linked_pr, monkeypatch):
+        app, store = linked_pr
+        monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+        opened: list[str] = []
+        app._open_url = lambda url, label: opened.append(url)
+        app.gh_runner = lambda args, cwd=None: json.dumps(
+            {"title": "OWNER-880: fix the owner statement", "body": "", "headRefName": "wip"}
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("O")
+            await pilot.pause(0.4)
+            # No picker: the PR's own title is the answer, not a guess.
+            assert not isinstance(app.screen, LinkCandidateModal)
+            assert store.sessions[SID1].jira_key == "OWNER-880"
+            assert opened == ["https://team.atlassian.net/browse/OWNER-880"]
+
+    async def test_a_card_derived_from_the_pr_is_not_pinned(self, linked_pr, monkeypatch):
+        """The poller owns anything it can re-derive itself — pinning is
+        only for a card a human picked out of the transcript."""
+        app, store = linked_pr
+        monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+        app._open_url = lambda url, label: None
+        app.gh_runner = lambda args, cwd=None: json.dumps(
+            {"title": "OWNER-880: fix it", "body": "", "headRefName": "wip"}
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("O")
+            await pilot.pause(0.4)
+            assert store.sessions[SID1].jira_key == "OWNER-880"
+            assert not store.sessions[SID1].jira_pinned
+
+    async def test_a_pr_naming_no_card_falls_back_to_the_transcript(self, linked_pr):
+        app, store = linked_pr
+        app._open_url = lambda url, label: None
+        app.gh_runner = lambda args, cwd=None: json.dumps(
+            {"title": "fix the owner statement", "body": "no card here", "headRefName": "wip"}
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("O")
+            await pilot.pause(0.4)
+            assert isinstance(app.screen, LinkCandidateModal)
+            assert [c.value for c in app.screen.candidates] == ["OWNER-663", "OWNER-112"]
+
+    async def test_o_searches_for_the_prs_that_reference_the_linked_card(self, world):
+        app, store, _ = world
+        store.pin_jira_key(SID1, "OWNER-663")
+        app._open_url = lambda url, label: None
+        searched: list[list[str]] = []
+
+        def gh_runner(args, cwd=None):
+            searched.append(args)
+            return json.dumps([{"url": "https://github.com/o/alpha/pull/77"}])
+
+        app.gh_runner = gh_runner
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("o")
+            await pilot.pause(0.4)
+            assert any("OWNER-663" in args for args in searched)
+            assert isinstance(app.screen, LinkCandidateModal)
+            # The card's PR joins the ranking above every passing mention,
+            # but behind the one this session actually opened: a card can
+            # have several PRs, while `gh pr create` here is definitive.
+            assert [c.value for c in app.screen.candidates] == [
+                "https://github.com/o/alpha/pull/42",
+                "https://github.com/o/alpha/pull/77",
+                "https://github.com/o/alpha/pull/41",
+                "https://github.com/o/other/pull/99",
+            ]
+            found = app.screen.candidates[1]
+            assert any("OWNER-663" in reason for reason in found.reasons)
+
+    async def test_o_still_ranks_the_transcript_when_the_card_finds_nothing(self, world):
+        app, store, _ = world
+        store.pin_jira_key(SID1, "OWNER-663")
+        app._open_url = lambda url, label: None
+        app.gh_runner = lambda args, cwd=None: "[]"
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            select_session(app, SID1)
+            await pilot.pause()
+            await pilot.press("o")
+            await pilot.pause(0.4)
+            assert isinstance(app.screen, LinkCandidateModal)
+            assert app.screen.candidates[0].value == "https://github.com/o/alpha/pull/42"
