@@ -1052,6 +1052,63 @@ exec {shlex.quote(real)} "$@"
         if not directory or not Path(directory).is_dir():
             self.notify(f"Shell claude: bad directory {directory!r}", severity="error")
             return
+        if self._wants_worktree(directory, args, str(provider)):
+            self._worktree_spawn_worker(directory, args, str(provider), pending_id)
+            return
+        self._spawn_requested(directory, args, str(provider), pending_id)
+
+    RESUME_ARGS = {
+        # Claude reopening an existing conversation, and Codex's
+        # subcommands for the same. A resumed conversation already has a
+        # directory and a transcript; moving it to an empty worktree would
+        # at best lose its work and at worst leave --continue nothing to
+        # continue.
+        "claude": ("--resume", "--continue", "-c"),
+        "codex": ("resume", "fork"),
+    }
+
+    def _wants_worktree(self, directory: str, args: list[str], provider: str) -> bool:
+        """Should this spawn get a worktree of its own?
+
+        Only a genuinely new conversation, only with the setting on, and
+        only from a shared checkout: a directory that is already a linked
+        worktree (a cagents one from an earlier conversation, or one made
+        by hand) is exactly what the setting is trying to achieve, so it
+        is used as it stands rather than nested inside another."""
+        if not self.store.get_setting("auto_worktree"):
+            return False
+        markers = self.RESUME_ARGS.get(provider, ())
+        if provider == "codex":
+            if args and args[0] in markers:
+                return False
+        elif any(arg in markers for arg in args):
+            return False
+        return gitops.worktree_status(directory)[0] == "main"
+
+    @work(thread=True, group="worktree", exit_on_error=False)
+    def _worktree_spawn_worker(
+        self, directory: str, args: list[str], provider: str, pending_id: str
+    ) -> None:
+        """`git worktree add` copies a whole checkout out — on a monorepo
+        that is tens of seconds, so it never runs on the UI thread. A
+        failure is reported and then ignored: the conversation the user
+        asked for still opens, in the directory they typed."""
+        try:
+            resolved = gitops.create_worktree(directory)
+            self.call_from_thread(self.store.remember_worktree_repo, directory)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify,
+                f"No worktree ({error}) — opening in {Path(directory).name} itself.",
+                severity="warning",
+                timeout=10,
+            )
+            resolved = directory
+        self.call_from_thread(self._spawn_requested, resolved, args, provider, pending_id)
+
+    def _spawn_requested(
+        self, directory: str, args: list[str], provider: str, pending_id: str
+    ) -> None:
         if provider == "codex":
             self._start_codex_worker(directory, args, pending_id)
             return
@@ -1085,6 +1142,7 @@ exec {shlex.quote(real)} "$@"
             return
         self._checkpoint("new session")
         self.store.track(session_id, directory, utcnow().isoformat())
+        self.store.set_project_dir(session_id, directory)
         self.selected_session_id = session_id
         self._pending_highlight = session_id
         self._show_new_session(name)
@@ -2090,11 +2148,15 @@ exec {shlex.quote(real)} "$@"
     def _recent_directories(self, limit: int = 5) -> list[str]:
         """Distinct project directories from the most recently tracked
         sessions, newest first — offered as quick-jump shortcuts in the
-        new-conversation terminal."""
+        new-conversation terminal.
+
+        A cagents worktree collapses to the checkout it came from: the
+        shortcut you want is the project, and typing `claude` there grows
+        the next worktree anyway."""
         ordered = sorted(self.store.sessions.values(), key=lambda t: t.added_at, reverse=True)
         seen: list[str] = []
         for tracked in ordered:
-            directory = tracked.project_dir
+            directory = gitops.owning_repo(tracked.project_dir) or tracked.project_dir
             if directory and directory not in seen:
                 seen.append(directory)
             if len(seen) >= limit:

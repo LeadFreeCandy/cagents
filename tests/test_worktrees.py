@@ -1,15 +1,22 @@
-"""The git layer behind a worktree per conversation, against real temporary
-repositories: naming and slot reuse, the ref a new branch is cut from,
-mapping a worktree back to the checkout it came from, and what removing one
-is allowed to cost."""
+"""Auto-worktree sessions: every conversation cagents starts gets its own
+linked worktree, so the diff and terminal tabs act on a directory nothing
+else is checked out in.
+
+Covers the git layer against real temporary repositories, the spawn gate
+that decides whether a new conversation gets one, and the two places that
+have to map a worktree back to the repo it came from (grouping and the
+new-conversation directory shortcuts)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import SID1, SID2, FakeTmux, TranscriptBuilder, TranscriptBuilder as TB, widget_text
 
+from cagents.app import CagentsApp
 from cagents.gitops import (
     GitError,
     base_ref,
@@ -21,6 +28,8 @@ from cagents.gitops import (
     remove_worktree,
     worktree_status,
 )
+from cagents.sessions import SessionRegistry
+from cagents.store import SETTINGS_DEFAULTS, Store
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -189,3 +198,219 @@ class TestRemove:
         with pytest.raises(GitError):
             remove_worktree(str(repo), str(worktree), "cagents/1")
         assert worktree.exists()
+
+
+# ------------------------------------------------------------ the setting ---
+
+
+def test_setting_defaults_off_and_round_trips(tmp_path: Path):
+    assert SETTINGS_DEFAULTS["auto_worktree"] is False
+    store = Store.load(tmp_path / "state.json")
+    assert store.get_setting("auto_worktree") is False
+    store.set_setting("auto_worktree", True)
+    assert Store.load(store.path).get_setting("auto_worktree") is True
+
+
+# ------------------------------------------------------------- spawn gate ---
+
+
+@pytest.fixture
+def world(claude_dir: Path, tmp_path: Path, now: float):
+    TranscriptBuilder(SID1, "/proj/alpha").ai_title("Existing").user("go").assistant_text(
+        "Done."
+    ).write(claude_dir, mtime=now - 900)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+    return app, store, tmux
+
+
+async def _spawn(app, pilot, payload: dict) -> None:
+    app._spawn_request_path().write_text(json.dumps(payload), "utf-8")
+    app.apply_snapshot(app.registry.refresh())
+    await pilot.pause(0.3)
+    await app.workers.wait_for_complete()
+    await pilot.pause(0.2)
+
+
+class TestSpawnGate:
+    async def test_off_by_default_keeps_the_typed_directory(self, world, repo: Path):
+        app, store, tmux = world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "args": []})
+
+            directory, _args, sid = tmux.created[-1]
+            assert directory == str(repo)
+            assert store.sessions[sid].project_dir == str(repo)
+            assert not (repo.parent / "repo-worktrees").exists()
+
+    async def test_on_spawns_the_conversation_in_a_fresh_worktree(self, world, repo: Path):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "args": []})
+
+            directory, args, sid = tmux.created[-1]
+            assert directory == str(repo.parent / "repo-worktrees" / "cagents-1")
+            assert worktree_status(directory)[0] == "linked"
+            assert current_branch(directory) == "cagents/1"
+            # the conversation is bookkept where it actually runs
+            assert store.sessions[sid].project_dir == directory
+            assert "--session-id" in args
+
+    async def test_each_new_conversation_gets_its_own(self, world, repo: Path):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "args": []})
+            await _spawn(app, pilot, {"dir": str(repo), "args": []})
+
+            directories = [entry[0] for entry in tmux.created]
+            assert directories[-2] != directories[-1]
+            assert {Path(d).name for d in directories[-2:]} == {"cagents-1", "cagents-2"}
+
+    async def test_a_pending_n_conversation_is_bookkept_in_its_worktree(
+        self, world, repo: Path
+    ):
+        # `n` tracks the id against the shell's directory before `claude` is
+        # ever typed. Found live: without moving it, project_dir stays the
+        # shared checkout, so grouping and the diff and terminal tabs all
+        # point there until the first transcript record lands.
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        pending_id = "99999999-9999-9999-9999-999999999999"
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._pending_new_terminals.add(pending_id)
+            store.track(pending_id, str(repo), "2026-08-18T09:00:00+00:00")
+            await _spawn(app, pilot, {
+                "dir": str(repo), "pending_id": pending_id, "args": [],
+            })
+
+            worktree = str(repo.parent / "repo-worktrees" / "cagents-1")
+            assert tmux.created[-1][0] == worktree
+            assert tmux.created[-1][2] == pending_id
+            assert store.sessions[pending_id].project_dir == worktree
+            assert Store.load(store.path).sessions[pending_id].project_dir == worktree
+
+    @pytest.mark.parametrize("args", [["--resume", SID2], ["--continue"], ["-c"]])
+    async def test_resuming_a_conversation_never_relocates_it(self, world, repo: Path, args):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "args": args})
+
+            assert tmux.created[-1][0] == str(repo)
+            assert not (repo.parent / "repo-worktrees").exists()
+
+    async def test_an_existing_worktree_is_used_as_is(self, world, repo: Path):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        existing = repo.parent / "hand-rolled"
+        _git(repo, "worktree", "add", "-q", "-b", "mine", str(existing))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(existing), "args": []})
+
+            assert tmux.created[-1][0] == str(existing)
+            assert current_branch(tmux.created[-1][0]) == "mine"
+
+    async def test_a_directory_outside_git_still_starts_a_conversation(self, world, tmp_path: Path):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        plain = tmp_path / "notarepo"
+        plain.mkdir()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(plain), "args": []})
+
+            assert tmux.created[-1][0] == str(plain)
+
+    async def test_codex_conversations_get_one_too(self, world, repo: Path, monkeypatch):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        seen: list[str] = []
+
+        def fake_codex_worker(directory, args, pending_id="", parent_id=""):
+            seen.append(directory)
+
+        monkeypatch.setattr(app, "_start_codex_worker", fake_codex_worker)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "provider": "codex", "args": []})
+
+            assert seen == [str(repo.parent / "repo-worktrees" / "cagents-1")]
+
+    @pytest.mark.parametrize("args", [["resume", SID2], ["fork", SID2]])
+    async def test_codex_resume_and_fork_never_relocate(self, world, repo: Path, monkeypatch, args):
+        app, store, tmux = world
+        store.set_setting("auto_worktree", True)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            app, "_start_codex_worker",
+            lambda directory, a, pending_id="", parent_id="": seen.append(directory),
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _spawn(app, pilot, {"dir": str(repo), "provider": "codex", "args": args})
+
+            assert seen == [str(repo)]
+
+
+# -------------------------------------------------- mapping back to a repo ---
+
+
+class TestWorktreesReadAsOneProject:
+    async def test_grouped_view_groups_them_under_the_checkout(
+        self, claude_dir: Path, tmp_path: Path, now: float, repo: Path
+    ):
+        one = create_worktree(str(repo))
+        two = create_worktree(str(repo))
+        TB(SID1, one).ai_title("First").user("go").assistant_text("ok").write(
+            claude_dir, mtime=now - 900
+        )
+        TB(SID2, two).ai_title("Second").user("go").assistant_text("ok").write(
+            claude_dir, mtime=now - 800
+        )
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, one, "2026-08-18T09:00:00+00:00")
+        store.track(SID2, two, "2026-08-18T09:01:00+00:00")
+        registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
+        app = CagentsApp(store=store, registry=registry, tmux=FakeTmux(), claude_dir=claude_dir)
+
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            views = {v.session_id: v for v in app.snapshot.views}
+            assert views[SID1].group_dir == str(repo)
+            assert views[SID2].group_dir == str(repo)
+            # each still works where it actually runs
+            assert views[SID1].work_dir == one
+            assert views[SID2].work_dir == two
+
+            await pilot.press("2")
+            await pilot.pause()
+            rendered = "\n".join(
+                str(app.query_one("#grouped-list").get_option_at_index(i).prompt)
+                for i in range(app.query_one("#grouped-list").option_count)
+            )
+            assert rendered.count(str(repo) + ")") == 1
+            assert "cagents-1)" not in rendered
+
+    def test_directory_shortcuts_offer_the_checkout_not_the_worktrees(
+        self, claude_dir: Path, tmp_path: Path, repo: Path
+    ):
+        one = create_worktree(str(repo))
+        two = create_worktree(str(repo))
+        store = Store.load(tmp_path / "state.json")
+        store.track(SID1, one, "2026-08-18T09:00:00+00:00")
+        store.track(SID2, two, "2026-08-18T09:01:00+00:00")
+        registry = SessionRegistry(store, tmux=FakeTmux(), claude_dir=claude_dir)
+        app = CagentsApp(store=store, registry=registry, tmux=FakeTmux(), claude_dir=claude_dir)
+
+        assert app._recent_directories() == [str(repo)]

@@ -252,7 +252,7 @@ class GroupedView(BaseSessionView):
         options: list[Option] = []
         groups: dict[str, list[SessionView]] = {}
         for view in snapshot.views:
-            groups.setdefault(view.project_dir, []).append(view)
+            groups.setdefault(view.group_dir, []).append(view)
         compact = bool(getattr(self.app, "compact", False))
         show_jira = bool(self.app.store.get_setting("jira_integration")) and not compact
         # One set of column widths for the whole list, so rows line up across

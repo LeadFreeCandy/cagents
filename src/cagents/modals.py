@@ -608,6 +608,15 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Done conversations suspend after 1h idle; hover or select to resume.",
     ),
     (
+        "auto_worktree",
+        "Worktree per conversation",
+        "Start every new conversation in its own linked worktree of the directory "
+        "it opens in (<repo>-worktrees/cagents-<n>, branch cagents/<n>, off the "
+        "mainline). Nothing else is checked out there, so the diff and terminal "
+        "tabs and PR lookup act on this conversation's work alone. Resumed "
+        "conversations stay where they are. :worktrees prunes them.",
+    ),
+    (
         "background_activity_states",
         "Background activity states",
         "Show monitoring, background, and shell running as separate states. "

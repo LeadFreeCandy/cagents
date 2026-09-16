@@ -93,6 +93,12 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # What the diff tab shows. "branch": this worktree vs master
     # (merge-base, committed + uncommitted). "uncommitted": vs HEAD only.
     "diff_mode": "branch",
+    # Start every new conversation in a linked worktree of the directory
+    # it was opened in (`<repo>-worktrees/cagents-<n>`, branch
+    # `cagents/<n>`, branched off the mainline) instead of the shared
+    # checkout. Off by default: it is a real change to where work lands.
+    # Resumed conversations are never relocated.
+    "auto_worktree": False,
     # How long `s` (snooze) parks a session for by default.
     "snooze_duration": "1h",
     # What re-alerts a session parked "waiting on PR" (w) back out of
@@ -263,6 +269,10 @@ class Store:
     path: Path
     sessions: dict[str, TrackedSession] = field(default_factory=dict)
     settings: dict[str, object] = field(default_factory=dict)
+    # Checkouts auto_worktree has grown a worktree in. Kept so `:worktrees`
+    # can still find them to prune once every conversation that used one
+    # has been untracked — nothing else would point at them by then.
+    worktree_repos: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Store":
@@ -283,6 +293,9 @@ class Store:
                 default = SETTINGS_DEFAULTS.get(key)
                 if default is not None and isinstance(value, type(default)):
                     store.settings[key] = value
+        repos = raw.get("worktree_repos")
+        if isinstance(repos, list):
+            store.worktree_repos = [str(r) for r in repos if isinstance(r, str)]
         return store
 
     def save(self) -> None:
@@ -290,6 +303,7 @@ class Store:
             "version": STORE_VERSION,
             "sessions": {sid: t.to_dict() for sid, t in self.sessions.items()},
             "settings": self.settings,
+            "worktree_repos": self.worktree_repos,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -339,6 +353,7 @@ class Store:
             forget_checkpoint(path, "cagents:" + str(self.path.resolve()))
         self.sessions.clear()
         self.settings.clear()
+        self.worktree_repos.clear()
         if path:
             self.settings["share_conversations"] = False
         self.save()
@@ -496,4 +511,24 @@ class Store:
         if default is None or not isinstance(value, type(default)):
             return
         self.settings[key] = value
+        self.save()
+
+    def set_project_dir(self, session_id: str, project_dir: str) -> None:
+        """Move a tracked conversation's directory. `track` deliberately
+        leaves an existing entry alone, but `n` tracks a conversation's id
+        against the shell's directory before `claude` is ever typed — and
+        with auto_worktree on it is then spawned in a worktree of that
+        directory instead. Until the first transcript record lands there is
+        nothing else to learn the real directory from, so grouping and the
+        diff and terminal tabs would all point at the shared checkout."""
+        tracked = self.sessions.get(session_id)
+        if tracked is None or not project_dir or tracked.project_dir == project_dir:
+            return
+        tracked.project_dir = project_dir
+        self.save()
+
+    def remember_worktree_repo(self, repo_dir: str) -> None:
+        if not repo_dir or repo_dir in self.worktree_repos:
+            return
+        self.worktree_repos.append(repo_dir)
         self.save()
