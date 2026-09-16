@@ -1,9 +1,13 @@
-"""Git operations cagents needs: worktree diffs for review, and PR
-lookup/status via `gh`.
+"""Git operations cagents needs: worktree diffs for review, PR
+lookup/status via `gh`, and the per-conversation worktrees the
+auto_worktree setting grows.
 
 Everything here is deliberately shallow — plain `git`/`gh` subprocesses,
-loud failures (GitError with the tool's own stderr), no state, and strictly
-read-only: cagents never mutates a repository.
+loud failures (GitError with the tool's own stderr), no state.
+
+Reads stay reads. The only writes are worktree add/remove under the
+`cagents/` branch prefix, always on a branch of cagents' own making:
+nothing here touches a branch, a commit, or a file a human wrote.
 """
 
 from __future__ import annotations
@@ -95,6 +99,183 @@ def default_branch(directory: str) -> str:
         except GitError:
             continue
     return ""
+
+
+# ---------------------------------------------------- session worktrees --
+
+# Both halves of a cagents worktree's identity: the directory
+# `<repo>-worktrees/cagents-<n>` and the branch `cagents/<n>`. The prefix is
+# what marks a worktree as ours — nothing else is ever touched.
+WORKTREE_PREFIX = "cagents"
+_HOLDER_SUFFIX = "-worktrees"
+_MAX_SLOTS = 500
+
+
+def base_ref(directory: str) -> str:
+    """A concrete, verified ref to branch a new worktree off: this repo's
+    mainline, remote-tracking first.
+
+    `default_branch` answers a related question for the diff view, but it
+    returns a bare *name* — its origin/HEAD lookup keeps only the last
+    path component, so "origin/main" comes back as "main". For a diff base
+    that is harmless; for `git worktree add` it is the difference between
+    starting from the mainline and starting from whatever a local `main`
+    was at the last pull. Every candidate here is verified, so the answer
+    is a ref that exists."""
+    try:
+        head = _run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], directory
+        ).strip()
+    except GitError:
+        head = ""
+    for name in (head, "origin/main", "origin/master", "main", "master"):
+        if not name:
+            continue
+        try:
+            _run(["git", "rev-parse", "--verify", "--quiet", name], directory)
+            return name
+        except GitError:
+            continue
+    return ""
+
+
+def worktree_holder(repo_dir: str) -> Path:
+    """The sibling directory every worktree of `repo_dir` lives under."""
+    repo = Path(repo_dir).resolve()
+    return repo.parent / f"{repo.name}{_HOLDER_SUFFIX}"
+
+
+def owning_repo(directory: str) -> str:
+    """The checkout a cagents-created worktree belongs to; '' for anything
+    else, including worktrees someone made by hand.
+
+    Read off the layout cagents itself lays down rather than out of git:
+    this runs for every conversation on every refresh, and two
+    subprocesses per row is not a price a list render can pay."""
+    path = Path(directory)
+    holder = path.parent
+    if not path.name.startswith(f"{WORKTREE_PREFIX}-"):
+        return ""
+    if not holder.name.endswith(_HOLDER_SUFFIX):
+        return ""
+    repo = holder.parent / holder.name[: -len(_HOLDER_SUFFIX)]
+    return str(repo) if repo.is_dir() else ""
+
+
+def next_worktree_slot(repo_dir: str) -> tuple[str, str]:
+    """(destination, branch) for this repo's next worktree — the lowest
+    number whose directory *and* branch are both free, so removing an old
+    one hands its number back."""
+    holder = worktree_holder(repo_dir)
+    for number in range(1, _MAX_SLOTS):
+        dest = holder / f"{WORKTREE_PREFIX}-{number}"
+        branch = f"{WORKTREE_PREFIX}/{number}"
+        if dest.exists():
+            continue
+        try:
+            _run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], repo_dir)
+        except GitError:
+            return str(dest), branch
+    raise GitError(f"no free worktree slot under {holder}")
+
+
+def create_worktree(repo_dir: str) -> str:
+    """Grow `repo_dir` a dedicated worktree for one conversation, branched
+    off the mainline. Returns its path; raises GitError carrying git's own
+    message if anything goes wrong."""
+    if not is_git_repo(repo_dir):
+        raise GitError(f"not a git repository: {repo_dir}")
+    dest, branch = next_worktree_slot(repo_dir)
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    args = ["git", "worktree", "add", "-b", branch, dest]
+    base = base_ref(repo_dir)
+    if base:
+        args.append(base)
+    _run(args, repo_dir, timeout=120.0)
+    return dest
+
+
+@dataclass
+class CagentsWorktree:
+    path: str
+    branch: str
+    dirty_files: int = 0
+    commits_ahead: int = 0  # commits on the branch that the mainline lacks
+    merged: bool = False  # the mainline already contains the branch tip
+
+
+def cagents_worktrees(repo_dir: str) -> list[CagentsWorktree]:
+    """Every worktree of this repo that cagents created, each with enough
+    state to decide whether removing it would lose anything."""
+    try:
+        listing = _run(["git", "worktree", "list", "--porcelain"], repo_dir)
+    except GitError:
+        return []
+    found: list[CagentsWorktree] = []
+    path = ""
+    for line in listing.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line.startswith("branch "):
+            branch = line[len("branch "):].removeprefix("refs/heads/")
+            if path and branch.startswith(f"{WORKTREE_PREFIX}/"):
+                found.append(CagentsWorktree(path=path, branch=branch))
+            path = ""
+    base = base_ref(repo_dir)
+    for entry in found:
+        entry.dirty_files = _dirty_count(entry.path)
+        if not base:
+            continue
+        entry.commits_ahead = _commit_count(
+            ["git", "rev-list", "--count", f"{base}..{entry.branch}"], repo_dir
+        )
+        entry.merged = _is_ancestor(entry.branch, base, repo_dir)
+    return found
+
+
+def remove_worktree(repo_dir: str, worktree_path: str, branch: str = "") -> None:
+    """Remove a worktree cagents created.
+
+    git itself refuses while the worktree holds modified or untracked
+    files, and that refusal is passed straight through. The branch goes
+    only if git agrees it is merged (`branch -d`, never `-D`), so work
+    that was committed but not landed outlives its worktree."""
+    _run(["git", "worktree", "remove", worktree_path], repo_dir, timeout=60.0)
+    holder = Path(worktree_path).parent
+    if holder.name.endswith(_HOLDER_SUFFIX):
+        try:
+            holder.rmdir()  # only when the last worktree of this repo went
+        except OSError:
+            pass
+    if not branch:
+        return
+    try:
+        _run(["git", "branch", "-d", branch], repo_dir)
+    except GitError:
+        pass  # unmerged: keeping the branch is the whole point
+
+
+def _dirty_count(directory: str) -> int:
+    try:
+        out = _run(["git", "status", "--porcelain"], directory)
+    except GitError:
+        return 0
+    return len([line for line in out.splitlines() if line.strip()])
+
+
+def _commit_count(args: list[str], cwd: str) -> int:
+    try:
+        return int(_run(args, cwd).strip() or 0)
+    except (GitError, ValueError):
+        return 0
+
+
+def _is_ancestor(branch: str, base: str, cwd: str) -> bool:
+    try:
+        _run(["git", "merge-base", "--is-ancestor", branch, base], cwd)
+        return True
+    except GitError:
+        return False
 
 
 # ---------------------------------------------------------------- diffs --
