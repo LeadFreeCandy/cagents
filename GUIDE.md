@@ -134,6 +134,11 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
   it. Conversation history and terminal tabs survive.
 - `■ stopped` — not running, transcript ends mid-turn.
 
+The provider mark after the state (`✳` Claude, `›` Codex) is **lit while a
+process is running for that conversation and dim when nothing is** — Enter resumes
+a dim one. State is about attention, not residency: a `✓ done` row can be either.
+`☾` additionally marks a session cagents itself suspended.
+
 ## List keys
 
 | key | action |
