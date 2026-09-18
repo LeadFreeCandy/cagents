@@ -775,3 +775,21 @@ def test_parse_cache_drops_transcripts_that_left_the_pass(claude_dir: Path, tmp_
     store.untrack(SID1)
     registry.refresh(now=now + 4)
     assert registry._parse_cache == {}
+
+
+def test_map_never_hosts_a_session_in_a_husk(claude_dir: Path, now: float):
+    """After the agent exits on its own, the terminal window keeps the tmux
+    session alive, still tagged with the id, and `live` (pane_dead is False —
+    that shell is alive and well). Without this the row reads live, Enter
+    attaches to the leftover shell, and the resume path is unreachable. A
+    suspended session keeps its retained pane in window 0 and is unaffected."""
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(2))
+    parsed = parse_session_file(b.write(claude_dir, mtime=now - 2))
+    husk = _tmux(name="alpha-5", path="/proj/alpha", created=now - 20, sid=SID1)
+    husk.has_root_window = False
+    assert map_tmux_sessions([(_tracked(), parsed)], [husk]) == {}
+    untagged = _tmux(name="alpha-6", path="/proj/alpha", created=now - 20)
+    untagged.has_root_window = False
+    assert map_tmux_sessions([(_tracked(), parsed)], [untagged]) == {}
+    alive = _tmux(name="alpha-5", path="/proj/alpha", created=now - 20, sid=SID1)
+    assert map_tmux_sessions([(_tracked(), parsed)], [alive])[SID1].name == "alpha-5"
