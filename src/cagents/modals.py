@@ -407,6 +407,7 @@ HELP_TEXT = """\
   g / G         first / last conversation while the list has focus
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width
+  ctrl+h / l    the same, in vim spelling; always live, even mid-sentence
   mouse         click focuses; wheel scrolls the hovered pane
   drag          copy on release; selection stays visible (q dismisses it)
   provider      ✳ Claude · › Codex (one-column icons beside session state)

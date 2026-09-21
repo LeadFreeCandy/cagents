@@ -342,6 +342,27 @@ class TestCommands:
                 assert "select-pane -t :.1" in right
                 assert "resize-pane -Z -t :.1" in right
 
+    def test_ctrl_hl_is_the_vim_spelling_of_the_size_control(self):
+        """⌃h/⌃l drive the same three states as the bare pair, whatever the
+        capture settings say, and never yield to the composer. They send
+        the ARROW on the rail pass-through rather than the key pressed:
+        measured through tmux, ⌃h reaches the rail as the byte 0x08, which
+        Textual reports as Backspace, so the rail can never bind ⌃h itself."""
+        for kwargs in ({}, {"bare": False}, {"ctrl": True}, {"probe": "/p/probe"}):
+            bound = {c[2]: " ".join(c) for c in arrow_capture_commands(**kwargs)
+                     if c[0] == "bind" and c[2] in ("C-h", "C-l")}
+            assert set(bound) == {"C-h", "C-l"}, kwargs
+            left, right = bound["C-h"], bound["C-l"]
+            # never the composer probe, whatever the bare pair is doing
+            for binding in bound.values():
+                assert "cursor_x" not in binding and "run-shell" not in binding
+            # rail-focused: hand the app a real arrow, not the pressed key
+            assert "send-keys Left" in left and "send-keys C-h" not in left
+            assert "send-keys Right" in right and "send-keys C-l" not in right
+            # session-focused: the same size control as ←/→
+            assert "window_zoomed_flag" in left and "select-pane -t :.0" in left
+            assert "resize-pane -Z -t :.1" in right
+
     def test_dim_chat_commands_enabled_sets_a_per_pane_style_only_on_the_chat_pane(self):
         from cagents.sidecar import dim_chat_commands
 
