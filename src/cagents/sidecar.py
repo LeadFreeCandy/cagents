@@ -545,24 +545,24 @@ _LEFT_SIZE = (
 _RIGHT_SIZE = "resize-pane -Z -t :.1"
 
 
-def _left_cycle(modifier: str = "", probe: str = "") -> list[str]:
-    key = f"{modifier}Left"
+def _left_cycle(key: str, send: str = "", probe: str = "") -> list[str]:
+    send = send or key
     return [
         "bind", "-n", key,
         "if", "-F", "#{==:#{pane_index},0}",
-        f"send-keys {key}",
-        _gate(key, _LEFT_SIZE, probe),
+        f"send-keys {send}",
+        _gate(send, _LEFT_SIZE, probe),
     ]
 
 
-def _right_cycle(modifier: str = "", probe: str = "") -> list[str]:
+def _right_cycle(key: str, send: str = "", probe: str = "") -> list[str]:
     # Already zoomed is already max, so right passes through there too.
-    key = f"{modifier}Right"
+    send = send or key
     return [
         "bind", "-n", key,
         "if", "-F", "#{||:#{==:#{pane_index},0},#{window_zoomed_flag}}",
-        f"send-keys {key}",
-        _gate(key, _RIGHT_SIZE, probe),
+        f"send-keys {send}",
+        _gate(send, _RIGHT_SIZE, probe),
     ]
 
 
@@ -652,7 +652,8 @@ def arrow_capture_commands(
     commands: list[list[str]] = []
     for modifier, capture, gate in (("", bare, probe), ("C-", ctrl, "")):
         if capture:
-            commands += [_left_cycle(modifier, gate), _right_cycle(modifier, gate)]
+            commands += [_left_cycle(f"{modifier}Left", probe=gate),
+                         _right_cycle(f"{modifier}Right", probe=gate)]
         else:
             commands += [["unbind", "-n", f"{modifier}Left"],
                          ["unbind", "-n", f"{modifier}Right"]]
