@@ -578,6 +578,18 @@ def _right_cycle(key: str, send: str = "", probe: str = "") -> list[str]:
 # bound only because it is what the statusline has always advertised.
 _UNCONDITIONAL_MODIFIERS = ("M-", "S-")
 
+# ⌃h/⌃l are the vim spelling of the same size control, always bound for the
+# same reason ⌥/⇧ are: a layout key that works mid-sentence. Plain h/l are
+# letters Claude needs (and h is handoff in the rail), so the pair is ⌃.
+#
+# The rail pass-through sends the ARROW rather than the key pressed, which
+# the arrow pair does not have to do. Measured through tmux: ⌃h arrives at
+# the rail as the byte 0x08 and Textual reports that as Backspace, so the
+# rail cannot tell ⌃h from Backspace and cannot bind it. Translating here
+# means the rail keeps one set of keys — ←/→ for kanban columns and for
+# WIDE -> SMALL — and both spellings reach it.
+_VIM_SIZE_KEYS = (("C-h", "Left"), ("C-l", "Right"))
+
 
 def _left_unconditional(modifier: str) -> list[str]:
     return [
@@ -599,9 +611,13 @@ def _right_unconditional(modifier: str) -> list[str]:
 
 
 def _unconditional_cycles() -> list[list[str]]:
+    left_key, right_key = _VIM_SIZE_KEYS
     return [command(modifier)
             for modifier in _UNCONDITIONAL_MODIFIERS
-            for command in (_left_unconditional, _right_unconditional)]
+            for command in (_left_unconditional, _right_unconditional)] + [
+        _left_cycle(left_key[0], send=left_key[1]),
+        _right_cycle(right_key[0], send=right_key[1]),
+    ]
 
 
 def container_setup_commands() -> list[list[str]]:
@@ -616,7 +632,8 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-style", "bg=colour235,fg=colour246"],
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
-        ["set", "-g", "status-right", " ←/→ size (⇧⌥ any time) · C-d diff · C-t term "],
+        ["set", "-g", "status-right",
+         " ←/→ C-h/C-l size (⇧⌥ any time) · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -646,8 +663,9 @@ def arrow_capture_commands(
     A captured ⌃ arrow always resizes -- that is the point of turning it
     on, and it is what leaves you a working layout key mid-sentence.
 
-    ⌥ and ⇧ arrows stay bound whatever the settings say: turning a capture
-    off means "give me that key back", not "take away the size control".
+    ⌥ and ⇧ arrows, and ⌃h/⌃l, stay bound whatever the settings say:
+    turning a capture off means "give me that key back", not "take away
+    the size control".
     """
     commands: list[list[str]] = []
     for modifier, capture, gate in (("", bare, probe), ("C-", ctrl, "")):

@@ -434,7 +434,7 @@ class KanbanColumn(Widget):
 
 
 class KanbanView(BaseSessionView):
-    """Columns by lifecycle state; h/l (or ←/→) move between columns."""
+    """Columns by lifecycle state; ← / → (or ⌃h/⌃l) move between columns."""
 
     DEFAULT_CSS = """
     KanbanView { height: 1fr; }
