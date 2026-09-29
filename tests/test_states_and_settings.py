@@ -1350,6 +1350,60 @@ async def test_search_flow_tracks_and_selects_the_chosen_result(world, claude_di
         assert app.selected_session_id == sid
 
 
+async def test_search_updates_as_you_type_and_arrows_pick_without_leaving_the_input(world, claude_dir, now):
+    from textual.widgets import Input, OptionList
+
+    from cagents.modals import SearchModal
+
+    app, store, tmux = world
+    store.set_setting("conversation_search", True)
+    for sid, title in (("77777777-7777-7777-7777-777777777777", "Widget alpha"),
+                       ("88888888-8888-8888-8888-888888888888", "Widget beta")):
+        TranscriptBuilder(sid, "/proj/found-me").ai_title(title).user("go").assistant_text(
+            "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause(0.1)
+        modal = app.screen
+        assert isinstance(modal, SearchModal)
+        await pilot.press(*"unobtain")
+        await pilot.pause(0.5)
+        results = modal.query_one("#results", OptionList)
+        assert results.option_count == 2
+        assert isinstance(app.focused, Input)
+        await pilot.press("ium")
+        await pilot.pause(0.5)
+        assert results.option_count == 2 and results.highlighted == 0
+        await pilot.press("down")
+        assert results.highlighted == 1 and isinstance(app.focused, Input)
+        await pilot.press("up", "ctrl+n")
+        assert results.highlighted == 1
+        chosen = modal.results[1].session_id
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert not isinstance(app.screen, SearchModal)
+        assert app.selected_session_id == chosen
+
+
+async def test_search_enter_before_results_opens_the_top_one_when_they_land(world, claude_dir, now):
+    from cagents.modals import SearchModal
+
+    app, store, tmux = world
+    store.set_setting("conversation_search", True)
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/proj/found-me").ai_title("Found session").user("go").assistant_text(
+        "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause(0.1)
+        await pilot.press(*"unobtainium", "enter")
+        await pilot.pause(0.5)
+        assert not isinstance(app.screen, SearchModal)
+        assert app.selected_session_id == sid
+
+
 class TestTimeOrderedQueue:
     """time_ordered_queue: every state ranks equal, so recency of the last
     STATE CHANGE is the whole ordering — a fresh working->review transition

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Select, Static
 from textual.widgets.option_list import Option
+from textual.worker import get_current_worker
 
 from .claude_data import DiscoveredSession
 from .format import human_age, provider_icon
@@ -269,14 +271,20 @@ class TrackModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+_SEARCH_LOCK = threading.Lock()
+
+
 class SearchModal(ModalScreen["object | None"]):
     """Fuzzy full-text search across every conversation transcript on
-    disk — the complete history (every message), not just titles. A real
-    full scan, deliberately: press Enter to run it rather than searching
-    on every keystroke, since it can take a while across many/large
-    transcripts. Dismisses with the chosen SearchResult, or None."""
+    disk — the complete history (every message), not just titles.
+    Results follow each keystroke; ↑/↓ (or ctrl+p/ctrl+n) pick while you
+    keep typing, Enter opens. Dismisses with the chosen SearchResult, or None."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("down,ctrl+n", "move(1)", show=False, priority=True),
+        Binding("up,ctrl+p", "move(-1)", show=False, priority=True),
+    ]
 
     DEFAULT_CSS = """
     SearchModal { align: center middle; }
@@ -296,51 +304,76 @@ class SearchModal(ModalScreen["object | None"]):
         self.claude_dir = claude_dir
         self.codex_dir = codex_dir
         self.results: list = []
+        self._results_query = ""
+        self._open_when_ready = False
+        self._debounce = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Search all conversation history")
-            yield Static(
-                "Enter to search (full scan — can take a while) · Esc to cancel",
-                classes="hint",
-            )
+            yield Static("↑/↓ pick · Enter open · Esc cancel", classes="hint")
             yield Input(placeholder="fuzzy search…", id="query")
             yield Static("", id="status")
             yield OptionList(id="results")
 
     def on_mount(self) -> None:
         self.query_one("#query", Input).focus()
+        self._run_search("")
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._open_when_ready = False
+        if self._debounce is not None:
+            self._debounce.stop()
         query = event.value.strip()
         if not query:
+            self._show_results("", [])
             return
-        self.query_one("#status", Static).update(
-            "Searching the complete history — this can take a while…"
-        )
-        self.query_one("#results", OptionList).clear_options()
-        self._run_search(query)
+        self._debounce = self.set_timer(0.06, lambda: self._run_search(query))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        highlighted = self.query_one("#results", OptionList).highlighted
+        if self._results_query != event.value.strip():
+            self._open_when_ready = True
+        elif self.results and highlighted is not None:
+            self.dismiss(self.results[highlighted])
+
+    def action_move(self, step: int) -> None:
+        option_list = self.query_one("#results", OptionList)
+        if option_list.option_count:
+            current = option_list.highlighted or 0
+            option_list.highlighted = max(0, min(option_list.option_count - 1, current + step))
 
     @work(thread=True, exclusive=True, group="conversation-search")
     def _run_search(self, query: str) -> None:
-        from .search import search_all_sessions
+        from .search import scan_all_sessions, search_all_sessions
 
-        results = search_all_sessions(self.claude_dir, query, codex_dir=self.codex_dir)
-        self.app.call_from_thread(self._show_results, results)
+        with _SEARCH_LOCK:
+            if get_current_worker().is_cancelled:
+                return
+            if not query:
+                scan_all_sessions(self.claude_dir, codex_dir=self.codex_dir)
+                return
+            results = search_all_sessions(self.claude_dir, query, codex_dir=self.codex_dir)
+        self.app.call_from_thread(self._show_results, query, results)
 
-    def _show_results(self, results: list) -> None:
+    def _show_results(self, query: str, results: list) -> None:
         from rich.text import Text
 
         from .search import MatchKind
 
-        self.results = results
+        if query != self.query_one("#query", Input).value.strip():
+            return
+        self.results, self._results_query = results, query
+        if self._open_when_ready and results:
+            self.dismiss(results[0])
+            return
         option_list = self.query_one("#results", OptionList)
         option_list.clear_options()
         status = self.query_one("#status", Static)
         if not results:
-            status.update("No matches.")
+            status.update("No matches." if query else "")
             return
-        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
+        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''}")
         for i, result in enumerate(results):
             is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
             row = Text(no_wrap=True, overflow="ellipsis")
@@ -352,7 +385,6 @@ class SearchModal(ModalScreen["object | None"]):
             row.append(f"  {result.snippet}", style="italic dim")
             option_list.add_option(Option(row, id=str(i)))
         option_list.highlighted = 0
-        option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(self.results[int(event.option.id)])
@@ -445,8 +477,8 @@ HELP_TEXT = """\
                 tab -> cd/z/mkdir anywhere -> type "claude" or "codex" and it opens as a
                 managed session right there
   a             track an existing session
-  /             search all conversation history (fuzzy, full scan — off by
-                default, enable in settings)
+  /             search all conversation history as you type (fuzzy; ↑/↓ or
+                ctrl+p/n pick, Enter opens — off by default, enable in settings)
   ctrl+r        restart the selected agent, resuming the same conversation
   :done         mark every needs-review conversation done (z undoes)
   :restart      restart running tracked agents and the dashboard
@@ -666,8 +698,8 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "conversation_search",
         "Conversation search (/)",
         "Fuzzy full-text search across every conversation transcript on disk — the "
-        "complete history, not just titles. Off by default: a full scan can take a "
-        "while across many/large transcripts.",
+        "complete history, not just titles. Results follow each keystroke. Off by "
+        "default: opening it reads every transcript once, then only changed ones.",
     ),
     (
         "auto_done_duration",
