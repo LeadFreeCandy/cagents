@@ -178,6 +178,9 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
     return project_dir, title, lines
 
 
+_scan_cache: dict[Path, tuple[tuple[int, int], tuple[str, str, list[str]]]] = {}
+
+
 def search_all_sessions(
     claude_dir: Path, query: str, limit: int = 50, sessions: list[DiscoveredSession] | None = None,
     codex_dir: Path | None = None,
@@ -200,14 +203,25 @@ def search_all_sessions(
             sessions += discover_codex(codex_dir)
     results: list[SearchResult] = []
     for discovered in sessions:
-        if discovered.provider == "codex":
-            from .codex_data import scan_transcript
-            try:
-                project_dir, title, lines = scan_transcript(discovered.path)
-            except OSError:
-                continue  # archived or removed between discovery and the full scan
+        try:
+            stat = discovered.path.stat()
+        except OSError:
+            continue  # archived or removed between discovery and the full scan
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = _scan_cache.get(discovered.path)
+        if cached is not None and cached[0] == key:
+            project_dir, title, lines = cached[1]
         else:
-            project_dir, title, lines = _scan_transcript(discovered.path)
+            if discovered.provider == "codex":
+                from .codex_data import scan_transcript
+                try:
+                    scanned = scan_transcript(discovered.path)
+                except OSError:
+                    continue
+            else:
+                scanned = _scan_transcript(discovered.path)
+            _scan_cache[discovered.path] = (key, scanned)
+            project_dir, title, lines = scanned
         best: tuple[MatchKind, float, str] | None = None
 
         def consider(text: str, exact_kind: MatchKind, fuzzy_kind: MatchKind) -> None:
