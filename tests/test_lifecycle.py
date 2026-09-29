@@ -10,7 +10,7 @@ import pytest
 from textual.widgets import OptionList
 
 from cagents.app import CagentsApp
-from cagents.claude_data import ParsedSession
+from cagents.claude_data import Link, ParsedSession
 from cagents.format import session_row
 from cagents.lifecycle import apply_auto_done, duration_seconds, should_suspend
 from cagents.modals import CommandModal
@@ -71,6 +71,68 @@ def test_auto_done_off_recent_input_and_new_transcript_prevent_completion():
     assert not view.auto_done
     assert duration_seconds("12h") == 43200
     assert duration_seconds("invalid") == 7 * 86400
+
+
+def test_read_only_sessions_auto_done_on_their_own_shorter_timer(tmp_path):
+    now = time.time()
+    assert Store.load(tmp_path / "state.json").get_setting("auto_done_readonly_duration") == "1d"
+    view = idle_view(now, days=1)
+    apply_auto_done(view, "7d", now, readonly_duration="1d")
+    assert view.auto_done and view.state == SessionState.DONE
+    fresh = idle_view(now, days=0.9)
+    apply_auto_done(fresh, "7d", now, readonly_duration="1d")
+    assert not fresh.auto_done
+
+
+@pytest.mark.parametrize("mark", ["files", "link", "pr_url", "middle", "codex"])
+def test_sessions_that_wrote_or_linked_anything_wait_for_the_general_timer(mark):
+    now = time.time()
+    view = idle_view(now, days=2)
+    if mark == "files":
+        view.parsed.files_touched = ["/repo/a.py"]
+    elif mark == "link":
+        view.parsed.links = [Link("pr", "PR #1", "https://github.com/o/r/pull/1")]
+    elif mark == "pr_url":
+        view.tracked.pr_url = "https://github.com/o/r/pull/1"
+    elif mark == "middle":
+        view.parsed.truncated = view.parsed.middle_writes = True
+    else:
+        view.tracked = replace(view.tracked, session_id="codex:" + SID1)
+    apply_auto_done(view, "7d", now, readonly_duration="1d")
+    assert not view.auto_done
+
+
+def test_read_only_timer_only_shortens_the_general_one():
+    now = time.time()
+    view = idle_view(now, days=2)
+    apply_auto_done(view, "off", now, readonly_duration="1d")
+    assert not view.auto_done
+    apply_auto_done(view, "1d", now, readonly_duration="3d")
+    assert view.auto_done
+    unread_middle = idle_view(now, days=2)
+    unread_middle.parsed.truncated = True
+    apply_auto_done(unread_middle, "7d", now, readonly_duration="1d")
+    assert unread_middle.auto_done
+    view = idle_view(now, days=2)
+    apply_auto_done(view, "7d", now, readonly_duration="off")
+    assert not view.auto_done
+
+
+async def test_read_only_setting_cycles_and_applies(idle_world):
+    app, store, tmux, _ = idle_world
+    store.set_setting("auto_done_readonly_duration", "off")
+    store.set_setting("auto_done_duration", "30d")
+    async with app.run_test(size=(120, 48)) as pilot:
+        await pilot.pause()
+        assert not app.snapshot.by_id(SID1).auto_done
+        await pilot.press("comma")
+        options = app.screen.query_one("#settings-list", OptionList)
+        options.highlighted = next(i for i in range(options.option_count)
+                                   if options.get_option_at_index(i).id == "auto_done_readonly_duration")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert Store.load(store.path).get_setting("auto_done_readonly_duration") == "12h"
+        assert app.snapshot.by_id(SID1).auto_done
 
 
 def test_manual_and_auto_done_interleave_by_persisted_completion_time(tmp_path):

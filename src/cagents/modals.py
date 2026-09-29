@@ -574,6 +574,7 @@ class WorktreeModal(ModalScreen[int | None]):
 # Allowed values for string settings; enter cycles through them.
 SETTING_CHOICES: dict[str, list[str]] = {
     "auto_done_duration": ["off", "1d", "3d", "7d", "14d", "30d"],
+    "auto_done_readonly_duration": ["off", "12h", "1d", "3d"],
     "diff_mode": ["branch", "uncommitted"],
     "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
 }
@@ -673,6 +674,13 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Mark idle conversations Done (auto). Default 7d; applies to existing history. "
         "Enter cycles; off disables. New input reopens auto-done conversations. "
         "Done conversations sleep after 1h idle; Enter or → wakes one.",
+    ),
+    (
+        "auto_done_readonly_duration",
+        "Auto done read-only",
+        "A shorter timer for conversations that edited no files and recorded no PR "
+        "or artifact (Claude only). Never longer than Auto done duration, and off "
+        "there turns this off too. Default 1d. Enter cycles.",
     ),
     (
         "auto_worktree",

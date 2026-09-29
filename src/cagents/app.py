@@ -481,7 +481,8 @@ class CagentsApp(App):
             if view.auto_done and last_interaction(view) > view.done_at:
                 from .lifecycle import apply_auto_done
                 view.state = SessionState.NEEDS_REVIEW
-                apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at)
+                apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at,
+                                self.store.get_setting("auto_done_readonly_duration"))
             value = datetime.fromtimestamp(view.done_at, timezone.utc).isoformat() if view.auto_done else ""
             if tracked.auto_done_at != value:
                 tracked.auto_done_at = value
@@ -2939,7 +2940,8 @@ exec {shlex.quote(real)} "$@"
             for view_id in VIEW_IDS:
                 self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
             return
-        if key in ("state_order", "background_activity_states", "auto_done_duration"):
+        if key in ("state_order", "background_activity_states", "auto_done_duration",
+                   "auto_done_readonly_duration"):
             self.refresh_data()  # ranks are computed per refresh
             return
         if key == "diff_mode":

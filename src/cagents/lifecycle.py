@@ -43,7 +43,17 @@ def last_interaction(view: SessionView) -> float:
     )
 
 
-def apply_auto_done(view: SessionView, duration: object, now: float) -> None:
+def read_only(view: SessionView) -> bool:
+    """Only Claude transcripts record edits and links cagents can see."""
+    parsed = view.parsed
+    return (
+        view.provider == "claude" and parsed is not None
+        and not parsed.files_touched and not parsed.links and not parsed.middle_writes
+        and not view.tracked.pr_url
+    )
+
+
+def apply_auto_done(view: SessionView, duration: object, now: float, readonly_duration: object = "off") -> None:
     """Derive the annotation; the UI persists new transitions with its store writes."""
     view.auto_done = False
     reviewed = timestamp(view.tracked.reviewed_at)
@@ -54,6 +64,8 @@ def apply_auto_done(view: SessionView, duration: object, now: float) -> None:
     if view.missing or view.state in (SessionState.DONE, SessionState.WORKING, SessionState.SNOOZED):
         return
     seconds = duration_seconds(duration)
+    if seconds and read_only(view):
+        seconds = min(seconds, duration_seconds(readonly_duration) or seconds)
     last = last_interaction(view)
     if not seconds or not last or now - last < seconds:
         return

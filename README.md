@@ -257,6 +257,11 @@ conversations qualify immediately. Choose off, 1d, 3d, 7d, 14d, or 30d; custom
 positive durations such as `12h` also work in `auto_done_duration` in state.json.
 Actively working and explicitly snoozed conversations are left alone.
 
+**Auto done read-only**, default **1d**, is a shorter timer for Claude
+conversations that edited no files and recorded no PR or artifact — a question
+and its answer. It never outlasts Auto done duration, and that one being off
+turns both off. Choose off, 12h, 1d, or 3d.
+
 Manual and automatic done conversations share the Done group, newest completion
 first. Hovering or selecting an automatic one resets its inactivity timer; `d`
 can also return it to the queue. New conversation activity reopens it.

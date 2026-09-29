@@ -90,6 +90,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # user opts into separate monitoring/background/shell-running states.
     "background_activity_states": False,
     "auto_done_duration": "7d",
+    "auto_done_readonly_duration": "1d",
     "conversation_title_width": 22,
     "color_scheme": "cagents",
     # Verbose debug trace (keys, clicks, tmux commands, state changes)

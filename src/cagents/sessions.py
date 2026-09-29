@@ -1037,7 +1037,8 @@ class SessionRegistry:
                 native_title=native_title,
             )
             from .lifecycle import apply_auto_done
-            apply_auto_done(view, self.store.get_setting("auto_done_duration"), now)
+            apply_auto_done(view, self.store.get_setting("auto_done_duration"), now,
+                            self.store.get_setting("auto_done_readonly_duration"))
             previous_state = self._last_state.get(tracked.session_id)
             view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
             if view.state != previous_state or tracked.session_id not in self._state_since:

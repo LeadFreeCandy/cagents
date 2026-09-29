@@ -124,7 +124,8 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
   marked "merged"**. New local activity also un-parks it.
 - `✓ done` — accepted (`d`). New conversation activity re-alerts it automatically.
 - `✓ Done (auto)` — no interaction for **Auto done duration** (Settings, default
-  **7d**, configurable or off). Uses existing UI/bookkeeping/transcript timestamps
+  **7d**, configurable or off; **Auto done read-only**, default **1d**, for
+  Claude conversations that edited nothing and recorded no PR or artifact). Uses existing UI/bookkeeping/transcript timestamps
   retroactively on upgrade; active work and snoozes are excluded. Hover/select or
   new conversation activity resets the timer. Manual and automatic done rows
   appear together, ordered by when they became done, newest first.
