@@ -448,6 +448,7 @@ HELP_TEXT = """\
   /             search all conversation history (fuzzy, full scan — off by
                 default, enable in settings)
   ctrl+r        restart the selected agent, resuming the same conversation
+  :done         mark every needs-review conversation done (z undoes)
   :restart      restart running tracked agents and the dashboard
   :worktrees    the worktrees cagents grew, and prune one
 

@@ -2754,6 +2754,19 @@ exec {shlex.quote(real)} "$@"
             message += f" {busy} still working — left alone."
         self.notify(message, severity="warning" if busy else "information")
 
+    def action_done_all(self) -> None:
+        """:done — the whole review queue, in one undoable step."""
+        finished = [v for v in self.snapshot.views if v.state == SessionState.NEEDS_REVIEW]
+        if not finished:
+            self.notify("Nothing to mark done.")
+            return
+        self._checkpoint(":done")
+        when = utcnow().isoformat()
+        for view in finished:
+            self.store.mark_reviewed(view.session_id, when)
+        self._notify_undoable(f"Marked {len(finished)} done.")
+        self.refresh_data()
+
     def action_restart_all(self) -> None:
         if self._restart_all_pending or self._lifecycle_busy:
             self.notify("Wait for the current session operation to finish, then retry :restart.", severity="warning")
@@ -2814,9 +2827,11 @@ exec {shlex.quote(real)} "$@"
             self.action_sleep_all()
         elif name == "worktrees":
             self._load_worktrees()
+        elif name == "done":
+            self.action_done_all()
         else:
             self.notify(
-                f"Unknown command: {command}. Available: restart, sleep, worktrees",
+                f"Unknown command: {command}. Available: done, restart, sleep, worktrees",
                 severity="warning",
             )
 

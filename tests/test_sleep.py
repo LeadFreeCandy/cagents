@@ -215,3 +215,19 @@ async def test_keyboard_visit_reports_the_row_landed_on(busy_world, monkeypatch)
         await pilot.press("k")  # top row already: a re-visit of the same row
         await settle(app, pilot)
         assert visits == [SID1, SID1]
+
+
+class TestDoneCommand:
+    async def test_done_clears_the_review_queue_leaves_live_work_and_undoes(self, busy_world):
+        app, store, tmux = busy_world
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(app, pilot)
+            await type_command(app, pilot, "done")
+            states = {v.session_id: v.state for v in app.snapshot.views}
+            assert states == {SID1: SessionState.DONE, SID2: SessionState.WORKING, SID3: SessionState.DONE}
+            saved = Store.load(store.path).sessions
+            assert saved[SID1].reviewed_at and not saved[SID2].reviewed_at
+            await pilot.press("z")
+            await settle(app, pilot)
+            assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
+            assert app.snapshot.by_id(SID3).state == SessionState.DONE

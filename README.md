@@ -129,6 +129,9 @@ list costs no memory. `:sleep` puts every idle conversation to sleep right now;
 visiting a row wakes it again (a done one on `Enter` / `→`). Conversations
 still working are left alone.
 
+`:done` marks every needs-review conversation done in one step (`z` undoes
+it); anything still working or waiting on you stays put.
+
 ## Install / run
 
 ```sh
