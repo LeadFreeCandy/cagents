@@ -117,3 +117,21 @@ def test_background_hover_resume_does_not_reattach_the_visible_pane(tmp_path, mo
     assert suspended.live and not suspended.suspended
     assert app._viewer_target == ("" if selected else "visible-first")
     assert sync.call_count == int(selected)
+
+
+def test_hovering_asleep_row_whose_transcript_is_gone_neither_wakes_nor_toasts(tmp_path, monkeypatch):
+    # Claude Code prunes transcripts after cleanupPeriodDays. A conversation
+    # cagents put to sleep before that has nothing left to resume: browsing
+    # past it fired "No saved conversation to resume yet" on every hover.
+    # Enter still reports it; passing the mouse over a row must stay quiet.
+    store = Store(tmp_path / "state.json")
+    app = CagentsApp(store=store, tmux=FakeTmux(), claude_dir=tmp_path / "claude")
+    tracked = store.track("gone", str(tmp_path), datetime.now(timezone.utc).isoformat())
+    view = SessionView("gone", tracked, None, SessionState.STOPPED, live=False,
+                       missing=True, suspended=True, state_detail="transcript missing")
+    app.snapshot = Snapshot(views=[view])
+    started = []
+    monkeypatch.setattr(app, "_begin_lifecycle", lambda v, op, focus=False: started.append(op))
+    for _ in range(3):
+        app._interact_session("gone")
+    assert started == []

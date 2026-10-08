@@ -474,9 +474,37 @@ class CagentsApp(App):
                 tracked.suspended_at = ""
                 self._interaction_dirty = True
                 changed = True
+            if self._reap_dead_row(view):
+                changed = True
         # Transitions are durable immediately. Mouse motion alone is batched.
         if changed:
             self._flush_interactions()
+
+    def _reap_dead_row(self, view: SessionView) -> bool:
+        """STOPPED with no transcript only happens past the new-terminal
+        grace window (see derive_state), so nothing can bring these back.
+        Not running: archive it (Claude Code pruned the transcript). An `n`
+        terminal still at its bare shell: close it and forget it. A live
+        agent that hasn't written its first record is left alone."""
+        if not view.missing or view.state != SessionState.STOPPED:
+            return False
+        if not view.live:
+            self.store.set_archived(view.session_id, True)
+            self._interaction_dirty = True
+            return True
+        if Path(view.pane_command).name not in ("sh", "bash", "zsh", "fish"):
+            return False
+        try:
+            self.tmux.kill_session_group(view.tmux_name, socket=view.tmux_socket or None)
+        except Exception as error:
+            self._dbg(f"Close unused terminal {view.session_id}: {error}")
+            return False
+        self._pending_new_terminals.discard(view.session_id)
+        self.store.untrack(view.session_id)
+        if self.selected_session_id == view.session_id:
+            self.selected_session_id = None
+        self._interaction_dirty = True
+        return True
 
     def on_session_interacted(self, event: SessionInteracted) -> None:
         self._interact_session(event.session_id)
@@ -497,7 +525,9 @@ class CagentsApp(App):
         if session_id in self._lifecycle_busy:
             self._wake_after_stop.add(session_id)
             return
-        if view.suspended:
+        if view.suspended and not view.missing:
+            # No transcript, nothing to resume: Enter reports that loudly;
+            # passing the mouse over the row must not toast every time.
             self._begin_lifecycle(view, "resume")
 
     # -- the viewer pane (sidecar) ---------------------------------------------

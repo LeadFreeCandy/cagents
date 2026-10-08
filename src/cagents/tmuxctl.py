@@ -590,6 +590,17 @@ class TmuxClient:
             self._run(socket, "select-window", "-t", f"={group_name}:{window_name}")
         return group_name
 
+    def kill_session_group(self, session_name: str, socket: str | None = None) -> None:
+        """Kill a session and every grouped view of it (name--term …): any
+        member left behind keeps the group's windows, and so the shell,
+        alive."""
+        socket = socket or self.create_socket
+        proc = self._run(socket, "list-sessions", "-F", "#{session_name}\t#{session_group}")
+        names = [name for name, _, group in (line.partition("\t") for line in proc.stdout.splitlines())
+                 if name == session_name or group == session_name]
+        for name in names or [session_name]:
+            self._run(socket, "kill-session", "-t", f"={name}")
+
     def has_session(self, session_name: str, socket: str | None = None) -> bool:
         socket = socket or self.create_socket
         try:
