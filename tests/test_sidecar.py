@@ -531,7 +531,7 @@ async def test_browsing_to_a_dead_session_resumes_the_real_cli(world, claude_dir
     TranscriptBuilder(sid_dead, "/tmp").ai_title("Old work").user("x").assistant_text(
         "finished"
     ).write(claude_dir, mtime=now - 5000)
-    store.track(sid_dead, "/tmp", ts_ago(3600))
+    store.track(sid_dead, "/tmp", ts_ago(600))
     outer, work = FakeOuterTmux(), FakeWorkTmux()
     app = CagentsApp(
         store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,

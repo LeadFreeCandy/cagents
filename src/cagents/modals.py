@@ -609,10 +609,10 @@ SETTINGS_META: list[tuple[str, str, str]] = [
     ),
     (
         "auto_done_duration",
-        "Auto done duration",
-        "Mark idle conversations Done (auto). Default 7d; applies to existing history. "
-        "Enter cycles; off disables. New input reopens auto-done conversations. "
-        "Done conversations sleep after 1h idle; Enter or → wakes one.",
+        "Auto sleep after",
+        "Idle conversations go to auto sleep (listed above Done). Default 1h; applies "
+        "to existing history. Enter cycles; off disables. New input reopens them. "
+        "Done and auto sleep conversations are asleep; Enter or → wakes one.",
     ),
     (
         "background_activity_states",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import timezone
 
-from .sessions import SessionState, SessionView
+from .sessions import DONE_STATES, SessionState, SessionView
 from .store import _parse_iso
 
 SUSPEND_AFTER = 3600.0
@@ -51,7 +51,7 @@ def apply_auto_done(view: SessionView, duration: object, now: float) -> None:
     if view.suspended and reviewed and reviewed >= activity:
         view.state, view.state_detail = SessionState.DONE, "done"
     view.done_at = timestamp(view.tracked.reviewed_at) if view.state == SessionState.DONE else 0.0
-    if view.missing or view.state in (SessionState.DONE, SessionState.WORKING, SessionState.SNOOZED):
+    if view.missing or view.state in (*DONE_STATES, SessionState.WORKING, SessionState.SNOOZED):
         return
     seconds = duration_seconds(duration)
     last = last_interaction(view)
@@ -60,15 +60,15 @@ def apply_auto_done(view: SessionView, duration: object, now: float) -> None:
     previous = timestamp(view.tracked.auto_done_at)
     view.auto_done = True
     view.done_at = previous if previous >= last else now
-    view.state = SessionState.DONE
-    view.state_detail = "Done (auto)"
+    view.state = SessionState.AUTO_SLEEP
+    view.state_detail = "done after going idle"
     view.did_line = view.needs_line = ""
 
 
 def should_suspend(view: SessionView, now: float) -> bool:
     """Done means asleep: at once, unless explicitly woken since it became
     done (a recorded interaction after done_at); then after an idle hour."""
-    if not (view.state == SessionState.DONE and view.live and not view.suspended
+    if not (view.state in DONE_STATES and view.live and not view.suspended
             and not view.missing and view.tmux_name):
         return False
     last = last_interaction(view)

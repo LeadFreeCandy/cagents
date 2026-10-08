@@ -22,7 +22,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from .format import group_header, jira_header, kanban_card, row_widths, session_row
-from .sessions import SessionState, Snapshot, SessionView
+from .sessions import DONE_STATES, SessionState, Snapshot, SessionView
 
 
 def attention_sort_key(view) -> tuple:
@@ -51,7 +51,7 @@ def attention_sort_key(view) -> tuple:
         return (view.attention_rank, max(finished, getattr(view, "review_bumped_at", 0.0)), 0.0)
     return (
         view.attention_rank,
-        -(view.done_at if state == SessionState.DONE else view.rank_stable_since),
+        -(view.done_at if state in DONE_STATES else view.rank_stable_since),
         -(view.last_activity.timestamp() if view.last_activity else 0.0),
     )
 
@@ -403,7 +403,7 @@ KANBAN_COLUMNS: list[tuple[str, tuple[SessionState, ...], str]] = [
         (SessionState.NEEDS_REVIEW, SessionState.EXTERNAL_UPDATE, SessionState.WAITING_EXTERNAL),
         "kb-review",
     ),
-    ("✓ Done / stopped", (SessionState.DONE, SessionState.STOPPED), "kb-done"),
+    ("✓ Done / stopped", (*DONE_STATES, SessionState.STOPPED), "kb-done"),
 ]
 
 

@@ -51,6 +51,7 @@ class SessionState(Enum):
     BACKGROUND = "background"  # idle, but a backgrounded command/agent runs
     SNOOZED = "snoozed"  # explicitly deferred by a human (s) until a set time
     WAITING_EXTERNAL = "waiting"  # done here; parked on a PR (w)
+    AUTO_SLEEP = "auto sleep"  # went done (and to sleep) on the idle timer
     DONE = "done"  # a human explicitly accepted the result
     STOPPED = "stopped"  # ended without completing normally
 
@@ -82,8 +83,12 @@ ATTENTION_ORDER = {
     SessionState.SNOOZED: 7,
     SessionState.WAITING_EXTERNAL: 8,
     SessionState.STOPPED: 9,
-    SessionState.DONE: 10,
+    SessionState.AUTO_SLEEP: 10,
+    SessionState.DONE: 11,
 }
+
+# Finished states: asleep, and woken only by Enter / → (never by browsing).
+DONE_STATES = (SessionState.AUTO_SLEEP, SessionState.DONE)
 
 _STATE_BY_VALUE = {state.value: state for state in SessionState}
 
@@ -1029,10 +1034,10 @@ class SessionRegistry:
             view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
             if view.state != previous_state or tracked.session_id not in self._state_since:
                 self._state_since[tracked.session_id] = now
-            view.rank_stable_since = view.done_at if view.state == SessionState.DONE else self._state_since[tracked.session_id]
+            view.rank_stable_since = view.done_at if view.state in DONE_STATES else self._state_since[tracked.session_id]
             view.did_line, view.needs_line = derive_did_needs(view.state, view.state_detail, parsed, pane_text)
             if suspended:
-                view.state_detail += (" · asleep — Enter to resume" if view.state == SessionState.DONE
+                view.state_detail += (" · asleep — Enter to resume" if view.state in DONE_STATES
                                       else " · asleep — select to resume")
             views.append(view)
 

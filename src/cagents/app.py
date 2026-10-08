@@ -45,7 +45,7 @@ from .modals import (
     TrackModal,
 )
 from .notifier import notify_desktop, read_select_request
-from .sessions import SessionRegistry, SessionState, SessionView, Snapshot
+from .sessions import DONE_STATES, SessionRegistry, SessionState, SessionView, Snapshot
 from .sidecar import (
     CONTAINER_SOCKET,
     Sidecar,
@@ -518,7 +518,7 @@ class CagentsApp(App):
         must not spin up (or reopen) one CLI per row. Done conversations
         wake only on Enter or → (_attach / action_grow_session)."""
         view = self.snapshot.by_id(session_id)
-        if view is not None and view.state == SessionState.DONE:
+        if view is not None and view.state in DONE_STATES:
             return
         self._record_interaction(session_id)
         if self._restart_all_pending:
@@ -565,11 +565,11 @@ class CagentsApp(App):
             return
         if self._restart_all_pending or view.session_id in self._lifecycle_busy:
             return
-        if view.suspended or (view.state == SessionState.DONE and not view.live):
+        if view.suspended or (view.state in DONE_STATES and not view.live):
             from .sidecar import _placeholder
             command = _placeholder(
                 "Conversation asleep. Press Enter or → to wake it."
-                if view.state == SessionState.DONE else
+                if view.state in DONE_STATES else
                 "Conversation asleep. Select it to wake it."
             )
             if command != self._viewer_target:
@@ -801,7 +801,7 @@ class CagentsApp(App):
         listing = self.query_one("#queue-list", SessionList)
         listing.action_first()
         landed = self.snapshot.by_id(listing.highlighted_session_id or "")
-        if landed is not None and landed.state != SessionState.DONE:
+        if landed is not None and landed.state not in DONE_STATES:
             self._record_interaction(landed.session_id)
 
     def action_grow_session(self) -> None:
@@ -1443,7 +1443,7 @@ exec {shlex.quote(real)} "$@"
             return
         self._record_interaction(view.session_id)
         self._checkpoint("done change")
-        if view.state == SessionState.DONE:
+        if view.state in DONE_STATES:
             self.store.clear_reviewed(view.session_id)
             self._notify_undoable("Un-done — back in the queue.")
             self._pin_cursor()

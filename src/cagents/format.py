@@ -43,6 +43,7 @@ STATE_STYLE: dict[SessionState, tuple[str, str, str]] = {
     SessionState.SNOOZED: ("☾", "royal_blue1", "snoozed"),
     SessionState.WAITING_EXTERNAL: ("⧖", "medium_purple", "waiting"),
     SessionState.STOPPED: ("■", "dim", "stopped"),
+    SessionState.AUTO_SLEEP: ("✓", "medium_orchid3", "auto sleep"),
     SessionState.DONE: ("✓", "medium_purple4", "done"),
 }
 
@@ -85,8 +86,6 @@ def state_badge(view: SessionView) -> Text:
 
 def session_style(view: SessionView) -> tuple[str, str, str]:
     glyph, style, label = STATE_STYLE[view.state]
-    if view.auto_done:
-        label = "Done (auto)"
     if view.suspended:
         glyph = "☾"
     return glyph, style, label
@@ -355,6 +354,7 @@ def header_summary(counts: dict[SessionState, int]) -> Text:
         SessionState.WORKING,
         SessionState.SNOOZED,
         SessionState.WAITING_EXTERNAL,
+        SessionState.AUTO_SLEEP,
         SessionState.DONE,
         SessionState.STOPPED,
     ):

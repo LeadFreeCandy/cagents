@@ -36,7 +36,7 @@ class TestDoneWakesOnlyExplicitly:
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(app, pilot)
             view = app.snapshot.by_id(SID1)
-            assert view.state == SessionState.DONE and view.suspended and len(tmux.replacements) == 1
+            assert view.state == SessionState.AUTO_SLEEP and view.suspended and len(tmux.replacements) == 1
             await pilot.hover("#queue-list", offset=(8, 1))
             await settle(app, pilot)
             await pilot.press("down", "j", "k")

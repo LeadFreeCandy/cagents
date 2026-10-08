@@ -89,7 +89,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Treat finished turns with lingering tasks as needs-review unless the
     # user opts into separate monitoring/background/shell-running states.
     "background_activity_states": False,
-    "auto_done_duration": "7d",
+    "auto_done_duration": "1h",
     "conversation_title_width": 22,
     "color_scheme": "cagents",
     # Verbose debug trace (keys, clicks, tmux commands, state changes)
@@ -119,7 +119,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # settings panel's Priority tab.
     "state_order": [
         "needs input", "needs review", "external update", "shell running", "monitoring",
-        "background", "working", "snoozed", "waiting", "stopped", "done",
+        "background", "working", "snoozed", "waiting", "stopped", "auto sleep", "done",
     ],
 }
 

@@ -36,17 +36,17 @@ def idle_view(now, days=8, state=SessionState.NEEDS_REVIEW):
 
 def test_auto_done_default_retroactive_and_duration_boundary(tmp_path):
     now = int(time.time())
-    assert Store.load(tmp_path / "old-state.json").get_setting("auto_done_duration") == "7d"
+    assert Store.load(tmp_path / "old-state.json").get_setting("auto_done_duration") == "1h"
     view = idle_view(now, days=7)
     apply_auto_done(view, "7d", now - 0.001)
     assert not view.auto_done
     apply_auto_done(view, "7d", now)
-    assert view.auto_done and view.state == SessionState.DONE
+    assert view.auto_done and view.state == SessionState.AUTO_SLEEP
     assert view.done_at == now  # when placed in Done, not the old transcript date
-    assert "Done (auto)" in session_row(view).plain
+    assert "auto sleep" in session_row(view).plain
     # The collapsed view uses the status glyph; the expanded label stays explicit.
     assert session_row(view, compact=True).plain.startswith(" ✓ ")
-    assert "Done (auto)" not in session_row(view, compact=True).plain
+    assert "auto sleep" not in session_row(view, compact=True).plain
     assert should_suspend(view, now)  # already idle over an hour, including on upgrade
 
 
@@ -73,22 +73,41 @@ def test_auto_done_off_recent_input_and_new_transcript_prevent_completion():
     assert duration_seconds("invalid") == 7 * 86400
 
 
-def test_manual_and_auto_done_interleave_by_persisted_completion_time(tmp_path):
+def test_auto_sleep_ranks_above_manual_done_each_ordered_by_persisted_completion(tmp_path):
+    """Auto sleep is its own state just above done (manual), with its own
+    colour. Within each, the persisted completion time orders the rows, so
+    a dashboard reboot cannot reorder them."""
+    from cagents.format import STATE_STYLE
+    from cagents.sessions import attention_rank_map
+
     now = time.time()
-    auto = idle_view(now)
-    auto.tracked.auto_done_at = iso(now - 100)
-    auto.tracked = TrackedSession.from_dict(SID1, auto.tracked.to_dict())
-    apply_auto_done(auto, "7d", now)
-    manual = idle_view(now, days=50, state=SessionState.DONE)
-    manual.tracked.reviewed_at = iso(now - 50)
-    apply_auto_done(manual, "7d", now)
-    older_manual = idle_view(now, days=1, state=SessionState.DONE)
-    older_manual.tracked.reviewed_at = iso(now - 200)
-    apply_auto_done(older_manual, "7d", now)
-    for v in (auto, manual, older_manual):
-        v.attention_rank = 10
-        v.rank_stable_since = now  # dashboard reboot cannot reorder done
-    assert sorted([auto, older_manual, manual], key=attention_sort_key) == [manual, auto, older_manual]
+    rank = attention_rank_map(Store(tmp_path / "s.json").get_setting("state_order"))
+    assert rank[SessionState.STOPPED] < rank[SessionState.AUTO_SLEEP] < rank[SessionState.DONE]
+    assert STATE_STYLE[SessionState.AUTO_SLEEP][1] != STATE_STYLE[SessionState.DONE][1]
+    assert STATE_STYLE[SessionState.AUTO_SLEEP][2] == "auto sleep"
+
+    def auto_at(ago):
+        view = idle_view(now)
+        view.tracked.auto_done_at = iso(now - ago)
+        view.tracked = TrackedSession.from_dict(SID1, view.tracked.to_dict())
+        apply_auto_done(view, "7d", now)
+        assert view.state == SessionState.AUTO_SLEEP
+        return view
+
+    def manual_at(ago):
+        view = idle_view(now, days=1, state=SessionState.DONE)
+        view.tracked.reviewed_at = iso(now - ago)
+        apply_auto_done(view, "7d", now)
+        assert view.state == SessionState.DONE
+        return view
+
+    auto, older_auto = auto_at(100), auto_at(300)
+    manual, older_manual = manual_at(50), manual_at(200)
+    for v in (auto, older_auto, manual, older_manual):
+        v.attention_rank = rank[v.state]
+        v.rank_stable_since = now  # dashboard reboot cannot reorder them
+    rows = [older_manual, manual, older_auto, auto]
+    assert sorted(rows, key=attention_sort_key) == [auto, older_auto, manual, older_manual]
 
 
 def test_suspend_requires_done_and_one_hour_without_real_activity():
@@ -146,7 +165,7 @@ async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world
         await app.workers.wait_for_complete()
         await pilot.pause()
         view = app.snapshot.by_id(SID1)
-        assert view.state == SessionState.DONE and view.auto_done and view.suspended
+        assert view.state == SessionState.AUTO_SLEEP and view.auto_done and view.suspended
         saved = Store.load(store.path).sessions[SID1]
         assert saved.auto_done_at and saved.suspended_at
         assert len(tmux.replacements) == 1
@@ -293,7 +312,7 @@ def test_suspended_codex_stays_done_without_polling_shared_server(tmp_path):
     registry = SessionRegistry(store, tmux=tmux, codex_dir=root, codex_client=UnusedServer())
     view = registry.refresh(now=NOW + 9 * 86400).by_id(KEY)
     assert view.suspended and not view.live
-    assert view.auto_done and view.state == SessionState.DONE
+    assert view.auto_done and view.state == SessionState.AUTO_SLEEP
     assert view.tmux_name == "codex"
 
 
@@ -406,7 +425,7 @@ def test_auto_done_offers_fifteen_minutes_and_one_hour():
     assert not view.auto_done
     view = idle_view(now, days=16 / 1440)
     apply_auto_done(view, "15m", now)
-    assert view.auto_done and view.state == SessionState.DONE
+    assert view.auto_done and view.state == SessionState.AUTO_SLEEP
 
 
 def test_done_sleeps_at_once_unless_woken_since():
