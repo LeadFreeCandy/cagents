@@ -66,9 +66,12 @@ def apply_auto_done(view: SessionView, duration: object, now: float) -> None:
 
 
 def should_suspend(view: SessionView, now: float) -> bool:
-    return (
-        view.state == SessionState.DONE and view.live and not view.suspended
-        and not view.missing and bool(view.tmux_name)
-        and last_interaction(view) > 0
-        and now - last_interaction(view) >= SUSPEND_AFTER
-    )
+    """Done means asleep: at once, unless explicitly woken since it became
+    done (a recorded interaction after done_at); then after an idle hour."""
+    if not (view.state == SessionState.DONE and view.live and not view.suspended
+            and not view.missing and view.tmux_name):
+        return False
+    last = last_interaction(view)
+    if view.done_at and last <= view.done_at:
+        return True
+    return last > 0 and now - last >= SUSPEND_AFTER

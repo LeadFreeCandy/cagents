@@ -513,7 +513,7 @@ class CommandModal(ModalScreen[str | None]):
 
 # Allowed values for string settings; enter cycles through them.
 SETTING_CHOICES: dict[str, list[str]] = {
-    "auto_done_duration": ["off", "1d", "3d", "7d", "14d", "30d"],
+    "auto_done_duration": ["off", "15m", "1h", "1d", "3d", "7d", "14d", "30d"],
     "diff_mode": ["branch", "uncommitted"],
     "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
 }

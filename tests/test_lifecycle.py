@@ -216,7 +216,7 @@ async def test_settings_changes_duration_and_persists(idle_world):
                                    if options.get_option_at_index(i).id == "auto_done_duration")
         await pilot.press("enter")
         await pilot.pause()
-        assert Store.load(store.path).get_setting("auto_done_duration") == "1d"
+        assert Store.load(store.path).get_setting("auto_done_duration") == "15m"
         assert app.snapshot.by_id(SID1).auto_done
 
 
@@ -393,3 +393,34 @@ def test_dashboard_restart_reexecs_same_options(tmp_path, monkeypatch):
     args = ["--fullscreen", "--store", str(tmp_path / "state.json"), "--codex-dir", str(tmp_path / "codex")]
     assert main(args) == 0
     assert calls[0][1][1:] == ["-m", "cagents", *args]
+
+
+def test_auto_done_offers_fifteen_minutes_and_one_hour():
+    from cagents.modals import SETTING_CHOICES
+
+    choices = SETTING_CHOICES["auto_done_duration"]
+    assert choices[:3] == ["off", "15m", "1h"]
+    now = int(time.time())
+    view = idle_view(now, days=14 / 1440)  # 14 minutes quiet
+    apply_auto_done(view, "15m", now)
+    assert not view.auto_done
+    view = idle_view(now, days=16 / 1440)
+    apply_auto_done(view, "15m", now)
+    assert view.auto_done and view.state == SessionState.DONE
+
+
+def test_done_sleeps_at_once_unless_woken_since():
+    """Done means asleep: no hour-long grace after a conversation is marked
+    (or auto-) done. Only an explicit wake after that (Enter / →, which
+    records an interaction) keeps it up, until the normal hour of idleness."""
+    now = int(time.time())
+    auto = idle_view(now, days=16 / 1440)
+    apply_auto_done(auto, "15m", now)
+    assert should_suspend(auto, now)
+    manual = idle_view(now, days=1, state=SessionState.DONE)
+    manual.tracked.reviewed_at = iso(now - 5)
+    manual.done_at = now - 5
+    assert should_suspend(manual, now)
+    manual.tracked.last_interacted_at = iso(now - 1)  # woken after it was done
+    assert not should_suspend(manual, now)
+    assert should_suspend(manual, now - 1 + 3600)

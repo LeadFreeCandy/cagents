@@ -397,6 +397,7 @@ class CagentsApp(App):
             return
         self.snapshot = snapshot
         self._persist_lifecycle(snapshot)
+        self._sleep_done(snapshot)
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
@@ -438,7 +439,7 @@ class CagentsApp(App):
         self._write_context()
         self._schedule_viewer_sync()
 
-    def _record_interaction(self, session_id: str, when: float | None = None) -> None:
+    def _record_interaction(self, session_id: str, when: float | None = None) -> bool:
         import time
         from .lifecycle import timestamp
 
@@ -447,6 +448,8 @@ class CagentsApp(App):
         if tracked and when > timestamp(tracked.last_interacted_at):
             tracked.last_interacted_at = datetime.fromtimestamp(when, timezone.utc).isoformat()
             self._interaction_dirty = True
+            return True
+        return False
 
     def _flush_interactions(self) -> None:
         if self._interaction_dirty:
@@ -2391,11 +2394,24 @@ exec {shlex.quote(real)} "$@"
         now = time.time()
         for view in self.snapshot.views:
             last = activity.get(f"{view.tmux_socket}:{view.tmux_name}", 0)
-            if last:
-                self._record_interaction(view.session_id, last)
+            if last and self._record_interaction(view.session_id, last):
+                continue  # fresh input: let the next snapshot re-derive done first
             if self._can_auto_suspend(view) and should_suspend(view, now):
                 self._begin_lifecycle(view, "suspend")
         self._flush_interactions()
+
+    def _sleep_done(self, snapshot: Snapshot) -> None:
+        """Marking a conversation done (`d`) puts it to sleep at once, not
+        on the next 30s idle poll. Auto-done is left to that poll: it reads
+        real tmux input first, so a conversation you are typing into is
+        never parked on a stale clock."""
+        import time
+        from .lifecycle import should_suspend
+
+        now = time.time()
+        for view in snapshot.views:
+            if not view.auto_done and self._can_auto_suspend(view) and should_suspend(view, now):
+                self._begin_lifecycle(view, "suspend")
 
     def _can_auto_suspend(self, view: SessionView) -> bool:
         return True

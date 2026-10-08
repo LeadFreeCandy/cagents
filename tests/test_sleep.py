@@ -84,7 +84,8 @@ class TestDoneWakesOnlyExplicitly:
 
 @pytest.fixture
 def busy_world(claude_dir, tmp_path, monkeypatch):
-    """Three live conversations: needs review, working, and done (reviewed)."""
+    """Three live conversations: needs review, working, and done (reviewed,
+    then explicitly woken since — so it is awake until :sleep)."""
     now = time.time()
     root = tmp_path / "repo"
     root.mkdir()
@@ -98,6 +99,7 @@ def busy_world(claude_dir, tmp_path, monkeypatch):
     for sid in (SID1, SID2, SID3):
         store.track(sid, str(root), ts_ago(86400))
     store.mark_reviewed(SID3, ts_ago(1200))
+    store.sessions[SID3].last_interacted_at = ts_ago(600)
     tmux = LifecycleTmux()
     for i, sid in enumerate((SID1, SID2, SID3)):
         tmux.sessions.append(TmuxSession(f"agent{i}", now - 86400, now, False, 100 + i, str(root),
@@ -180,6 +182,36 @@ class TestSleepCommand:
             await settle(app, pilot)
             await type_command(app, pilot, "bogus")
             assert any("sleep" in n and "restart" in n for n in notices), notices
+
+
+async def test_marking_done_puts_it_to_sleep_until_explicitly_woken(busy_world):
+    app, store, tmux = busy_world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await settle(app, pilot)
+        queue = app.query_one("#queue-list")
+        queue.highlighted = queue.get_option_index(SID1)  # needs review, awake
+        await settle(app, pilot)
+        assert not sleeps(tmux, SID1)
+        await pilot.press("d")
+        for _ in range(5):
+            app.refresh_data()
+            await settle(app, pilot)
+        assert len(sleeps(tmux, SID1)) == 1, "done must go straight to sleep"
+        assert app.snapshot.by_id(SID1).suspended
+        await pilot.press("j", "k")  # browsing past it leaves it asleep
+        await settle(app, pilot)
+        assert not resumes(tmux, SID1)
+        queue.highlighted = queue.get_option_index(SID1)
+        await settle(app, pilot)
+        await pilot.press("enter")  # the manual wake
+        await settle(app, pilot)
+        assert len(resumes(tmux, SID1)) == 1
+        app._poll_idle_sessions()
+        for _ in range(3):
+            app.refresh_data()
+            await settle(app, pilot)
+        assert len(sleeps(tmux, SID1)) == 1, "a manually woken conversation stays up"
+        assert not app.snapshot.by_id(SID1).suspended
 
 
 def test_queue_top_binding_leaves_focus_and_zoom_alone():
