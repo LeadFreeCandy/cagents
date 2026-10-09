@@ -8,7 +8,7 @@ import pytest
 
 from cagents.app import CagentsApp
 from cagents.claude_data import ParsedSession
-from cagents.sessions import SessionState, SessionView, Snapshot
+from cagents.sessions import attention_rank_map, SessionState, SessionView, Snapshot
 from cagents.store import Store, TrackedSession
 from cagents.views import QueueView, SessionList, attention_sort_key
 from conftest import FakeTmux
@@ -198,7 +198,11 @@ class TestCtrlGBell:
         monkeypatch.setattr(app, "refresh_data", lambda: None)
         bells = []
         monkeypatch.setattr(app, "bell", lambda: bells.append(1))
-        app.snapshot = Snapshot(views=views(store))
+        built = views(store)
+        rank = attention_rank_map(store.get_setting("state_order"))
+        for view in built:  # as SessionRegistry.refresh assigns them
+            view.attention_rank = rank[view.state]
+        app.snapshot = Snapshot(views=built)
         async with app.run_test(size=(100, 15)) as pilot:
             app.query_one(QueueView).update_snapshot(app.snapshot)
             queue = app.query_one("#queue-list", SessionList)

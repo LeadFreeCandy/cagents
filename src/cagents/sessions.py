@@ -83,8 +83,8 @@ ATTENTION_ORDER = {
     SessionState.SNOOZED: 7,
     SessionState.WAITING_EXTERNAL: 8,
     SessionState.STOPPED: 9,
-    SessionState.AUTO_SLEEP: 10,
-    SessionState.DONE: 11,
+    SessionState.AUTO_SLEEP: 10,  # shares done's rank: one pile, by conversation date
+    SessionState.DONE: 10,
 }
 
 # Finished states: asleep, and woken only by Enter / → (never by browsing).
@@ -137,6 +137,12 @@ def attention_rank_map(order_setting) -> dict[SessionState, int]:
     order predates it."""
     if not isinstance(order_setting, list):
         return dict(ATTENTION_ORDER)
+    rank = _ranked(order_setting)
+    rank[SessionState.AUTO_SLEEP] = rank[SessionState.DONE]  # never its own tier
+    return rank
+
+
+def _ranked(order_setting: list) -> dict[SessionState, int]:
     order_setting = _migrate_near_complete_state_order(order_setting)
     rank: dict[SessionState, int] = {}
     for name in order_setting:

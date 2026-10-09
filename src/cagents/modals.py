@@ -896,7 +896,8 @@ class SettingsModal(ModalScreen[None]):
         from cagents.sessions import SessionState, attention_rank_map
 
         rank = attention_rank_map(self.store.get_setting("state_order"))
-        return [s.value for s in sorted(SessionState, key=rank.get)]
+        # Auto sleep always sits with done; it has no position of its own.
+        return [s.value for s in sorted(SessionState, key=rank.get) if s != SessionState.AUTO_SLEEP]
 
     def _refill_priority(self, keep_index: int | None = None) -> None:
         from rich.text import Text

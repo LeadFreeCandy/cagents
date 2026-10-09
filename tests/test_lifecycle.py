@@ -73,41 +73,45 @@ def test_auto_done_off_recent_input_and_new_transcript_prevent_completion():
     assert duration_seconds("invalid") == 7 * 86400
 
 
-def test_auto_sleep_ranks_above_manual_done_each_ordered_by_persisted_completion(tmp_path):
-    """Auto sleep is its own state just above done (manual), with its own
-    colour. Within each, the persisted completion time orders the rows, so
-    a dashboard reboot cannot reorder them."""
+def test_auto_sleep_and_done_intermingle_by_conversation_date(tmp_path):
+    """Auto sleep keeps its own label and colour, but it is not a separate
+    tier: auto-slept and done rows share one rank and are ordered by the
+    conversation's own date (newest first), not by when they were finished."""
     from cagents.format import STATE_STYLE
     from cagents.sessions import attention_rank_map
 
     now = time.time()
     rank = attention_rank_map(Store(tmp_path / "s.json").get_setting("state_order"))
-    assert rank[SessionState.STOPPED] < rank[SessionState.AUTO_SLEEP] < rank[SessionState.DONE]
+    assert rank[SessionState.AUTO_SLEEP] == rank[SessionState.DONE]
+    assert rank[SessionState.STOPPED] < rank[SessionState.DONE]
     assert STATE_STYLE[SessionState.AUTO_SLEEP][1] != STATE_STYLE[SessionState.DONE][1]
     assert STATE_STYLE[SessionState.AUTO_SLEEP][2] == "auto sleep"
 
-    def auto_at(ago):
-        view = idle_view(now)
-        view.tracked.auto_done_at = iso(now - ago)
+    def auto(days_old, slept_ago):
+        view = idle_view(now, days=days_old)
+        view.tracked.auto_done_at = iso(now - slept_ago)
         view.tracked = TrackedSession.from_dict(SID1, view.tracked.to_dict())
-        apply_auto_done(view, "7d", now)
+        apply_auto_done(view, "1h", now)
         assert view.state == SessionState.AUTO_SLEEP
         return view
 
-    def manual_at(ago):
-        view = idle_view(now, days=1, state=SessionState.DONE)
-        view.tracked.reviewed_at = iso(now - ago)
-        apply_auto_done(view, "7d", now)
+    def manual(days_old, done_ago):
+        view = idle_view(now, days=days_old, state=SessionState.DONE)
+        view.tracked.reviewed_at = iso(now - done_ago)
+        apply_auto_done(view, "1h", now)
         assert view.state == SessionState.DONE
         return view
 
-    auto, older_auto = auto_at(100), auto_at(300)
-    manual, older_manual = manual_at(50), manual_at(200)
-    for v in (auto, older_auto, manual, older_manual):
+    # Finish times deliberately run opposite to conversation dates.
+    newest = auto(days_old=1, slept_ago=900)
+    second = manual(days_old=2, done_ago=600)
+    third = auto(days_old=3, slept_ago=300)
+    oldest = manual(days_old=4, done_ago=60)
+    for v in (newest, second, third, oldest):
         v.attention_rank = rank[v.state]
-        v.rank_stable_since = now  # dashboard reboot cannot reorder them
-    rows = [older_manual, manual, older_auto, auto]
-    assert sorted(rows, key=attention_sort_key) == [auto, older_auto, manual, older_manual]
+        v.rank_stable_since = now
+    rows = [oldest, third, second, newest]
+    assert sorted(rows, key=attention_sort_key) == [newest, second, third, oldest]
 
 
 def test_suspend_requires_done_and_one_hour_without_real_activity():

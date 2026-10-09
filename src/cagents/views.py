@@ -49,11 +49,12 @@ def attention_sort_key(view) -> tuple:
     if state == SessionState.NEEDS_REVIEW and getattr(view, "review_fifo", False):
         finished = view.last_activity.timestamp() if view.last_activity else 0.0
         return (view.attention_rank, max(finished, getattr(view, "review_bumped_at", 0.0)), 0.0)
-    return (
-        view.attention_rank,
-        -(view.done_at if state in DONE_STATES else view.rank_stable_since),
-        -(view.last_activity.timestamp() if view.last_activity else 0.0),
-    )
+    last = view.last_activity.timestamp() if view.last_activity else 0.0
+    if state in DONE_STATES:
+        # Done and auto sleep are one pile, newest conversation first —
+        # not by when each was finished.
+        return (view.attention_rank, -last, 0.0)
+    return (view.attention_rank, -view.rank_stable_since, -last)
 
 
 class SessionList(OptionList):
