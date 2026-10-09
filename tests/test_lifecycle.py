@@ -197,14 +197,23 @@ async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world
         assert path.read_bytes() == before
 
 
-async def test_real_client_input_prevents_suspension(idle_world):
+async def test_tmux_client_activity_never_counts_as_use(idle_world):
+    """tmux's client_activity is every event a client receives: Claude's
+    panes turn on any-motion mouse tracking (mouse_all_flag), so the mouse
+    merely passing over the viewer read as "just used" and idle review rows
+    never reached auto sleep. Use is conversation activity or an explicit
+    action in cagents (Enter / → / click / d), never this clock."""
     app, store, tmux, _ = idle_world
     tmux.input_activity[f"{tmux.create_socket}:agent"] = time.time()
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
-        assert not tmux.replacements
-        assert store.sessions[SID1].last_interacted_at
+        app._poll_idle_sessions()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not store.sessions[SID1].last_interacted_at
+        assert app.snapshot.by_id(SID1).state == SessionState.AUTO_SLEEP
+        assert len(tmux.replacements) == 1  # asleep
 
 
 async def test_restart_key_preserves_conversation_and_uses_provider(idle_world):

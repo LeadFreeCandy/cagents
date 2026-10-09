@@ -105,7 +105,7 @@ def test_foreign_done_session_is_not_automatically_suspended(tmp_path, monkeypat
     app.snapshot = SimpleNamespace(views=[view])
     stopped = []
     monkeypatch.setattr(app, "_begin_lifecycle", lambda *args: stopped.append(args))
-    app._apply_idle_activity({})
+    app._poll_idle_sessions()
     assert stopped == [], "the experimental app must not automatically stop the original app's agents"
 
 

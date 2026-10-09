@@ -214,7 +214,6 @@ class CagentsApp(App):
         self._lifecycle_busy: set[str] = set()
         self._wake_after_stop: set[str] = set()
         self._interaction_dirty = False
-        self._idle_poll_running = False
 
     # -- layout --------------------------------------------------------------
 
@@ -415,9 +414,6 @@ class CagentsApp(App):
         self._handle_select_request()
         self._handle_spawn_request()
         self._handle_toast_requests()
-        if not getattr(self, "_idle_started", False):
-            self._idle_started = True
-            self._poll_idle_sessions()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")
@@ -2375,45 +2371,23 @@ exec {shlex.quote(real)} "$@"
     # -- agent suspension / restart -----------------------------------------
 
     def _poll_idle_sessions(self) -> None:
-        if self._idle_poll_running or self._restart_all_pending:
-            return
-        self._idle_poll_running = True
-        self._idle_worker()
-
-    @work(thread=True, group="idle", exit_on_error=False)
-    def _idle_worker(self) -> None:
-        try:
-            activity = self.tmux.client_activity()
-            self.call_from_thread(self._apply_idle_activity, activity)
-        except Exception as error:
-            self.call_from_thread(self._dbg, f"Idle activity check failed: {error}")
-        finally:
-            self.call_from_thread(setattr, self, "_idle_poll_running", False)
-
-    def _apply_idle_activity(self, activity: dict[str, float]) -> None:
-        import time
-        from .lifecycle import should_suspend
-
-        now = time.time()
-        for view in self.snapshot.views:
-            last = activity.get(f"{view.tmux_socket}:{view.tmux_name}", 0)
-            if last and self._record_interaction(view.session_id, last):
-                continue  # fresh input: let the next snapshot re-derive done first
-            if self._can_auto_suspend(view) and should_suspend(view, now):
-                self._begin_lifecycle(view, "suspend")
-        self._flush_interactions()
+        """Backstop for the idle-hour rule between snapshots."""
+        self._sleep_done(self.snapshot)
 
     def _sleep_done(self, snapshot: Snapshot) -> None:
-        """Marking a conversation done (`d`) puts it to sleep at once, not
-        on the next 30s idle poll. Auto-done is left to that poll: it reads
-        real tmux input first, so a conversation you are typing into is
-        never parked on a stale clock."""
+        """Done (`d` or auto) means asleep, checked on every snapshot.
+
+        The idle clock is conversation activity plus explicit actions in
+        cagents only. tmux's client_activity is deliberately not used: it
+        counts every event the client receives, and Claude's panes enable
+        any-motion mouse tracking, so the mouse passing over the viewer
+        read as use and nothing ever reached auto sleep."""
         import time
         from .lifecycle import should_suspend
 
         now = time.time()
         for view in snapshot.views:
-            if not view.auto_done and self._can_auto_suspend(view) and should_suspend(view, now):
+            if self._can_auto_suspend(view) and should_suspend(view, now):
                 self._begin_lifecycle(view, "suspend")
 
     def _can_auto_suspend(self, view: SessionView) -> bool:
