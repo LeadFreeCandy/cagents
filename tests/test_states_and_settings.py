@@ -600,7 +600,7 @@ def world(claude_dir: Path, tmp_path: Path, now: float):
     store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
     tmux = FakeTmux()
     for tracked in store.sessions.values():
-        tracked.last_interacted_at = ts_ago(3600)
+        tracked.last_interacted_at = ts_ago(600)
     registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
     app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
     return app, store, tmux

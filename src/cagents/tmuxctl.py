@@ -225,17 +225,25 @@ class TmuxClient:
         return found
 
     def client_activity(self) -> dict[str, float]:
-        """Last real terminal input, not session_activity (which includes output)."""
+        """Last real terminal input, not session_activity (which includes output).
+
+        The viewer client hops between conversations with switch-client, and
+        client_activity is that client's last keypress wherever it was typed:
+        it counts for the session shown now only if it came after the client
+        arrived there (session_last_attached)."""
         result: dict[str, float] = {}
-        fmt = _FIELD_SEP.join(["#{session_name}", "#{session_group}", "#{client_activity}"])
+        fmt = _FIELD_SEP.join(["#{session_name}", "#{session_group}", "#{client_activity}",
+                               "#{session_last_attached}"])
         for socket in self.sockets:
             proc = self._run(socket, "list-clients", "-F", fmt)
             for line in proc.stdout.splitlines() if proc.returncode == 0 else ():
                 parts = line.split(_FIELD_SEP)
-                if len(parts) != 3:
+                if len(parts) != 4:
                     continue
-                name, group, activity = parts
+                name, group, activity, attached = parts
                 try:
+                    if float(activity) <= float(attached or 0):
+                        continue
                     key = f"{socket}:{group or name}"
                     result[key] = max(result.get(key, 0), float(activity))
                 except ValueError:

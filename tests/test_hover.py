@@ -64,7 +64,9 @@ async def test_hover_keeps_selection_and_viewer_until_click_or_keyboard(tmp_path
         assert app._viewer_target == "visible-first"
         assert shown == []
         app.sidecar.show_viewer.assert_not_called()
-        assert views[1].tracked.last_interacted_at  # hover still records activity/wakes its own row
+        # Passing the mouse over a row is not using it: it must not reset the
+        # idle clock that sends conversations to auto sleep.
+        assert not views[1].tracked.last_interacted_at
         assert not views[0].tracked.last_interacted_at
 
         await pilot.click(listing, offset=offset)
@@ -135,3 +137,19 @@ def test_hovering_asleep_row_whose_transcript_is_gone_neither_wakes_nor_toasts(t
     for _ in range(3):
         app._interact_session("gone")
     assert started == []
+
+
+def test_browsing_wakes_a_slept_review_row_without_resetting_its_idle_clock(tmp_path, monkeypatch):
+    # Sweeping the mouse (or j/k) down the list stamped every review row as
+    # "just used", so none of them ever reached auto sleep.
+    store = Store(tmp_path / "state.json")
+    app = CagentsApp(store=store, tmux=FakeTmux(), claude_dir=tmp_path / "claude")
+    tracked = store.track("slept", str(tmp_path), "2026-01-01T00:00:00+00:00")
+    view = SessionView("slept", tracked, None, SessionState.NEEDS_REVIEW, live=False,
+                       suspended=True, tmux_name="slept")
+    app.snapshot = Snapshot(views=[view])
+    started = []
+    monkeypatch.setattr(app, "_begin_lifecycle", lambda v, op, focus=False: started.append(op))
+    app._interact_session("slept")
+    assert started == ["resume"]
+    assert not tracked.last_interacted_at

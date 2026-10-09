@@ -516,11 +516,14 @@ class CagentsApp(App):
         """Hover / keyboard visit / click on a row. Wakes a sleeping
         conversation — EXCEPT a Done one: scrolling down a long done list
         must not spin up (or reopen) one CLI per row. Done conversations
-        wake only on Enter or → (_attach / action_grow_session)."""
+        wake only on Enter or → (_attach / action_grow_session).
+
+        Browsing is not using a conversation, so it never touches the idle
+        clock: sweeping the mouse down the list used to stamp every row it
+        crossed and nothing ever reached auto sleep."""
         view = self.snapshot.by_id(session_id)
         if view is not None and view.state in DONE_STATES:
             return
-        self._record_interaction(session_id)
         if self._restart_all_pending:
             return
         if view is None:

@@ -238,3 +238,26 @@ def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypat
     listing[1][1] = "300"  # beta was killed and recreated under the same name
     client.list_sessions()
     assert env_calls[2:] == ["=beta"]
+
+
+def test_client_activity_ignores_input_from_before_the_client_arrived(monkeypatch):
+    """The viewer client hops between conversations (switch-client). Its last
+    keypress belongs to wherever it was typed, not to the session it shows
+    now: only input after session_last_attached counts for that session."""
+    import subprocess
+
+    from cagents.tmuxctl import _FIELD_SEP, TmuxClient
+
+    client = TmuxClient(sockets=("s",), create_socket="s")
+    rows = [
+        ("browsed-onto", "", "1000", "2000"),  # typed at 1000, arrived at 2000
+        ("typing-here", "grp", "3000", "2500"),  # arrived 2500, typed at 3000
+    ]
+
+    def fake_run(socket, *args, timeout=5.0):
+        assert args[0] == "list-clients"
+        out = "\n".join(_FIELD_SEP.join(row) for row in rows) + "\n"
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    assert client.client_activity() == {"s:grp": 3000.0}
