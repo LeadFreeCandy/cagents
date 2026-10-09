@@ -70,6 +70,10 @@ class SessionList(OptionList):
         text-overflow: ellipsis;
         scrollbar-gutter: stable;
     }
+    /* Hover is not input: it wakes nothing, resets no clock, and shows nothing. */
+    SessionList > .option-list--option-hover {
+        background: transparent;
+    }
     """
 
     BINDINGS = [
@@ -96,17 +100,6 @@ class SessionList(OptionList):
         sid = self.highlighted_session_id
         if sid:
             self.post_message(SessionInteracted(sid))
-
-    def on_mouse_move(self, event) -> None:
-        index = event.style.meta.get("option")
-        if index is None or not 0 <= index < self.option_count:
-            return
-        option = self.get_option_at_index(index)
-        if option.disabled or option.id is None:
-            return
-        # Hover can wake an idle conversation without navigating away from
-        # the selected one. OptionList handles selection on click/key input.
-        self.post_message(SessionInteracted(option.id))
 
     _NAV_KEYS = ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right")
 

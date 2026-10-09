@@ -153,3 +153,21 @@ def test_browsing_wakes_a_slept_review_row_without_resetting_its_idle_clock(tmp_
     app._interact_session("slept")
     assert started == ["resume"]
     assert not tracked.last_interacted_at
+
+
+async def test_hover_does_nothing_at_all(tmp_path, monkeypatch):
+    """The mouse passing over the list is not input: no visit (so no wake of
+    a slept row, no idle-clock reset), and no hover highlight either."""
+    app, views = hover_app(tmp_path, monkeypatch)
+    views[1].live, views[1].suspended = False, True
+    visits = []
+    monkeypatch.setattr(app, "_interact_session", visits.append)
+    async with app.run_test(size=(160, 40)) as pilot:
+        app.action_switch_view("queue")
+        await pilot.pause()
+        listing = app.query_one("#queue-list", SessionList)
+        for sid in (views[1].session_id, views[0].session_id, views[1].session_id):
+            await pilot.hover(listing, offset=row_offset(listing, sid))
+            await pilot.pause(VIEWER_COALESCE * 2)
+        assert visits == []
+        assert listing.get_component_styles("option-list--option-hover").background.a == 0

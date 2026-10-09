@@ -463,7 +463,7 @@ class CagentsApp(App):
             tracked = self.store.sessions.get(view.session_id)
             if tracked is None:
                 continue
-            # A hover can arrive while the snapshot is being built.
+            # A visit can arrive while the snapshot is being built.
             if view.auto_done and last_interaction(view) > view.done_at:
                 from .lifecycle import apply_auto_done
                 view.state = SessionState.NEEDS_REVIEW
@@ -513,7 +513,7 @@ class CagentsApp(App):
         self._interact_session(event.session_id)
 
     def _interact_session(self, session_id: str) -> None:
-        """Hover / keyboard visit / click on a row. Wakes a sleeping
+        """Keyboard visit / click on a row (never hover). Wakes a sleeping
         conversation — EXCEPT a Done one: scrolling down a long done list
         must not spin up (or reopen) one CLI per row. Done conversations
         wake only on Enter or → (_attach / action_grow_session).
@@ -691,7 +691,7 @@ class CagentsApp(App):
             return
         self.refresh_data()  # so the list picks up "live" as soon as possible
         if view.session_id != self.selected_session_id:
-            return  # hover may resume a Done conversation in the background
+            return  # a visit may resume a conversation in the background
         command = self._attach_command(self.tmux.create_socket, name)
         try:
             self.sidecar.show_viewer(command)
