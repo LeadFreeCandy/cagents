@@ -829,12 +829,15 @@ class TestArrowSettings:
 
     def test_default_captures_the_bare_pair_with_no_probe(self, monkeypatch, tmp_path):
         args, kwargs = self._applied(monkeypatch, tmp_path)
-        assert args == (True, False)      # bare captured, ⌃ not
+        assert args == (True,)            # bare captured; ⌃ is always bound
         assert kwargs["probe"] == ""      # nothing reads the screen
 
-    def test_ctrl_setting_captures_the_second_pair(self, monkeypatch, tmp_path):
-        args, _ = self._applied(monkeypatch, tmp_path, capture_ctrl_arrows=True)
-        assert args == (True, True)
+    def test_ctrl_arrows_are_no_longer_a_setting(self, monkeypatch, tmp_path):
+        from cagents.modals import SETTINGS_META
+        from cagents.store import SETTINGS_DEFAULTS
+
+        assert "capture_ctrl_arrows" not in SETTINGS_DEFAULTS
+        assert "capture_ctrl_arrows" not in {key for key, *_ in SETTINGS_META}
 
     def test_composer_setting_is_what_wires_the_probe(self, monkeypatch, tmp_path):
         _, kwargs = self._applied(monkeypatch, tmp_path, composer_aware_arrows=True)
@@ -842,4 +845,4 @@ class TestArrowSettings:
 
     def test_both_captures_off_still_reapplies(self, monkeypatch, tmp_path):
         args, _ = self._applied(monkeypatch, tmp_path, capture_left=False)
-        assert args == (False, False)     # sidecar unbinds them
+        assert args == (False,)           # sidecar unbinds the bare pair

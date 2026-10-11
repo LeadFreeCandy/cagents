@@ -47,13 +47,9 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # Toast notifications (bottom-left). Errors always show regardless.
     "notifications": False,
     # Bare ←/→ drive the pane size control (the layout cycle / back to
-    # the list). ⇧ and ⌥ arrows do too, always, whatever these say.
+    # the list). ⌃, ⇧ and ⌥ arrows (and ⌃h/⌃l) do too, always, whatever
+    # this says — even though ⌃←/⌃→ are Claude's word-wise cursor movement.
     "capture_left": True,
-    # ⌃←/⌃→ drive it as well, and unconditionally: they stay the size
-    # control even with text in the composer, which is what makes them
-    # the pair to reach for mid-sentence. Off by default because they are
-    # Claude's word-wise cursor movement — measured, same as ⌥ (§11).
-    "capture_ctrl_arrows": False,
     # Before a bare arrow acts, read Claude's composer: if there is text
     # in it the key goes to Claude as a cursor key instead, and only an
     # empty composer drives the layout. Off by default: it is

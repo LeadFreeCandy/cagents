@@ -43,7 +43,6 @@ class DirectApp(CagentsApp):
         aware = bool(self.store.get_setting("composer_aware_arrows"))
         for command in arrow_capture_commands(
             bool(self.store.get_setting("capture_left")),
-            bool(self.store.get_setting("capture_ctrl_arrows")),
             probe=self._write_composer_probe() if aware else "",
         ):
             # Only an explicit size key changes geometry. Mouse focus, Enter,

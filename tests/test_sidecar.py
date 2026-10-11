@@ -258,18 +258,21 @@ class TestCommands:
             assert "run-shell" not in " ".join(command)
             assert "cursor_x" not in " ".join(command)
 
-    def test_ctrl_arrows_are_a_second_capture_off_by_default(self):
-        """⌃←/⌃→ are Claude's word jump, so capturing them is a setting.
-        Captured, they drive the same three states as the bare pair and
-        pass through to the pane the same way."""
-        default = {c[2] for c in arrow_capture_commands() if c[0] == "unbind"}
-        assert default == {"C-Left", "C-Right"}
-        with_ctrl = {c[2]: " ".join(c)
-                     for c in arrow_capture_commands(ctrl=True) if c[0] == "bind"}
-        assert {"Left", "Right", "C-Left", "C-Right"} <= set(with_ctrl)
-        assert "send-keys C-Left" in with_ctrl["C-Left"]      # rail: to the app
-        assert "select-pane -t :.0" in with_ctrl["C-Left"]    # session: resize
-        assert "resize-pane -Z -t :.1" in with_ctrl["C-Right"]
+    def test_ctrl_arrows_always_resize_even_with_arrow_layout_keys_off(self):
+        """⌃←/⌃→ are the size control whatever the settings say — including
+        with the bare pair given back to Claude ('Arrow layout keys' off) —
+        and never yield to the composer. They drive the same three states as
+        the bare pair and pass through to the rail the same way."""
+        for kwargs in ({}, {"bare": False}, {"probe": "/p/probe"}):
+            commands = arrow_capture_commands(**kwargs)
+            assert not [c for c in commands if c[0] == "unbind" and c[2].startswith("C-")], kwargs
+            bound = {c[2]: " ".join(c) for c in commands if c[0] == "bind"}
+            assert {"C-Left", "C-Right"} <= set(bound), kwargs
+            for key in ("C-Left", "C-Right"):
+                assert "run-shell" not in bound[key] and "cursor_x" not in bound[key]
+            assert "send-keys C-Left" in bound["C-Left"]      # rail: to the app
+            assert "select-pane -t :.0" in bound["C-Left"]    # session: resize
+            assert "resize-pane -Z -t :.1" in bound["C-Right"]
 
     def test_the_composer_check_gates_the_bare_pair_only(self):
         """The bare arrows are the ones you type with, so the check hands
@@ -277,7 +280,7 @@ class TestCommands:
         arrow you have deliberately captured always resizes — that is what
         leaves you a working layout key mid-sentence."""
         gated = {c[2]: " ".join(c)
-                 for c in arrow_capture_commands(ctrl=True, probe="/p/probe")
+                 for c in arrow_capture_commands(probe="/p/probe")
                  if c[0] == "bind"}
         for key in ("Left", "Right"):
             assert f"/p/probe {key} " in gated[key]
@@ -348,7 +351,7 @@ class TestCommands:
         the ARROW on the rail pass-through rather than the key pressed:
         measured through tmux, ⌃h reaches the rail as the byte 0x08, which
         Textual reports as Backspace, so the rail can never bind ⌃h itself."""
-        for kwargs in ({}, {"bare": False}, {"ctrl": True}, {"probe": "/p/probe"}):
+        for kwargs in ({}, {"bare": False}, {"probe": "/p/probe"}):
             bound = {c[2]: " ".join(c) for c in arrow_capture_commands(**kwargs)
                      if c[0] == "bind" and c[2] in ("C-h", "C-l")}
             assert set(bound) == {"C-h", "C-l"}, kwargs

@@ -545,23 +545,24 @@ _LEFT_SIZE = (
 _RIGHT_SIZE = "resize-pane -Z -t :.1"
 
 
-def _left_cycle(modifier: str = "", probe: str = "") -> list[str]:
-    key = f"{modifier}Left"
+def _left_cycle(modifier: str = "", probe: str = "", key: str = "", send: str = "") -> list[str]:
+    """`key`/`send` spell a non-arrow key (⌃h) that hands the rail an arrow."""
+    key = key or f"{modifier}Left"
     return [
         "bind", "-n", key,
         "if", "-F", "#{==:#{pane_index},0}",
-        f"send-keys {key}",
+        f"send-keys {send or key}",
         _gate(key, _LEFT_SIZE, probe),
     ]
 
 
-def _right_cycle(modifier: str = "", probe: str = "") -> list[str]:
+def _right_cycle(modifier: str = "", probe: str = "", key: str = "", send: str = "") -> list[str]:
     # Already zoomed is already max, so right passes through there too.
-    key = f"{modifier}Right"
+    key = key or f"{modifier}Right"
     return [
         "bind", "-n", key,
         "if", "-F", "#{||:#{==:#{pane_index},0},#{window_zoomed_flag}}",
-        f"send-keys {key}",
+        f"send-keys {send or key}",
         _gate(key, _RIGHT_SIZE, probe),
     ]
 
@@ -611,12 +612,15 @@ def _right_unconditional(modifier: str) -> list[str]:
 
 
 def _unconditional_cycles() -> list[list[str]]:
-    left_key, right_key = _VIM_SIZE_KEYS
+    (left_key, left_send), (right_key, right_send) = _VIM_SIZE_KEYS
     return [command(modifier)
             for modifier in _UNCONDITIONAL_MODIFIERS
             for command in (_left_unconditional, _right_unconditional)] + [
-        _left_cycle(left_key[0], send=left_key[1]),
-        _right_cycle(right_key[0], send=right_key[1]),
+        # ⌃ arrows: always the size control, never gated on the composer —
+        # the user's call over keeping them as Claude's word-wise movement.
+        _left_cycle("C-"), _right_cycle("C-"),
+        _left_cycle(key=left_key, send=left_send),
+        _right_cycle(key=right_key, send=right_send),
     ]
 
 
@@ -633,7 +637,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "status-left", " cagents "],
         ["set", "-g", "status-left-style", "bg=colour31,fg=colour231,bold"],
         ["set", "-g", "status-right",
-         " ←/→ C-h/C-l size (⇧⌥ any time) · C-d diff · C-t term "],
+         " ←/→ C-h/C-l size (⌃⇧⌥ any time) · C-d diff · C-t term "],
         ["set", "-g", "status-right-length", "60"],
         ["set", "-g", "window-status-format", ""],
         ["set", "-g", "window-status-current-format", ""],
@@ -650,39 +654,31 @@ def container_setup_commands() -> list[list[str]]:
     ]
 
 
-def arrow_capture_commands(
-    bare: bool = True, ctrl: bool = False, probe: str = ""
-) -> list[list[str]]:
+def arrow_capture_commands(bare: bool = True, probe: str = "") -> list[list[str]]:
     """Which arrows cagents takes, and on what terms.
 
-    `bare` and `ctrl` are the two capture settings; each captured pair
-    drives the size control. `probe` is the composer check (empty unless
-    composer_aware_arrows is on), and it applies to the BARE pair only:
-    those are the keys you type with, so with the check on they go back to
-    being Claude's cursor keys the moment there is text in the composer.
-    A captured ⌃ arrow always resizes -- that is the point of turning it
-    on, and it is what leaves you a working layout key mid-sentence.
+    `bare` is the capture setting ('Arrow layout keys'); captured, the bare
+    pair drives the size control. `probe` is the composer check (empty
+    unless composer_aware_arrows is on), and it applies to the bare pair
+    only: those are the keys you type with, so with the check on they go
+    back to being Claude's cursor keys the moment there is text in the
+    composer.
 
-    ⌥ and ⇧ arrows, and ⌃h/⌃l, stay bound whatever the settings say:
-    turning a capture off means "give me that key back", not "take away
+    ⌃, ⌥ and ⇧ arrows, and ⌃h/⌃l, stay bound whatever the settings say:
+    turning the capture off means "give me that key back", not "take away
     the size control".
     """
-    commands: list[list[str]] = []
-    for modifier, capture, gate in (("", bare, probe), ("C-", ctrl, "")):
-        if capture:
-            commands += [_left_cycle(modifier, gate), _right_cycle(modifier, gate)]
-        else:
-            commands += [["unbind", "-n", f"{modifier}Left"],
-                         ["unbind", "-n", f"{modifier}Right"]]
+    if bare:
+        commands = [_left_cycle("", probe), _right_cycle("", probe)]
+    else:
+        commands = [["unbind", "-n", "Left"], ["unbind", "-n", "Right"]]
     return commands + _unconditional_cycles()
 
 
-def apply_arrow_capture(
-    bare: bool = True, ctrl: bool = False, runner=None, probe: str = ""
-) -> None:
+def apply_arrow_capture(bare: bool = True, runner=None, probe: str = "") -> None:
     """Set/unset the arrow bindings on the enclosing container server."""
     run = runner or _outer_tmux
-    for command in arrow_capture_commands(bare, ctrl, probe):
+    for command in arrow_capture_commands(bare, probe):
         try:
             run(command)
         except RuntimeError:

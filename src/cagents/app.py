@@ -1039,7 +1039,6 @@ class CagentsApp(App):
         aware = bool(self.store.get_setting("composer_aware_arrows"))
         apply_arrow_capture(
             bool(self.store.get_setting("capture_left")),
-            bool(self.store.get_setting("capture_ctrl_arrows")),
             probe=self._write_composer_probe() if aware else "",
         )
 
@@ -2656,7 +2655,7 @@ exec {shlex.quote(real)} "$@"
         if key == "diff_mode":
             self._write_context()  # the ctx keys read the mode from context
             return
-        if key in ("capture_left", "capture_ctrl_arrows", "composer_aware_arrows") and (
+        if key in ("capture_left", "composer_aware_arrows") and (
             os.environ.get("CAGENTS_SIDECAR") == "1"
         ):
             # all three describe one set of bindings, so re-apply the lot

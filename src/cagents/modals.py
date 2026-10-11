@@ -548,23 +548,15 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Arrow layout keys",
         "←/→ resize the Claude pane (list ↔ small sidebar ↔ full width). "
         "Claude never sees them unless 'Arrows yield to typed text' is on. "
-        "⇧←/⇧→ and ⌥←/⌥→ resize regardless of this.",
-    ),
-    (
-        "capture_ctrl_arrows",
-        "⌃←/⌃→ resize too",
-        "Gives the layout a second pair, and one that always resizes — "
-        "with text in the composer, where the bare arrows may hand the key "
-        "back to Claude, ⌃ still works. The cost: ⌃←/⌃→ are Claude's "
-        "word-wise cursor movement, so capturing them takes that away.",
+        "⌃, ⇧ and ⌥ arrows, and ⌃h/⌃l, resize regardless of this.",
     ),
     (
         "composer_aware_arrows",
         "Arrows yield to typed text",
         "Before a bare arrow resizes anything, read Claude's composer: "
         "with text in it the key is Claude's cursor key again, and only an "
-        "empty composer resizes. Bare pair only — ⌃ arrows, if you have "
-        "captured them, still always resize. Costs a screen read on the "
+        "empty composer resizes. Bare pair only — ⌃ arrows "
+        "always resize. Costs a screen read on the "
         "press at the start of a line, and an empty ← then stops reaching "
         "Claude's own agents view.",
     ),
