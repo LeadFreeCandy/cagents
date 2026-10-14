@@ -63,12 +63,16 @@ def vim_themes():
         )
 
 
-def tab_color_commands(theme: Theme) -> list[list[str]]:
+def tab_styles(theme: Theme) -> tuple[str, str]:
+    """(status bar style, selected tab style) for a theme."""
     if theme.name.startswith("vim-"):
         values = theme.variables
-        status = f'bg={values["footer-background"]},fg={values["footer-foreground"]}'
-        selected = f'bg={values["block-cursor-background"]},fg={values["block-cursor-foreground"]}'
-    else:
-        status, selected = "bg=colour236,fg=colour248", "bg=colour31,fg=colour231"
+        return (f'bg={values["footer-background"]},fg={values["footer-foreground"]}',
+                f'bg={values["block-cursor-background"]},fg={values["block-cursor-foreground"]}')
+    return "bg=colour236,fg=colour248", "bg=colour31,fg=colour231"
+
+
+def tab_color_commands(theme: Theme) -> list[list[str]]:
+    status, selected = tab_styles(theme)
     return [["set", "-g", "status-style", status],
             ["set", "-g", "window-status-current-format", f"#[{selected},bold]  #W  #[default]"]]
