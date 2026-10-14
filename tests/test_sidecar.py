@@ -505,6 +505,95 @@ async def test_viewer_follows_highlight_after_debounce(world):
         assert selects == [["select-window", "-t", "=work:session"]]
 
 
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_tab_bar_shows_the_conversation_and_only_the_tab_you_are_on():
+    import subprocess
+    import uuid
+
+    from cagents.sidecar import session_tab_formats
+
+    socket = "cg-tabs-" + uuid.uuid4().hex[:10]
+
+    def tmux(*args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True, check=True).stdout.rstrip("\n")
+
+    try:
+        tmux("new-session", "-d", "-s", "work", "-n", "session")
+        tmux("new-window", "-d", "-t", "work", "-n", "diff")
+        tmux("new-window", "-d", "-t", "work", "-n", "term-1")
+        for command in session_tab_formats("bg=colour31,fg=colour231"):
+            tmux(*command)
+        tab = tmux("show-option", "-gv", "window-status-format")
+        current = tmux("show-option", "-gv", "window-status-current-format")
+
+        def render(window, fmt):
+            return tmux("display-message", "-p", "-t", f"=work:{window}", fmt)
+
+        assert "session" in render("session", tab)
+        tmux("set-option", "-w", "-t", "=work:session", "@cagents_title", "Alpha ##1 · review")
+        assert "Alpha ##1 · review" in render("session", tab)
+        assert "Alpha ##1 · review" in render("session", current)
+        assert render("diff", tab) == "" and render("term-1", tab) == ""
+        assert "diff" in render("diff", current) and "term-1" in render("term-1", current)
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_current_tab_stays_highlighted_after_the_state_glyph(world):
+    import re
+    import subprocess
+    import time
+    import uuid
+
+    from cagents.format import tmux_title
+    from cagents.sidecar import session_tab_formats
+
+    store, tmux_fake, registry, _ = world
+    view = registry.refresh().by_id(SID1)
+    work, term = ("cg-tabs-" + uuid.uuid4().hex[:10] for _ in range(2))
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    try:
+        tmux(work, "new-session", "-d", "-s", "work", "-n", "session", "-x", "100", "-y", "5", "sleep 60")
+        tmux(work, "set", "-g", "status-style", "bg=colour236,fg=colour248")
+        for command in session_tab_formats("bg=colour31,fg=colour231"):
+            tmux(work, *command)
+        tmux(work, "set-option", "-w", "-t", "=work:session", "@cagents_title", tmux_title(view))
+        tmux(term, "new-session", "-d", "-s", "t", "-x", "100", "-y", "7",
+             f"env -u TMUX tmux -f /dev/null -L {work} attach-session -t '=work'")
+        deadline = time.time() + 5
+        while "Alpha" not in tmux(term, "capture-pane", "-p", "-t", "t") and time.time() < deadline:
+            time.sleep(0.1)
+        line = next(l for l in tmux(term, "capture-pane", "-p", "-e", "-t", "t").splitlines() if "Alpha" in l)
+        assert re.findall(r"48;5;\d+", line[: line.index("Alpha")])[-1] == "48;5;31"
+    finally:
+        for socket in (term, work):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+async def test_session_tab_carries_the_viewed_conversation(world):
+    from cagents.format import STATE_STYLE
+
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        titles = [c[-1] for c in work.calls
+                  if c[:5] == ["set-option", "-w", "-t", "=work:session", "@cagents_title"]]
+        assert titles, "the session tab never got a title"
+        assert "Alpha: fix auth" in titles[-1]
+        assert STATE_STYLE[app.snapshot.by_id(SID1).state][2] in titles[-1]
+
+
 async def test_page_scroll_setting_is_on_by_default_and_toggles_both_servers(world, monkeypatch):
     from textual.widgets import OptionList
 

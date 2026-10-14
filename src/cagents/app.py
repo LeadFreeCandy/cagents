@@ -220,6 +220,7 @@ class CagentsApp(App):
 
         self._viewer_sync_lock = _threading.Lock()
         self._viewer_target: str = ""
+        self._session_title: str = ""
         self._pending_highlight: str | None = None
         self._undo_stack: list[tuple[str, dict]] = []
         # Dead sessions the passive preview has already tried (silently)
@@ -583,6 +584,7 @@ class CagentsApp(App):
 
         self._last_viewer_sync = _time.monotonic()
         view = self.selected_view()
+        self._sync_session_title(view)
         if view is None:
             return
         if self._restart_all_pending or view.session_id in self._lifecycle_busy:
@@ -622,6 +624,19 @@ class CagentsApp(App):
             lambda v=view: self._sync_viewer_blocking(v),
             thread=True, group="viewer-sync", exclusive=True, exit_on_error=False,
         )
+
+    def _sync_session_title(self, view: SessionView | None) -> None:
+        from .format import tmux_title
+
+        set_title = getattr(self.sidecar, "set_session_title", None)
+        title = tmux_title(view) if view is not None else ""
+        if set_title is None or title == self._session_title:
+            return
+        try:
+            set_title(title)
+            self._session_title = title
+        except Exception as error:
+            self._dbg(f"session tab title failed: {error}")
 
     def _sync_viewer_blocking(self, view: SessionView) -> None:
         from textual.worker import get_current_worker

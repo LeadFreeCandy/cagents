@@ -62,10 +62,12 @@ to Claude's own agents view.
 
 ## The right side is tabbed
 
-The pane hosts three tabs (a clickable bar across its top), left to right:
+The pane hosts three tabs. The bar across its top names the conversation you are
+viewing — its state glyph, title and state — and shows the diff or terminal tab only
+while you are on it:
 
 ```
-  session    diff    term-1
+  ◆ Documents Page Redesign · review
 ```
 
 - **session** — the live Claude attach / transcript (what browsing drives).

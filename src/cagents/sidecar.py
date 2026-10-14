@@ -44,9 +44,14 @@ TABS = ("session", "diff", "term-1", "+term")  # left-to-right (display names)
 
 class Sidecar:
     def apply_theme(self, theme):
-        from .themes import tab_color_commands
-        for command in tab_color_commands(theme):
+        from .themes import tab_styles
+        status, selected = tab_styles(theme)
+        for command in [["set", "-g", "status-style", status], *session_tab_formats(selected)]:
             self._work(command)
+
+    def set_session_title(self, title: str) -> None:
+        self._work(["set-option", "-w", "-t", "=work:session", "@cagents_title", title])
+
 
     def apply_page_scroll(self, enable: bool, ctx_prog: str, context_path: str) -> None:
         for command in page_scroll_commands(enable, ctx_prog, context_path):
@@ -122,9 +127,7 @@ class Sidecar:
             ["set", "-g", "status-style", "bg=colour236,fg=colour248"],
             ["set", "-g", "status-left", ""],
             ["set", "-g", "status-right", ""],
-            ["set", "-g", "window-status-format", "  #W  "],
-            ["set", "-g", "window-status-current-format",
-             "#[bg=colour31,fg=colour231,bold]  #W  #[default]"],
+            *session_tab_formats("bg=colour31,fg=colour231"),
             ["set", "-g", "window-status-separator", ""],
             # A dying pane must NEVER close its window: when the active
             # window closes, tmux activates the most-recently-used one —
@@ -711,6 +714,18 @@ def apply_dim_chat(enable: bool, runner=None) -> None:
             run(command)
         except RuntimeError:
             pass
+
+
+def session_tab_formats(selected: str) -> list[list[str]]:
+    """The tab bar shows the conversation (@cagents_title on the session
+    window); the diff and terminal tabs show only while you are on them."""
+    title = "#{?#{@cagents_title},#{@cagents_title},session}"
+    in_session = "#{==:#{window_name},session}"
+    return [
+        ["set", "-g", "window-status-format", "#{?" + in_session + ",  " + title + "  ,}"],
+        ["set", "-g", "window-status-current-format", "  #{?" + in_session + "," + title + ",#W}  "],
+        ["set", "-g", "window-status-current-style", f"{selected},bold"],
+    ]
 
 
 def queue_top_binding() -> list[str]:

@@ -76,6 +76,18 @@ def _truncate(text: str, width: int) -> str:
     return text[: width - 1] + "…"
 
 
+def tmux_title(view: SessionView) -> str:
+    """Glyph, title and state as tmux status markup, '#' escaped."""
+    from rich.style import Style
+
+    glyph, style, label = session_style(view)
+    color = Style.parse(style).color
+    if color is not None:
+        glyph = f"#[fg={color.get_truecolor().hex}]{glyph}#[default]"
+    title = _truncate(view.title, 60).replace("#", "##")
+    return f"{glyph} {title} · {label}"
+
+
 def state_badge(view: SessionView) -> Text:
     glyph, style, label = session_style(view)
     badge = Text()
