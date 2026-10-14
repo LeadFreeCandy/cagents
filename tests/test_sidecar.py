@@ -714,6 +714,27 @@ async def test_ctrl_g_flashes_the_conversation_it_lands_on(world):
         assert any(a.startswith("CAGENTS_CARD1=") and "Alpha: fix auth" in a for a in cards[0])
 
 
+async def test_the_session_tab_switches_before_the_hidden_terminal_tab(world, tmp_path, now):
+    store, tmux, registry, claude_dir = world
+    repo = tmp_path / "alpha-repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    TranscriptBuilder(SID1, str(repo)).ai_title("Alpha: fix auth").user(
+        "go", ts=ts_ago(1)
+    ).write(claude_dir, mtime=now - 1)
+    store.sessions[SID1].project_dir = str(repo)
+    tmux.sessions[0].pane_path = str(repo)
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        respawned = [c[3] for c in work.calls if c[0] == "respawn-pane"]
+        assert respawned[:2] == ["=work:session", "=work:term-1"]
+
+
 async def test_page_scroll_setting_is_on_by_default_and_toggles_both_servers(world, monkeypatch):
     from textual.widgets import OptionList
 

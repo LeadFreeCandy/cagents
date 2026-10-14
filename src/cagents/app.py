@@ -678,13 +678,12 @@ class CagentsApp(App):
             if stale():
                 return
             try:
-                self._sync_terminal(view, stale)
                 command = self._viewer_command(view)
-                if command == self._viewer_target or stale():
-                    return
-                self.sidecar.show_viewer(command, stale=stale)
-                if not stale():
-                    self._viewer_target = command
+                if command != self._viewer_target and not stale():
+                    self.sidecar.show_viewer(command, stale=stale)
+                    if not stale():
+                        self._viewer_target = command
+                self._sync_terminal(view, stale)
             except Exception as error:
                 if not worker.is_cancelled:
                     self.call_from_thread(
