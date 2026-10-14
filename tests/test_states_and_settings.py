@@ -900,6 +900,26 @@ async def test_settings_modal_toggles_and_persists(world):
         assert not isinstance(app.screen, SettingsModal)
 
 
+async def test_toggling_a_setting_never_reaches_the_conversation_list(world, monkeypatch):
+    import textual.app as textual_app
+
+    app, store, _ = world
+    captured = []
+    monkeypatch.setattr(textual_app.App, "notify",
+                        lambda self, message, **kwargs: captured.append(str(message)))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        selected = app.selected_session_id
+        await pilot.press("comma")
+        await pilot.pause()
+        captured.clear()
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        assert store.get_setting("sidebar") is False
+        assert captured == []
+        assert app.selected_session_id == selected
+
+
 class TestActiveElsewhere:
     def test_fresh_transcript_without_tmux_is_working(self, claude_dir, now):
         # Hosted by cmux or a bare terminal: no tmux session visible, but the

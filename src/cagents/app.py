@@ -839,7 +839,9 @@ class CagentsApp(App):
     # -- attaching (the core of the core loop) ---------------------------------
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option.id is not None:
+        from .views import SessionList
+
+        if isinstance(event.option_list, SessionList) and event.option.id is not None:
             self.selected_session_id = event.option.id
             self.action_attach()
 
