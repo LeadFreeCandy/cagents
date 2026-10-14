@@ -1,9 +1,9 @@
 """Fuzzy full-text search across every Claude conversation transcript on
 disk — the complete message history, not just titles or the display
 preview (which deliberately only reads a head/tail window of large files
-for speed; see claude_data.HEAD_BYTES/TAIL_BYTES). A full scan can be slow
-across many/large transcripts, so this is opt-in (conversation_search
-setting) and only runs when the user explicitly asks.
+for speed; see claude_data.HEAD_BYTES/TAIL_BYTES). The first scan reads
+every transcript; after that only changed ones are re-read, which keeps it
+fast enough to run on every keystroke. Opt-in (conversation_search setting).
 
 Results are tiered by MatchKind, not sorted by one flat score: a
 conversation's own name matching always outranks a body hit, and an exact
@@ -178,14 +178,48 @@ def _scan_transcript(path: Path) -> tuple[str, str, list[str]]:
     return project_dir, title, lines
 
 
+_scan_cache: dict[Path, tuple[tuple[int, int], tuple[str, str, list[str]]]] = {}
+
+
+def scan_all_sessions(
+    claude_dir: Path, sessions: list[DiscoveredSession] | None = None, codex_dir: Path | None = None,
+) -> list[tuple[DiscoveredSession, tuple[str, str, list[str]]]]:
+    """(session, (project_dir, title, lines)) for every transcript, read
+    in full — from _scan_cache when the file hasn't changed since."""
+    if sessions is None:
+        sessions = discover_sessions(claude_dir, min_size=1)
+        if codex_dir is not None:
+            from .codex_data import discover_sessions as discover_codex
+            sessions += discover_codex(codex_dir)
+    scans = []
+    for discovered in sessions:
+        try:
+            stat = discovered.path.stat()
+        except OSError:
+            continue  # archived or removed between discovery and the full scan
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = _scan_cache.get(discovered.path)
+        if cached is None or cached[0] != key:
+            if discovered.provider == "codex":
+                from .codex_data import scan_transcript
+                try:
+                    cached = (key, scan_transcript(discovered.path))
+                except OSError:
+                    continue
+            else:
+                cached = (key, _scan_transcript(discovered.path))
+            _scan_cache[discovered.path] = cached
+        scans.append((discovered, cached[1]))
+    return scans
+
+
 def search_all_sessions(
     claude_dir: Path, query: str, limit: int = 50, sessions: list[DiscoveredSession] | None = None,
     codex_dir: Path | None = None,
 ) -> list[SearchResult]:
     """Every session transcript under claude_dir, fully read (not just
-    discovered), scored against `query`, best matches first. Slow by
-    design — this is the "even if it takes a while" full-history search,
-    not the fast display path.
+    discovered), scored against `query`, best matches first. The first
+    search reads everything; later ones re-read only changed transcripts.
 
     Ranking is tiered, not a single flat score: a conversation's own name
     matching always outranks a body hit, and within either, an exact
@@ -193,21 +227,8 @@ def search_all_sessions(
     the same tier does score break the tie."""
     if not query.strip():
         return []
-    if sessions is None:
-        sessions = discover_sessions(claude_dir, min_size=1)
-        if codex_dir is not None:
-            from .codex_data import discover_sessions as discover_codex
-            sessions += discover_codex(codex_dir)
     results: list[SearchResult] = []
-    for discovered in sessions:
-        if discovered.provider == "codex":
-            from .codex_data import scan_transcript
-            try:
-                project_dir, title, lines = scan_transcript(discovered.path)
-            except OSError:
-                continue  # archived or removed between discovery and the full scan
-        else:
-            project_dir, title, lines = _scan_transcript(discovered.path)
+    for discovered, (project_dir, title, lines) in scan_all_sessions(claude_dir, sessions, codex_dir):
         best: tuple[MatchKind, float, str] | None = None
 
         def consider(text: str, exact_kind: MatchKind, fuzzy_kind: MatchKind) -> None:

@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 
 from .agent_status import fetch_agent_states
-from . import codex_data
+from . import codex_data, gitops
 from .claude_data import (
     DiscoveredSession,
     ParsedSession,
@@ -276,6 +276,19 @@ class SessionView:
         if self.parsed and self.parsed.last_cwd:
             return self.parsed.last_cwd
         return self.project_dir
+
+    @property
+    def group_dir(self) -> str:
+        """Which project this conversation belongs to, for grouping and for
+        the new-conversation directory shortcuts.
+
+        With auto_worktree on, every conversation runs in its own
+        `<repo>-worktrees/cagents-<n>`, so grouping on project_dir would
+        put each one in a group of its own and the shortcuts would offer
+        five worktrees of one repo instead of five projects. Its own
+        worktrees collapse back to the checkout they came from; anything
+        else, a hand-made worktree included, stays exactly where it is."""
+        return gitops.owning_repo(self.project_dir) or self.project_dir
 
     @property
     def project_name(self) -> str:
@@ -1035,7 +1048,8 @@ class SessionRegistry:
                 native_title=native_title,
             )
             from .lifecycle import apply_auto_done
-            apply_auto_done(view, self.store.get_setting("auto_done_duration"), now)
+            apply_auto_done(view, self.store.get_setting("auto_done_duration"), now,
+                            self.store.get_setting("auto_done_readonly_duration"))
             previous_state = self._last_state.get(tracked.session_id)
             view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
             if view.state != previous_state or tracked.session_id not in self._state_since:

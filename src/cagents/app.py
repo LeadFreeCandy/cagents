@@ -28,6 +28,7 @@ from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 
 from . import gitops
 from . import jira
+from . import linkscan
 from .claude_data import default_claude_dir, utcnow
 from .ctx import CONTEXT_FILE, write_context
 from .diffview import DiffResult, DiffScreen
@@ -39,10 +40,12 @@ from .modals import (
     HandoffModal,
     InputModal,
     CommandModal,
+    LinkCandidateModal,
     RelatedModal,
     SearchModal,
     SettingsModal,
     TrackModal,
+    WorktreeModal,
 )
 from .notifier import notify_desktop, read_select_request
 from .sessions import DONE_STATES, SessionRegistry, SessionState, SessionView, Snapshot
@@ -71,6 +74,18 @@ COMPACT_WIDTH = 60  # below this, the UI is a rail: no preview, dense rows
 VIEW_IDS = ["queue", "grouped", "kanban"]
 
 ALERT_STATES = (SessionState.NEEDS_INPUT, SessionState.NEEDS_REVIEW)
+
+
+def _worktree_state(worktree: gitops.CagentsWorktree, occupied: bool) -> str:
+    """What removing this worktree would cost, in one phrase."""
+    if occupied:
+        return "a conversation is still working here"
+    if worktree.dirty_files:
+        return f"dirty ({worktree.dirty_files} file{'s' if worktree.dirty_files > 1 else ''})"
+    if worktree.commits_ahead:
+        commits = worktree.commits_ahead
+        return f"{commits} commit{'s' if commits > 1 else ''} ahead of the mainline"
+    return "clean, merged" if worktree.merged else "clean"
 
 
 def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
@@ -187,6 +202,8 @@ class CagentsApp(App):
         # reports one, so that spawn reuses this exact id (already tracked,
         # already the list row waiting on it) instead of minting a new one.
         self._pending_new_terminals: set[str] = set()
+        # What the rows of the open :worktrees list point at.
+        self._worktree_rows: list[tuple[gitops.CagentsWorktree, str]] = []
         self.gh_runner = gh_runner  # injectable for the PR poller
         self.jira_fetch = jira_fetch  # injectable HTTP layer for the Jira poller
         self.snapshot = Snapshot()
@@ -463,7 +480,8 @@ class CagentsApp(App):
             if view.auto_done and last_interaction(view) > view.done_at:
                 from .lifecycle import apply_auto_done
                 view.state = SessionState.NEEDS_REVIEW
-                apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at)
+                apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at,
+                                self.store.get_setting("auto_done_readonly_duration"))
             value = datetime.fromtimestamp(view.done_at, timezone.utc).isoformat() if view.auto_done else ""
             if tracked.auto_done_at != value:
                 tracked.auto_done_at = value
@@ -1147,6 +1165,63 @@ exec {shlex.quote(real)} "$@"
         if not directory or not Path(directory).is_dir():
             self.notify(f"Shell claude: bad directory {directory!r}", severity="error")
             return
+        if self._wants_worktree(directory, args, str(provider)):
+            self._worktree_spawn_worker(directory, args, str(provider), pending_id)
+            return
+        self._spawn_requested(directory, args, str(provider), pending_id)
+
+    RESUME_ARGS = {
+        # Claude reopening an existing conversation, and Codex's
+        # subcommands for the same. A resumed conversation already has a
+        # directory and a transcript; moving it to an empty worktree would
+        # at best lose its work and at worst leave --continue nothing to
+        # continue.
+        "claude": ("--resume", "--continue", "-c"),
+        "codex": ("resume", "fork"),
+    }
+
+    def _wants_worktree(self, directory: str, args: list[str], provider: str) -> bool:
+        """Should this spawn get a worktree of its own?
+
+        Only a genuinely new conversation, only with the setting on, and
+        only from a shared checkout: a directory that is already a linked
+        worktree (a cagents one from an earlier conversation, or one made
+        by hand) is exactly what the setting is trying to achieve, so it
+        is used as it stands rather than nested inside another."""
+        if not self.store.get_setting("auto_worktree"):
+            return False
+        markers = self.RESUME_ARGS.get(provider, ())
+        if provider == "codex":
+            if args and args[0] in markers:
+                return False
+        elif any(arg in markers for arg in args):
+            return False
+        return gitops.worktree_status(directory)[0] == "main"
+
+    @work(thread=True, group="worktree", exit_on_error=False)
+    def _worktree_spawn_worker(
+        self, directory: str, args: list[str], provider: str, pending_id: str
+    ) -> None:
+        """`git worktree add` copies a whole checkout out — on a monorepo
+        that is tens of seconds, so it never runs on the UI thread. A
+        failure is reported and then ignored: the conversation the user
+        asked for still opens, in the directory they typed."""
+        try:
+            resolved = gitops.create_worktree(directory)
+            self.call_from_thread(self.store.remember_worktree_repo, directory)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify,
+                f"No worktree ({error}) — opening in {Path(directory).name} itself.",
+                severity="warning",
+                timeout=10,
+            )
+            resolved = directory
+        self.call_from_thread(self._spawn_requested, resolved, args, provider, pending_id)
+
+    def _spawn_requested(
+        self, directory: str, args: list[str], provider: str, pending_id: str
+    ) -> None:
         if provider == "codex":
             self._start_codex_worker(directory, args, pending_id)
             return
@@ -1180,6 +1255,7 @@ exec {shlex.quote(real)} "$@"
             return
         self._checkpoint("new session")
         self.store.track(session_id, directory, utcnow().isoformat())
+        self.store.set_project_dir(session_id, directory)
         self.selected_session_id = session_id
         self._pending_highlight = session_id
         self._show_new_session(name)
@@ -1639,6 +1715,12 @@ exec {shlex.quote(real)} "$@"
         changed = False
         for view in views:
             tracked = view.tracked
+            if tracked.jira_pinned and tracked.jira_key:
+                # Picked by hand, so skip derivation entirely and only
+                # refresh the board state.
+                if self._refresh_pinned_jira(tracked):
+                    changed = True
+                continue
             # Re-derived fresh every poll, never trusted from cache — a
             # session's *recorded* PR can change after its jira_key was
             # first set (confirmed live: a session that incidentally
@@ -1694,6 +1776,22 @@ exec {shlex.quote(real)} "$@"
             )
         if changed:
             self.call_from_thread(self.refresh_data)
+
+    def _refresh_pinned_jira(self, tracked) -> bool:
+        try:
+            issue = jira.fetch_issue(tracked.jira_key, fetch=self.jira_fetch)
+        except jira.JiraError:
+            return False  # transient; the pin itself is unaffected
+        if (issue.status, issue.assignee) == (tracked.jira_status, tracked.jira_assignee):
+            return False
+        self.store.set_jira_info(
+            tracked.session_id,
+            tracked.jira_key,
+            issue.status,
+            issue.assignee,
+            utcnow().isoformat(),
+        )
+        return True
 
     # -- desktop notifications / click-select ------------------------------------
 
@@ -2163,11 +2261,15 @@ exec {shlex.quote(real)} "$@"
     def _recent_directories(self, limit: int = 5) -> list[str]:
         """Distinct project directories from the most recently tracked
         sessions, newest first — offered as quick-jump shortcuts in the
-        new-conversation terminal."""
+        new-conversation terminal.
+
+        A cagents worktree collapses to the checkout it came from: the
+        shortcut you want is the project, and typing `claude` there grows
+        the next worktree anyway."""
         ordered = sorted(self.store.sessions.values(), key=lambda t: t.added_at, reverse=True)
         seen: list[str] = []
         for tracked in ordered:
-            directory = tracked.project_dir
+            directory = gitops.owning_repo(tracked.project_dir) or tracked.project_dir
             if directory and directory not in seen:
                 seen.append(directory)
             if len(seen) >= limit:
@@ -2329,24 +2431,131 @@ exec {shlex.quote(real)} "$@"
         elif view.tracked.pr_url:
             url, label = view.tracked.pr_url, "PR"
         if not url:
-            self.push_screen(
-                InputModal(
-                    "No PR recorded for this session — paste one to associate",
-                    placeholder="https://github.com/owner/repo/pull/123",
-                ),
-                lambda text: self._pr_associated(view.session_id, text, open_after=True),
-            )
+            # A linked card knows its own PRs — ask GitHub before falling
+            # back to whatever the transcript happens to mention.
+            if view.jira_key:
+                self._prs_from_card_worker(view.session_id, view.jira_key, view.project_dir)
+                return
+            self._offer_pr_candidates(view)
             return
         self._open_url(url, label)
+
+    @work(thread=True, exclusive=True, group="prsearch", exit_on_error=False)
+    def _prs_from_card_worker(self, session_id: str, card_key: str, directory: str) -> None:
+        found = gitops.prs_referencing(card_key, directory, runner=self.gh_runner)
+        self.call_from_thread(self._prs_from_card_found, session_id, found)
+
+    def _prs_from_card_found(self, session_id: str, found: list[str]) -> None:
+        view = self.snapshot.by_id(session_id)
+        if view is not None:
+            self._offer_pr_candidates(view, card_prs=found)
+
+    def _offer_pr_candidates(self, view, card_prs: list[str] | tuple = ()) -> None:
+        candidates = self._pr_candidates(view, card_prs=card_prs)
+        if not candidates:
+            self._prompt_for_pr(view.session_id)
+            return
+        self.push_screen(
+            LinkCandidateModal(
+                "No PR linked — which one is this session's?",
+                candidates,
+                paste_label="none of these — paste one instead",
+            ),
+            lambda chosen: self._pr_candidate_chosen(view.session_id, chosen),
+        )
+
+    def _pr_candidates(self, view, card_prs: list[str] | tuple = ()) -> list:
+        if view.parsed is None:
+            return []
+        return linkscan.pr_candidates(
+            view.parsed.path,
+            project_dir=view.project_dir,
+            card_key=view.jira_key,
+            card_prs=card_prs,
+        )
+
+    def _prompt_for_pr(self, session_id: str) -> None:
+        self.push_screen(
+            InputModal(
+                "No PR recorded for this session — paste one to associate",
+                placeholder="https://github.com/owner/repo/pull/123",
+            ),
+            lambda text: self._pr_associated(session_id, text, open_after=True),
+        )
+
+    def _pr_candidate_chosen(self, session_id: str, chosen: str | None) -> None:
+        if not chosen:
+            return
+        if chosen == LinkCandidateModal.PASTE_INSTEAD:
+            self._prompt_for_pr(session_id)
+            return
+        self._pr_associated(session_id, chosen, open_after=True)
 
     def action_open_jira(self) -> None:
         view = self.selected_view()
         if view is None:
             return
-        if not view.jira_key:
+        if view.jira_key:
+            self._open_url(view.jira_url, f"Jira {view.jira_key}")
+            return
+        # A linked PR names its own card in its title/body/branch — the
+        # same derivation the poller does, so it needs no confirming.
+        pr_url = self._recorded_pr_url(view)
+        if pr_url:
+            self._jira_from_pr_worker(view.session_id, pr_url)
+            return
+        self._offer_jira_candidates(view)
+
+    @work(thread=True, exclusive=True, group="jiraderive", exit_on_error=False)
+    def _jira_from_pr_worker(self, session_id: str, pr_url: str) -> None:
+        title, body, branch = gitops.pr_jira_sources(pr_url, runner=self.gh_runner)
+        self.call_from_thread(
+            self._jira_from_pr_found, session_id, jira.extract_jira_key(title, body, branch)
+        )
+
+    def _jira_from_pr_found(self, session_id: str, key: str) -> None:
+        view = self.snapshot.by_id(session_id)
+        if view is None:
+            return
+        if not key:
+            self._offer_jira_candidates(view)
+            return
+        # Not pinned: the poller can re-derive this itself, and should
+        # keep doing so as the PR changes.
+        self._checkpoint("Jira association")
+        self.store.set_jira_info(session_id, key, "", "", "")
+        self._open_jira_key(key, "from the linked PR")
+        self.refresh_data()
+
+    def _offer_jira_candidates(self, view) -> None:
+        candidates = self._jira_candidates(view)
+        if not candidates:
             self.notify("No Jira card linked to this session yet.", severity="warning")
             return
-        self._open_url(view.jira_url, f"Jira {view.jira_key}")
+        self.push_screen(
+            LinkCandidateModal("No Jira card linked — which one is this session's?", candidates),
+            lambda chosen: self._jira_candidate_chosen(view.session_id, chosen),
+        )
+
+    def _open_jira_key(self, key: str, whence: str) -> None:
+        url = jira.browse_url(key)
+        if url:
+            self._open_url(url, f"Jira {key}")
+        else:
+            self.notify(f"Linked {key} {whence} — set JIRA_SITE to open it.", severity="warning")
+
+    def _jira_candidates(self, view) -> list:
+        if view.parsed is None:
+            return []
+        return linkscan.jira_candidates(view.parsed.path, branch=view.parsed.git_branch)
+
+    def _jira_candidate_chosen(self, session_id: str, chosen: str | None) -> None:
+        if not chosen:
+            return
+        self._checkpoint("Jira association")
+        self.store.pin_jira_key(session_id, chosen)
+        self._open_jira_key(chosen, "by hand")
+        self.refresh_data()
 
     def _open_url(self, url: str, label: str) -> None:
         import subprocess
@@ -2567,6 +2776,19 @@ exec {shlex.quote(real)} "$@"
             message += f" {busy} still working — left alone."
         self.notify(message, severity="warning" if busy else "information")
 
+    def action_done_all(self) -> None:
+        """:done — the whole review queue, in one undoable step."""
+        finished = [v for v in self.snapshot.views if v.state == SessionState.NEEDS_REVIEW]
+        if not finished:
+            self.notify("Nothing to mark done.")
+            return
+        self._checkpoint(":done")
+        when = utcnow().isoformat()
+        for view in finished:
+            self.store.mark_reviewed(view.session_id, when)
+        self._notify_undoable(f"Marked {len(finished)} done.")
+        self.refresh_data()
+
     def action_restart_all(self) -> None:
         if self._restart_all_pending or self._lifecycle_busy:
             self.notify("Wait for the current session operation to finish, then retry :restart.", severity="warning")
@@ -2625,8 +2847,114 @@ exec {shlex.quote(real)} "$@"
             self.action_restart_all()
         elif name == "sleep":
             self.action_sleep_all()
+        elif name == "worktrees":
+            self._load_worktrees()
+        elif name == "done":
+            self.action_done_all()
         else:
-            self.notify(f"Unknown command: {command}. Available: restart, sleep", severity="warning")
+            self.notify(
+                f"Unknown command: {command}. Available: done, restart, sleep, worktrees",
+                severity="warning",
+            )
+
+    def _worktree_repos(self) -> list[str]:
+        """The checkouts to look for conversation worktrees in: the ones
+        cagents recorded growing one in, plus any a tracked conversation is
+        currently living in a worktree of — which is what finds worktrees
+        from before that bookkeeping existed."""
+        repos: list[str] = []
+        candidates = [
+            *self.store.worktree_repos,
+            *(gitops.owning_repo(t.project_dir) for t in self.store.sessions.values()),
+        ]
+        for candidate in candidates:
+            if candidate and candidate not in repos and Path(candidate).is_dir():
+                repos.append(candidate)
+        return repos
+
+    @work(thread=True, group="worktrees", exit_on_error=False)
+    def _load_worktrees(self) -> None:
+        """git, not cagents' bookkeeping, is the source of truth for what
+        still exists — one you removed by hand just stops being listed."""
+        found: list[tuple[gitops.CagentsWorktree, str]] = []
+        for repo in self._worktree_repos():
+            for worktree in gitops.cagents_worktrees(repo):
+                found.append((worktree, repo))
+        self.call_from_thread(self._show_worktrees, found)
+
+    def _show_worktrees(self, found: list[tuple[gitops.CagentsWorktree, str]]) -> None:
+        if not found:
+            self.notify(
+                "No conversation worktrees yet — turn on 'Worktree per conversation' "
+                "in settings (,) and start a conversation."
+            )
+            return
+        occupied = set()
+        for view in self.snapshot.views:
+            occupied.update((view.work_dir, view.project_dir))
+        # Safe to prune first, so the common case is one enter away.
+        found.sort(key=lambda pair: (
+            pair[0].path in occupied, pair[0].dirty_files > 0, pair[0].commits_ahead
+        ))
+        self._worktree_rows = found
+        repos = {repo for _worktree, repo in found}
+        rows = [
+            (
+                f"{Path(repo).name}/{Path(worktree.path).name}"
+                if len(repos) > 1 else Path(worktree.path).name,
+                _worktree_state(worktree, worktree.path in occupied),
+                self._worktree_prunable(worktree, occupied),
+            )
+            for worktree, repo in found
+        ]
+        self.push_screen(WorktreeModal(rows), self._worktree_chosen)
+
+    @staticmethod
+    def _worktree_prunable(worktree: gitops.CagentsWorktree, occupied: set[str]) -> bool:
+        """Unmerged commits do not block a removal — the branch outlives the
+        directory. Uncommitted work and a conversation still pointed at it
+        do: git refuses the first, and the second would break resuming."""
+        return worktree.dirty_files == 0 and worktree.path not in occupied
+
+    def _worktree_chosen(self, index: int | None) -> None:
+        if index is None:
+            return
+        worktree, repo = self._worktree_rows[index]
+        occupied = set()
+        for view in self.snapshot.views:
+            occupied.update((view.work_dir, view.project_dir))
+        name = Path(worktree.path).name
+        if not self._worktree_prunable(worktree, occupied):
+            self.notify(
+                f"{name} is {_worktree_state(worktree, worktree.path in occupied)} — "
+                "commit or untrack it first.",
+                severity="warning",
+                timeout=10,
+            )
+            return
+        cost = (
+            f"Its branch {worktree.branch} keeps {worktree.commits_ahead} commit(s) "
+            "the mainline lacks; only the directory goes."
+            if worktree.commits_ahead else
+            f"Nothing to lose: {_worktree_state(worktree, False)}."
+        )
+        self.push_screen(
+            ConfirmModal(f"Remove the worktree {name}?\n\n{cost}"),
+            lambda ok: self._remove_worktree_worker(repo, worktree.path, worktree.branch)
+            if ok else None,
+        )
+
+    @work(thread=True, group="worktrees", exit_on_error=False)
+    def _remove_worktree_worker(self, repo: str, path: str, branch: str) -> None:
+        try:
+            gitops.remove_worktree(repo, path, branch)
+        except gitops.GitError as error:
+            self.call_from_thread(
+                self.notify, f"Kept it — {error}", severity="error", timeout=12
+            )
+            return
+        self.call_from_thread(self.notify, f"Removed {Path(path).name}.")
+        self.call_from_thread(self.refresh_data)
 
     def action_settings(self) -> None:
         self.push_screen(SettingsModal(self.store, self._setting_changed))
@@ -2649,7 +2977,8 @@ exec {shlex.quote(real)} "$@"
             for view_id in VIEW_IDS:
                 self.query_one(f"#{view_id}").update_snapshot(self.snapshot)
             return
-        if key in ("state_order", "background_activity_states", "auto_done_duration"):
+        if key in ("state_order", "background_activity_states", "auto_done_duration",
+                   "auto_done_readonly_duration"):
             self.refresh_data()  # ranks are computed per refresh
             return
         if key == "diff_mode":

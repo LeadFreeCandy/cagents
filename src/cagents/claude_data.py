@@ -116,6 +116,7 @@ class ParsedSession:
     pending_tool_name: str = ""
     last_record_role: str = ""  # "user" | "assistant" | "" if neither seen
     truncated: bool = False  # tail parse did not cover the whole file
+    middle_writes: bool = False
     # First line of the newest assistant text — "what the agent last did/said".
     last_assistant_text: str = ""
     # Long-lived side tasks (lifecycle verified against real transcripts).
@@ -266,13 +267,16 @@ def _scan_lifecycle(
 
 
 _LINE_TS_RE = re.compile(r'"timestamp":"([^"]+)"')
+_WRITE_MARKER_RE = re.compile(
+    r'"name":\s*"(?:' + "|".join(_FILE_TOOLS) + r')",\s*"input"|"type":\s*"(?:' + "|".join(_LINK_EXTRACTORS) + r')"'
+)
 
 
 def _scan_middle_for_lifecycle(
     path: Path, start: int, end: int,
     active_background: dict, active_monitors: dict,
     terminal_ids: set, timed_out_ids: set,
-) -> None:
+) -> bool:
     """Regex-only sweep of the byte range `_read_lines` drops for a large
     transcript, looking for background/Monitor lifecycle markers the
     bounded head+tail scan never sees.
@@ -286,13 +290,17 @@ def _scan_middle_for_lifecycle(
     `_scan_lifecycle` already uses, run straight against each raw JSONL
     line. Their escaped JSON text is byte-identical to the decoded content
     for the plain-ASCII phrases matched here, so decoding each record
-    would find nothing this doesn't."""
+    would find nothing this doesn't.
+
+    Returns whether the range edits a file or records a PR/artifact link."""
     if end <= start:
-        return
+        return False
     with path.open("rb") as f:
         f.seek(start)
         data = f.read(end - start)
+    writes = False
     for raw_line in data.decode("utf-8", "replace").splitlines():
+        writes = writes or bool(_WRITE_MARKER_RE.search(raw_line))
         if (
             "Monitor started" not in raw_line
             and "running in background" not in raw_line
@@ -302,6 +310,7 @@ def _scan_middle_for_lifecycle(
         ts_match = _LINE_TS_RE.search(raw_line)
         ts = _parse_ts(ts_match.group(1)) if ts_match else None
         _scan_lifecycle(raw_line, ts, active_background, active_monitors, terminal_ids, timed_out_ids)
+    return writes
 
 
 # Fallback for the handful of harness-synthesized shapes seen without a
@@ -372,7 +381,7 @@ def parse_session_file(
     timed_out_monitor_ids: set[str] = set()
 
     if parsed.truncated:
-        _scan_middle_for_lifecycle(
+        parsed.middle_writes = _scan_middle_for_lifecycle(
             path, head_bytes, stat.st_size - tail_bytes,
             active_background, active_monitors,
             terminal_task_ids, timed_out_monitor_ids,

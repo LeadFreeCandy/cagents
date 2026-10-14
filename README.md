@@ -129,6 +129,9 @@ list costs no memory. `:sleep` puts every idle conversation to sleep right now;
 visiting a row wakes it again (a done one on `Enter` / `→`). Conversations
 still working are left alone.
 
+`:done` marks every needs-review conversation done in one step (`z` undoes
+it); anything still working or waiting on you stays put.
+
 ## Install / run
 
 ```sh
@@ -257,6 +260,11 @@ conversations qualify immediately. Choose off, 1d, 3d, 7d, 14d, or 30d; custom
 positive durations such as `12h` also work in `auto_done_duration` in state.json.
 Actively working and explicitly snoozed conversations are left alone.
 
+**Auto done read-only**, default **1d**, is a shorter timer for Claude
+conversations that edited no files and recorded no PR or artifact — a question
+and its answer. It never outlasts Auto done duration, and that one being off
+turns both off. Choose off, 12h, 1d, or 3d.
+
 Manual and automatic done conversations share the Done group, newest completion
 first. Hovering or selecting an automatic one resets its inactivity timer; `d`
 can also return it to the queue. New conversation activity reopens it.
@@ -279,6 +287,29 @@ The shared daemon stays running; server-side thread memory follows
 Restarts of saved conversations use a fresh local Codex runtime. A new thread
 without a saved first message retains its existing server connection.
 
+
+## A worktree per conversation
+
+Settings (`,`) → **Worktree per conversation**, off by default. With it on,
+every conversation you start goes into its own linked git worktree of the
+directory it opened in — `<repo>-worktrees/cagents-<n>`, branch `cagents/<n>`,
+branched off the mainline (remote-tracking ref first) — and the Claude or Codex
+CLI runs there instead of in the shared checkout.
+
+That is what makes the diff and terminal tabs trustworthy: both act on the
+conversation's own directory, so the diff is this conversation's work rather
+than whatever the checkout happens to be on, the terminal tab stops warning that
+it opened somewhere shared, and PR association (`o`) — which refuses a shared
+checkout on purpose, because the branch there is whoever touched it last —
+starts finding the right PR.
+
+Resumed conversations are never moved, a directory that is already a worktree is
+used as-is, and a repo that can't grow one opens the conversation where you typed
+it and says why. Worktrees of the same repo group under that repo in the grouped
+view. **`:worktrees`** lists the ones cagents grew with what removing each would
+cost and removes the highlighted one after a confirm; uncommitted changes or a
+conversation still pointed at it refuse, and only a branch git agrees is merged
+is deleted with its directory.
 
 ## cagents3 native panes
 

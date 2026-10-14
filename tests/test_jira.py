@@ -559,8 +559,44 @@ async def test_shift_o_opens_jira_card(jira_world, monkeypatch):
         assert opened and opened[0] == ["open", "https://team.atlassian.net/browse/OWNER-721"]
 
 
-async def test_shift_o_warns_when_no_card_linked(jira_world):
+async def test_shift_o_derives_the_card_from_the_linked_pr(jira_world):
+    """This session has a PR whose title names its card, so O resolves it
+    rather than shrugging. The warning is now only for a session with no
+    PR to derive from and no card in its transcript either — covered by
+    test_link_candidates.py.
+
+    Derived, not pinned: the poller still owns a key it can re-derive."""
     app, store, sid = jira_world
+    opened = []
+    app._open_url = lambda url, label: opened.append(url)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        from conftest import select_session
+
+        select_session(app, sid)
+        await pilot.pause()
+        await pilot.press("O")
+        await pilot.pause(0.4)
+        assert store.sessions[sid].jira_key == "OWNER-721"
+        assert not store.sessions[sid].jira_pinned
+        assert opened == ["https://team.atlassian.net/browse/OWNER-721"]
+
+
+async def test_shift_o_warns_when_there_is_nothing_to_derive(claude_dir: Path, tmp_path: Path, now: float, monkeypatch):
+    from cagents.app import CagentsApp
+    from cagents.sessions import SessionRegistry
+    from conftest import FakeTmux, select_session
+
+    monkeypatch.setenv("JIRA_SITE", "team.atlassian.net")
+    sid = "77777777-7777-7777-7777-777777777777"
+    TranscriptBuilder(sid, "/proj/bare").ai_title("No links").user("go").assistant_text(
+        "nothing to go on"
+    ).write(claude_dir, mtime=now - 600)
+    store = Store.load(tmp_path / "state.json")
+    store.track(sid, "/proj/bare", "2026-08-18T09:00:00+00:00")
+    tmux = FakeTmux()
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
     captured = []
     import textual.app as textual_app
 

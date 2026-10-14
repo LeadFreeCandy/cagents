@@ -161,3 +161,22 @@ def test_search_skips_unreadable_transcript_without_raising(claude_dir: Path, tm
         mtime=0.0, size=1,
     )
     assert search_all_sessions(claude_dir, "anything", sessions=[ghost]) == []
+
+
+def test_repeat_searches_reread_only_changed_transcripts(claude_dir: Path, monkeypatch):
+    import cagents.search as search
+
+    reads = []
+    real = search._scan_transcript
+    monkeypatch.setattr(search, "_scan_transcript", lambda path: reads.append(path) or real(path))
+    TranscriptBuilder(SID1, "/proj/a").ai_title("A").user("go").assistant_text("alpha").write(claude_dir)
+    b = TranscriptBuilder(SID2, "/proj/b").ai_title("B").user("go").assistant_text("beta")
+    path = b.write(claude_dir)
+
+    search_all_sessions(claude_dir, "alpha")
+    search_all_sessions(claude_dir, "beta")
+    assert len(reads) == 2
+
+    b.assistant_text("gamma arrives later").write(claude_dir)
+    assert [r.session_id for r in search_all_sessions(claude_dir, "gamma")] == [SID2]
+    assert reads[2:] == [path]

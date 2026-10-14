@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Select, Static
 from textual.widgets.option_list import Option
+from textual.worker import get_current_worker
 
 from .claude_data import DiscoveredSession
 from .format import human_age, provider_icon
@@ -269,14 +271,20 @@ class TrackModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+_SEARCH_LOCK = threading.Lock()
+
+
 class SearchModal(ModalScreen["object | None"]):
     """Fuzzy full-text search across every conversation transcript on
-    disk — the complete history (every message), not just titles. A real
-    full scan, deliberately: press Enter to run it rather than searching
-    on every keystroke, since it can take a while across many/large
-    transcripts. Dismisses with the chosen SearchResult, or None."""
+    disk — the complete history (every message), not just titles.
+    Results follow each keystroke; ↑/↓ (or ctrl+p/ctrl+n) pick while you
+    keep typing, Enter opens. Dismisses with the chosen SearchResult, or None."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("down,ctrl+n", "move(1)", show=False, priority=True),
+        Binding("up,ctrl+p", "move(-1)", show=False, priority=True),
+    ]
 
     DEFAULT_CSS = """
     SearchModal { align: center middle; }
@@ -296,51 +304,76 @@ class SearchModal(ModalScreen["object | None"]):
         self.claude_dir = claude_dir
         self.codex_dir = codex_dir
         self.results: list = []
+        self._results_query = ""
+        self._open_when_ready = False
+        self._debounce = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("Search all conversation history")
-            yield Static(
-                "Enter to search (full scan — can take a while) · Esc to cancel",
-                classes="hint",
-            )
+            yield Static("↑/↓ pick · Enter open · Esc cancel", classes="hint")
             yield Input(placeholder="fuzzy search…", id="query")
             yield Static("", id="status")
             yield OptionList(id="results")
 
     def on_mount(self) -> None:
         self.query_one("#query", Input).focus()
+        self._run_search("")
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._open_when_ready = False
+        if self._debounce is not None:
+            self._debounce.stop()
         query = event.value.strip()
         if not query:
+            self._show_results("", [])
             return
-        self.query_one("#status", Static).update(
-            "Searching the complete history — this can take a while…"
-        )
-        self.query_one("#results", OptionList).clear_options()
-        self._run_search(query)
+        self._debounce = self.set_timer(0.06, lambda: self._run_search(query))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        highlighted = self.query_one("#results", OptionList).highlighted
+        if self._results_query != event.value.strip():
+            self._open_when_ready = True
+        elif self.results and highlighted is not None:
+            self.dismiss(self.results[highlighted])
+
+    def action_move(self, step: int) -> None:
+        option_list = self.query_one("#results", OptionList)
+        if option_list.option_count:
+            current = option_list.highlighted or 0
+            option_list.highlighted = max(0, min(option_list.option_count - 1, current + step))
 
     @work(thread=True, exclusive=True, group="conversation-search")
     def _run_search(self, query: str) -> None:
-        from .search import search_all_sessions
+        from .search import scan_all_sessions, search_all_sessions
 
-        results = search_all_sessions(self.claude_dir, query, codex_dir=self.codex_dir)
-        self.app.call_from_thread(self._show_results, results)
+        with _SEARCH_LOCK:
+            if get_current_worker().is_cancelled:
+                return
+            if not query:
+                scan_all_sessions(self.claude_dir, codex_dir=self.codex_dir)
+                return
+            results = search_all_sessions(self.claude_dir, query, codex_dir=self.codex_dir)
+        self.app.call_from_thread(self._show_results, query, results)
 
-    def _show_results(self, results: list) -> None:
+    def _show_results(self, query: str, results: list) -> None:
         from rich.text import Text
 
         from .search import MatchKind
 
-        self.results = results
+        if query != self.query_one("#query", Input).value.strip():
+            return
+        self.results, self._results_query = results, query
+        if self._open_when_ready and results:
+            self.dismiss(results[0])
+            return
         option_list = self.query_one("#results", OptionList)
         option_list.clear_options()
         status = self.query_one("#status", Static)
         if not results:
-            status.update("No matches.")
+            status.update("No matches." if query else "")
             return
-        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''} · Enter to open")
+        status.update(f"{len(results)} match{'es' if len(results) != 1 else ''}")
         for i, result in enumerate(results):
             is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
             row = Text(no_wrap=True, overflow="ellipsis")
@@ -352,7 +385,6 @@ class SearchModal(ModalScreen["object | None"]):
             row.append(f"  {result.snippet}", style="italic dim")
             option_list.add_option(Option(row, id=str(i)))
         option_list.highlighted = 0
-        option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(self.results[int(event.option.id)])
@@ -431,6 +463,10 @@ HELP_TEXT = """\
   *             related — visit this session's forks/handoffs/parent
   D             diff review screen — comment on lines, send comments to the agent
   o             open the newest recorded link (PR, artifact)
+  O             open this session's Jira card
+                unlinked, each tries the other's link first (a PR's title
+                names its card; a card finds its PRs), then ranks what the
+                conversation itself mentions for you to pick (z undoes it)
   R             rename       x  untrack       z  undo the last change
 
 [bold cyan]Sessions[/bold cyan]
@@ -441,10 +477,12 @@ HELP_TEXT = """\
                 tab -> cd/z/mkdir anywhere -> type "claude" or "codex" and it opens as a
                 managed session right there
   a             track an existing session
-  /             search all conversation history (fuzzy, full scan — off by
-                default, enable in settings)
+  /             search all conversation history as you type (fuzzy; ↑/↓ or
+                ctrl+p/n pick, Enter opens — off by default, enable in settings)
   ctrl+r        restart the selected agent, resuming the same conversation
+  :done         mark every needs-review conversation done (z undoes)
   :restart      restart running tracked agents and the dashboard
+  :worktrees    the worktrees cagents grew, and prune one
 
   ,             settings · ? this help · q quit\
 """
@@ -496,7 +534,8 @@ class CommandModal(ModalScreen[str | None]):
                 "Interrupts current work; preserves history. Suspended sessions stay asleep.\n"
                 "sleep — put every idle conversation to sleep now (frees memory). "
                 "Visiting a row wakes it again; a done one wakes on Enter or →. "
-                "Conversations still working are left alone.",
+                "Conversations still working are left alone.\n"
+                "worktrees — list the worktrees cagents grew per conversation and prune one.",
                 classes="hint",
             )
             yield Input(placeholder="restart | sleep")
@@ -512,9 +551,63 @@ class CommandModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class WorktreeModal(ModalScreen[int | None]):
+    """`:worktrees` — the worktrees the auto_worktree setting grew, and what
+    removing one would cost. Dismisses with the index of the row to remove.
+
+    Rows are prepared by the caller: only it knows which worktree a
+    tracked conversation is still working in."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    WorktreeModal { align: center middle; }
+    WorktreeModal > Vertical {
+        width: 84; max-width: 95%; height: auto; max-height: 70%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    WorktreeModal Label { text-style: bold; }
+    WorktreeModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, rows: list[tuple[str, str, bool]]) -> None:
+        """rows: (label, state, prunable), most prunable first."""
+        super().__init__()
+        self.rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Conversation worktrees")
+            yield Static("enter — remove it · esc — close", classes="hint")
+            yield OptionList(id="worktree-list")
+
+    def on_mount(self) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#worktree-list", OptionList)
+        for index, (label, state, prunable) in enumerate(self.rows):
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(" ● " if prunable else " ○ ", style="green" if prunable else "dim")
+            row.append(f"{label[:38]:<38} ", style="bold" if prunable else "")
+            row.append(state, style="dim")
+            option_list.add_option(Option(row, id=str(index)))
+        option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Row numbers, not session ids: one reaching the app's own list
+        # handler would hijack the selection.
+        event.stop()
+        self.dismiss(int(event.option.id or 0))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # Allowed values for string settings; enter cycles through them.
 SETTING_CHOICES: dict[str, list[str]] = {
     "auto_done_duration": ["off", "15m", "1h", "1d", "3d", "7d", "14d", "30d"],
+    "auto_done_readonly_duration": ["off", "12h", "1d", "3d"],
     "diff_mode": ["branch", "uncommitted"],
     "snooze_duration": ["15m", "30m", "1h", "2h", "4h", "1d"],
 }
@@ -597,8 +690,8 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "conversation_search",
         "Conversation search (/)",
         "Fuzzy full-text search across every conversation transcript on disk — the "
-        "complete history, not just titles. Off by default: a full scan can take a "
-        "while across many/large transcripts.",
+        "complete history, not just titles. Results follow each keystroke. Off by "
+        "default: opening it reads every transcript once, then only changed ones.",
     ),
     (
         "auto_done_duration",
@@ -606,6 +699,22 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Idle conversations go to auto sleep (listed above Done). Default 1h; applies "
         "to existing history. Enter cycles; off disables. New input reopens them. "
         "Done and auto sleep conversations are asleep; Enter or → wakes one.",
+    ),
+    (
+        "auto_done_readonly_duration",
+        "Auto done read-only",
+        "A shorter timer for conversations that edited no files and recorded no PR "
+        "or artifact (Claude only). Never longer than Auto done duration, and off "
+        "there turns this off too. Default 1d. Enter cycles.",
+    ),
+    (
+        "auto_worktree",
+        "Worktree per conversation",
+        "Start every new conversation in its own linked worktree of the directory "
+        "it opens in (<repo>-worktrees/cagents-<n>, branch cagents/<n>, off the "
+        "mainline). Nothing else is checked out there, so the diff and terminal "
+        "tabs and PR lookup act on this conversation's work alone. Resumed "
+        "conversations stay where they are. :worktrees prunes them.",
     ),
     (
         "background_activity_states",
@@ -991,6 +1100,70 @@ class RelatedModal(ModalScreen[str | None]):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LinkCandidateModal(ModalScreen[str | None]):
+    """Nothing linked yet (o / O), so pick from what the conversation
+    itself mentions — ranked, with why. Dismisses with the chosen value,
+    or PASTE_INSTEAD to fall through to typing one by hand."""
+
+    PASTE_INSTEAD = "\x00paste"
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    LinkCandidateModal { align: center middle; }
+    LinkCandidateModal > Vertical {
+        width: 84; max-width: 95%; height: auto; max-height: 70%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    LinkCandidateModal Label { text-style: bold; }
+    LinkCandidateModal .hint { color: $text-muted; margin-bottom: 1; }
+    """
+
+    def __init__(self, title: str, candidates: list, paste_label: str = "") -> None:
+        """candidates: linkscan.Candidate, likeliest first."""
+        super().__init__()
+        self.title_text = title
+        self.candidates = candidates
+        self.paste_label = paste_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self.title_text)
+            yield Static("enter — use it · esc — cancel", classes="hint")
+            yield OptionList(id="candidate-list")
+
+    def on_mount(self) -> None:
+        from rich.text import Text
+
+        option_list = self.query_one("#candidate-list", OptionList)
+        for index, candidate in enumerate(self.candidates):
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(f" {candidate.likelihood:>4.0%}  ", style="bold cyan")
+            row.append(f"{candidate.label[:22]:<22} ", style="bold")
+            row.append(", ".join(candidate.reasons[:2])[:34], style="dim")
+            option_list.add_option(Option(row, id=str(index)))
+        if self.paste_label:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("        ")
+            row.append(self.paste_label, style="dim italic")
+            option_list.add_option(Option(row, id=self.PASTE_INSTEAD))
+        option_list.highlighted = 0
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # These option ids are row numbers, not session ids: let one reach
+        # the app's own list handler and it hijacks the selection.
+        event.stop()
+        chosen = event.option.id or ""
+        if chosen == self.PASTE_INSTEAD:
+            self.dismiss(chosen)
+            return
+        self.dismiss(self.candidates[int(chosen)].value)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

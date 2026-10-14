@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from conftest import SID1, SID2, TranscriptBuilder
 
 from cagents.claude_data import (
@@ -232,3 +234,33 @@ def test_discover_sessions_orders_newest_first(claude_dir: Path, now: float):
 
 def test_discover_handles_missing_dir(tmp_path: Path):
     assert discover_sessions(tmp_path / "nope") == []
+
+
+@pytest.mark.parametrize("record", [
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": "/a.py"}}]}},
+    {"type": "pr-link", "prNumber": 7, "prUrl": "https://github.com/o/r/pull/7"},
+])
+def test_large_file_notices_writes_the_head_and_tail_skip(claude_dir: Path, record):
+    def build(middle):
+        b = TranscriptBuilder(SID1, "/proj/alpha").user("first message")
+        for i in range(200):
+            b.assistant_text("x" * 500 + f" step {i}")
+            if i == 100 and middle:
+                b.raw(record)
+        return parse_session_file(b.write(claude_dir), head_bytes=4096, tail_bytes=8192)
+
+    quiet, wrote = build(False), build(True)
+    assert quiet.truncated and wrote.truncated
+    assert not wrote.files_touched and not wrote.links  # outside the window
+    assert wrote.middle_writes and not quiet.middle_writes
+
+
+def test_large_file_ignores_a_write_quoted_inside_a_tool_result(claude_dir: Path):
+    b = TranscriptBuilder(SID1, "/proj/alpha").user("first message")
+    for i in range(200):
+        b.assistant_text("x" * 500 + f" step {i}")
+        if i == 100:
+            b.raw_tool_result("t0", '{"type": "tool_use", "name": "Edit", "input": {}}')
+    parsed = parse_session_file(b.write(claude_dir), head_bytes=4096, tail_bytes=8192)
+    assert parsed.truncated and not parsed.middle_writes

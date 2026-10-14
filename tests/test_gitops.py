@@ -14,6 +14,7 @@ from cagents.gitops import (
     current_github_login,
     default_branch,
     find_pr_url,
+    prs_referencing,
     github_pr_comments,
     is_git_repo,
     parse_unified_diff,
@@ -156,6 +157,45 @@ class TestGithubComments:
         with pytest.raises(GitError) as err:
             github_pr_comments(str(repo), gh_bin="definitely-not-a-real-binary")
         assert "not installed" in str(err.value)
+
+
+class TestPRsReferencing:
+    def test_finds_the_prs_that_mention_a_card(self, repo: Path):
+        import json as _json
+
+        calls = []
+
+        def runner(args, cwd=None):
+            calls.append((args, cwd))
+            return _json.dumps(
+                [
+                    {"url": "https://github.com/o/r/pull/7"},
+                    {"url": "https://github.com/o/r/pull/9"},
+                ]
+            )
+
+        found = prs_referencing("OWNER-663", str(repo), runner=runner)
+        assert found == ["https://github.com/o/r/pull/7", "https://github.com/o/r/pull/9"]
+        args, cwd = calls[0]
+        assert args[:3] == ["gh", "pr", "list"]
+        assert "OWNER-663" in args  # searched as one argv element, never a shell string
+        assert "all" in args  # a merged or closed PR still counts
+        assert cwd == str(repo)
+
+    def test_no_matches_is_empty_not_an_error(self, repo: Path):
+        assert prs_referencing("OWNER-663", str(repo), runner=lambda a, cwd=None: "[]") == []
+
+    def test_a_gh_failure_is_empty(self, repo: Path):
+        def runner(args, cwd=None):
+            raise RuntimeError("gh: not authenticated")
+
+        assert prs_referencing("OWNER-663", str(repo), runner=runner) == []
+
+    def test_an_empty_card_searches_for_nothing(self, repo: Path):
+        def runner(args, cwd=None):
+            raise AssertionError("must not call gh with an empty search")
+
+        assert prs_referencing("", str(repo), runner=runner) == []
 
 
 class TestPRStatus:
