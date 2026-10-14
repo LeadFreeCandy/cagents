@@ -860,6 +860,10 @@ class CagentsApp(App):
         listing.action_first()
         landed = self.snapshot.by_id(listing.highlighted_session_id or "")
         if landed is not None:
+            self.selected_session_id = landed.session_id
+            self._update_preview()
+            self._write_context()
+            self._sync_viewer()
             self._flash_landed(landed)
         if landed is not None and landed.state not in DONE_STATES:
             self._record_interaction(landed.session_id)

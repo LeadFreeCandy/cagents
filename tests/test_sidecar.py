@@ -714,6 +714,24 @@ async def test_ctrl_g_flashes_the_conversation_it_lands_on(world):
         assert any(a.startswith("CAGENTS_CARD1=") and "Alpha: fix auth" in a for a in cards[0])
 
 
+async def test_ctrl_g_shows_the_conversation_without_the_browse_debounce(world, monkeypatch):
+    store, tmux, registry, claude_dir = world
+    monkeypatch.setattr("cagents.app.VIEWER_COALESCE", 30)
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    attach = ["respawn-pane", "-k", "-t", "=work:session",
+              "env -u TMUX tmux -L claude attach-session -t '=alpha'"]
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        assert attach not in work.calls
+        await pilot.press("ctrl+g")
+        await pilot.pause(0.3)
+        assert attach in work.calls
+
+
 async def test_the_session_tab_switches_before_the_hidden_terminal_tab(world, tmp_path, now):
     store, tmux, registry, claude_dir = world
     repo = tmp_path / "alpha-repo"
