@@ -56,6 +56,9 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     # a screen scrape, it costs a fork on the press at the prompt column,
     # and an empty composer then stops reaching Claude's own ← view.
     "composer_aware_arrows": False,
+    # In the session tab ⌃U/⌃D reach Claude as Page Up/Page Down and
+    # scroll its transcript, instead of clearing the line and exiting.
+    "page_scroll_keys": True,
     # Dim the chat pane a bit while the rail is at its wide/max size
     # (choosing a session) — a visual cue for "not what you're doing
     # right now", cleared once the session pane is focused again.

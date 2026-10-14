@@ -88,6 +88,9 @@ back (click the tab, or `enter` from the list).
 - **`ctrl+d`** — build the diff for the selected session and switch to the diff tab.
   Not a repo → says so, stays put. (Accepted collision: Claude's
   quit-on-empty-prompt; `/exit` still works.)
+- **`ctrl+u`** / **`ctrl+d`** in the session tab — Page Up / Page Down through
+  Claude's transcript while **⌃U/⌃D scroll Claude** is on (the default). There
+  `ctrl+d` no longer opens the diff; from the list or another tab it still does.
 - **`ctrl+s`** — switch to the terminal tab.
 
 Both are driven by a context file that follows your selection, so they always act on

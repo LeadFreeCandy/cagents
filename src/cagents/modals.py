@@ -654,6 +654,14 @@ SETTINGS_META: list[tuple[str, str, str]] = [
         "Claude's own agents view.",
     ),
     (
+        "page_scroll_keys",
+        "⌃U/⌃D scroll Claude",
+        "In the session tab ⌃U and ⌃D reach Claude as Page Up and Page Down, "
+        "so they scroll its transcript; Claude stops seeing them as clear-line "
+        "and exit there. The terminal tab keeps both, and ⌃D from the list or "
+        "another tab still opens the diff.",
+    ),
+    (
         "dim_chat_preview",
         "Dim chat when list is wide",
         "Dims the chat pane a bit while the rail is at its wide/max size (you're "

@@ -407,6 +407,30 @@ class TestCommands:
         assert any(c.startswith("bind -n C-g ") for c in flat)
         assert any(c.startswith("bind -n C-d run-shell") and "diff" in c for c in flat)
 
+    def test_page_scroll_hands_ctrl_d_to_the_session_pane(self):
+        commands = ctx_bind_commands("/venv/bin/cagents-ctx", "/data/context.json", page_scroll=True)
+        ctrl_d = next(c for c in commands if c[:3] == ["bind", "-n", "C-d"])
+        assert ctrl_d[3:7] == ["if", "-F", "#{==:#{pane_index},1}", "send-keys C-d"]
+        assert ctrl_d[7].startswith("run-shell -b ") and "diff --context /data/context.json" in ctrl_d[7]
+
+    def test_page_scroll_keys_page_only_the_session_tab(self):
+        from cagents.sidecar import page_scroll_commands
+
+        on = {c[2]: c for c in page_scroll_commands(True, "/venv/bin/cagents-ctx", "/data/context.json")}
+        assert on["C-u"][3:] == ["if", "-F", "#{==:#{window_name},session}",
+                                 "send-keys PageUp", "send-keys C-u"]
+        assert on["C-d"][3:7] == ["if", "-F", "#{==:#{window_name},session}", "send-keys PageDown"]
+        assert on["C-d"][7].startswith("run-shell -b ") and "diff --context /data/context.json" in on["C-d"][7]
+        assert page_scroll_commands(False, "/venv/bin/cagents-ctx", "/data/context.json") == [
+            ["unbind", "-n", "C-u"], ["unbind", "-n", "C-d"]]
+
+    def test_apply_page_scroll_binds_on_the_workspace_server(self):
+        outer, work = FakeOuterTmux(), FakeWorkTmux()
+        sidecar = Sidecar(runner=outer, own_pane="%0", work_runner=work)
+        sidecar.apply_page_scroll(True, "/venv/bin/cagents-ctx", "/data/context.json")
+        assert [c[:3] for c in work.calls] == [["bind", "-n", "C-u"], ["bind", "-n", "C-d"]]
+        assert outer.calls == []
+
     def test_should_bootstrap_only_bare_terminal(self):
         assert should_bootstrap({}, stdout_is_tty=True, fullscreen_flag=False) is True
         assert should_bootstrap({"TMUX": "x"}, True, False) is False
@@ -479,6 +503,37 @@ async def test_viewer_follows_highlight_after_debounce(world):
         assert not any(c[0] == "select-pane" for c in outer.calls)
         selects = [c for c in work.calls if c[0] == "select-window"]
         assert selects == [["select-window", "-t", "=work:session"]]
+
+
+async def test_page_scroll_setting_is_on_by_default_and_toggles_both_servers(world, monkeypatch):
+    from textual.widgets import OptionList
+
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    ctx_binds = []
+    monkeypatch.setenv("CAGENTS_SIDECAR", "1")
+    monkeypatch.setattr("cagents.app.apply_ctx_binds",
+                        lambda prog, ctx, page_scroll=False: ctx_binds.append(page_scroll))
+    monkeypatch.setattr("cagents.app.apply_arrow_capture", lambda *a, **k: None)
+    monkeypatch.setattr("cagents.app.apply_dim_chat", lambda *a, **k: None)
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        assert ctx_binds == [True]
+        assert any(c[:3] == ["bind", "-n", "C-u"] for c in work.calls)
+        await pilot.press("comma")
+        await pilot.pause()
+        options = app.screen.query_one("#settings-list", OptionList)
+        options.highlighted = next(i for i in range(options.option_count)
+                                   if options.get_option_at_index(i).id == "page_scroll_keys")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert store.get_setting("page_scroll_keys") is False
+        assert ctx_binds[-1] is False
+        assert ["unbind", "-n", "C-u"] in work.calls and ["unbind", "-n", "C-d"] in work.calls
 
 
 async def test_enter_focuses_the_same_pane(world):

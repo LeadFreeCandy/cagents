@@ -277,6 +277,10 @@ class CagentsApp(App):
                     context_path=str(self._context_path()),
                     shim_env=self._shim_env(),
                 )
+                apply_page_scroll = getattr(self.sidecar, "apply_page_scroll", None)
+                if apply_page_scroll is not None:
+                    apply_page_scroll(bool(self.store.get_setting("page_scroll_keys")),
+                                      self._ctx_prog(), str(self._context_path()))
                 self._workspace_ready()
                 if self.theme.startswith("vim-"):
                     self._apply_color_theme(self.theme)
@@ -288,7 +292,8 @@ class CagentsApp(App):
 
     def _configure_container(self) -> None:
         self._apply_arrow_settings()
-        apply_ctx_binds(self._ctx_prog(), str(self._context_path()))
+        apply_ctx_binds(self._ctx_prog(), str(self._context_path()),
+                        page_scroll=bool(self.store.get_setting("page_scroll_keys")))
         self._apply_dim_chat(bool(self.store.get_setting("dim_chat_preview")))
 
     def _apply_dim_chat(self, enable: bool) -> None:
@@ -2994,6 +2999,15 @@ exec {shlex.quote(real)} "$@"
                 self._apply_arrow_settings()
             except Exception as error:
                 self.notify(f"Could not apply arrow bindings: {error}", severity="error")
+            return
+        if key == "page_scroll_keys" and os.environ.get("CAGENTS_SIDECAR") == "1":
+            try:
+                apply_ctx_binds(self._ctx_prog(), str(self._context_path()), page_scroll=bool(value))
+                apply_page_scroll = getattr(self.sidecar, "apply_page_scroll", None)
+                if apply_page_scroll is not None:
+                    apply_page_scroll(bool(value), self._ctx_prog(), str(self._context_path()))
+            except Exception as error:
+                self.notify(f"Could not apply scroll keys: {error}", severity="error")
             return
         if key == "dim_chat_preview" and os.environ.get("CAGENTS_SIDECAR") == "1":
             try:

@@ -48,6 +48,10 @@ class Sidecar:
         for command in tab_color_commands(theme):
             self._work(command)
 
+    def apply_page_scroll(self, enable: bool, ctx_prog: str, context_path: str) -> None:
+        for command in page_scroll_commands(enable, ctx_prog, context_path):
+            self._work(command)
+
     def __init__(self, runner=None, own_pane: str = "", work_runner=None, session_runner=None):
         # runner: outer-tmux (the container); work_runner: the workspace
         # server that holds the tabs. Both injectable for tests.
@@ -717,27 +721,48 @@ def queue_top_binding() -> list[str]:
     return ["bind", "-n", "C-g", "send-keys -t :.0 C-g"]
 
 
-def ctx_bind_commands(ctx_prog: str, context_path: str) -> list[list[str]]:
+def ctx_bind_commands(ctx_prog: str, context_path: str, page_scroll: bool = False) -> list[list[str]]:
     """C-t (shell in the session's dir) and C-d (diff vs master popup),
     C-t rather than C-s so Claude Code's own ctrl-s binding stays reachable;
-    available regardless of which pane has focus."""
+    available regardless of which pane has focus. With page_scroll, C-d in
+    the session pane goes on to the workspace (page_scroll_commands)."""
     import shlex
 
     prog = shlex.quote(ctx_prog)
     ctx = shlex.quote(context_path)
+    diff = f"{prog} diff --context {ctx}"
+    ctrl_d = (["bind", "-n", "C-d", "if", "-F", "#{==:#{pane_index},1}", "send-keys C-d",
+               f'run-shell -b "{diff}"'] if page_scroll
+              else ["bind", "-n", "C-d", "run-shell", "-b", diff])
     return [
         # Drop the pre-rename C-s bind a persisted container may still carry.
         ["unbind", "-n", "C-s"],
         ["bind", "-n", "C-t", "run-shell", "-b", f"{prog} shell --context {ctx}"],
-        ["bind", "-n", "C-d", "run-shell", "-b", f"{prog} diff --context {ctx}"],
+        ctrl_d,
         queue_top_binding(),
     ]
 
 
-def apply_ctx_binds(ctx_prog: str, context_path: str, runner=None) -> None:
+def apply_ctx_binds(ctx_prog: str, context_path: str, runner=None, page_scroll: bool = False) -> None:
     run = runner or _outer_tmux
-    for command in ctx_bind_commands(ctx_prog, context_path):
+    for command in ctx_bind_commands(ctx_prog, context_path, page_scroll):
         run(command)
+
+
+def page_scroll_commands(enable: bool, ctx_prog: str, context_path: str) -> list[list[str]]:
+    """Workspace-server binds: in the session tab C-u/C-d reach Claude as
+    PageUp/PageDown, which scroll its transcript. The terminal and diff
+    tabs keep C-u, and C-d there still opens the diff."""
+    if not enable:
+        return [["unbind", "-n", "C-u"], ["unbind", "-n", "C-d"]]
+    import shlex
+
+    diff = f"{shlex.quote(ctx_prog)} diff --context {shlex.quote(context_path)}"
+    in_session = "#{==:#{window_name},session}"
+    return [
+        ["bind", "-n", "C-u", "if", "-F", in_session, "send-keys PageUp", "send-keys C-u"],
+        ["bind", "-n", "C-d", "if", "-F", in_session, "send-keys PageDown", f'run-shell -b "{diff}"'],
+    ]
 
 
 def self_command(argv: list[str]) -> str:
