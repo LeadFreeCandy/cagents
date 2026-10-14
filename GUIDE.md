@@ -70,6 +70,10 @@ while you are on it:
   ◆ Documents Page Redesign · review
 ```
 
+`ctrl+g` (top of the queue) also shows a card over the conversation for four seconds —
+title, state, age, Jira card and its place in the queue. Typing goes straight through
+to Claude and closes it.
+
 - **session** — the live Claude attach / transcript (what browsing drives).
 - **diff** — **this worktree versus master**: committed + uncommitted, from the
   merge-base with the first of origin/HEAD, origin/main, origin/master, main,

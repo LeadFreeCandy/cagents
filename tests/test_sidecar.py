@@ -594,6 +594,126 @@ async def test_session_tab_carries_the_viewed_conversation(world):
         assert STATE_STYLE[app.snapshot.by_id(SID1).state][2] in titles[-1]
 
 
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+async def test_ctrl_g_card_floats_over_the_conversation_and_lets_typing_through(world, monkeypatch):
+    import subprocess
+    import uuid
+
+    from cagents.format import STATE_STYLE
+
+    store, tmux_fake, registry, claude_dir = world
+    work, sessions, term = ("cg-card-" + uuid.uuid4().hex[:10] for _ in range(3))
+    monkeypatch.setattr("cagents.sidecar.WORK_SOCKET", work)
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    def screen():
+        return tmux(term, "capture-pane", "-p", "-t", "t")
+
+    async def until(condition, message):
+        for _ in range(50):
+            if condition():
+                return
+            await pilot.pause(0.1)
+        raise AssertionError(message + "\n" + screen())
+
+    tmux(work, "new-session", "-d", "-s", "keep")
+    tmux(sessions, "new-session", "-d", "-s", "alpha", "-x", "100", "-y", "20", "cat -v")
+    tmux_fake.sessions[0].socket = sessions
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux_fake, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=FakeOuterTmux(), own_pane="%0"),
+    )
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.5)
+            tmux(term, "new-session", "-d", "-s", "t", "-x", "100", "-y", "24",
+                 f"env -u TMUX tmux -L {work} attach-session -t '=work'")
+            await until(lambda: "Alpha" in screen(), "workspace never attached")
+            await pilot.press("ctrl+g")
+            await until(lambda: "╭" in screen() and "Alpha: fix auth" in screen(), "no card")
+            card = [line for line in screen().splitlines() if "│" in line]
+            assert "Alpha: fix auth" in card[0]
+            assert STATE_STYLE[app.snapshot.by_id(SID1).state][2] in card[1]
+
+            tmux(term, "send-keys", "-t", "t", "-l", "\x1b[<35;10;15M")
+            await pilot.pause(0.3)
+            assert "╭" in screen(), "pointer motion dismissed the card"
+            await pilot.pause(2.7)
+            assert "╭" in screen(), "the card closed within 3 seconds"
+
+            tmux(term, "send-keys", "-t", "t", "-l", "x")
+            await until(lambda: "╭" not in screen(), "typing did not close the card")
+            await until(lambda: "x" in tmux(sessions, "capture-pane", "-p", "-t", "=alpha:"),
+                        "the keystroke never reached the conversation")
+    finally:
+        for socket in (term, work, sessions):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_ctrl_g_card_fits_a_narrow_terminal(monkeypatch):
+    import subprocess
+    import threading
+    import time
+    import uuid
+
+    work, term = ("cg-card-" + uuid.uuid4().hex[:10] for _ in range(2))
+    monkeypatch.setattr("cagents.sidecar.WORK_SOCKET", work)
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    try:
+        tmux(work, "new-session", "-d", "-s", "work", "-n", "session", "cat")
+        tmux(term, "new-session", "-d", "-s", "t", "-x", "40", "-y", "12",
+             f"env -u TMUX tmux -L {work} attach-session -t '=work'")
+        time.sleep(0.5)
+        errors = []
+
+        def flash():
+            try:
+                Sidecar(runner=FakeOuterTmux(), own_pane="%0").flash(
+                    "◆", "A conversation title long enough to overflow", "review · 53m · 1 of 3 in queue", "#ffaf00")
+            except RuntimeError as error:
+                errors.append(str(error))
+
+        thread = threading.Thread(target=flash)
+        thread.start()
+        deadline = time.time() + 2
+        while "╭" not in tmux(term, "capture-pane", "-p", "-t", "t") and time.time() < deadline:
+            time.sleep(0.05)
+        card = [line for line in tmux(term, "capture-pane", "-p", "-t", "t").splitlines() if "│" in line]
+        thread.join()
+        assert not errors
+        assert "A conversation" in card[0] and "…" in card[0]
+    finally:
+        for socket in (term, work):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+async def test_ctrl_g_flashes_the_conversation_it_lands_on(world):
+    store, tmux, registry, claude_dir = world
+    outer, work = FakeOuterTmux(), FakeWorkTmux()
+    app = CagentsApp(
+        store=store, registry=registry, tmux=tmux, claude_dir=claude_dir,
+        sidecar=Sidecar(runner=outer, own_pane="%0", work_runner=work),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.5)
+        await pilot.press("j")
+        await pilot.pause(0.3)
+        assert not any(c[0] == "display-popup" for c in work.calls)
+        await pilot.press("ctrl+g")
+        await pilot.pause(0.3)
+        cards = [c for c in work.calls if c[0] == "display-popup"]
+        assert len(cards) == 1
+        assert any(a.startswith("CAGENTS_CARD1=") and "Alpha: fix auth" in a for a in cards[0])
+
+
 async def test_page_scroll_setting_is_on_by_default_and_toggles_both_servers(world, monkeypatch):
     from textual.widgets import OptionList
 

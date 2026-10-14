@@ -88,6 +88,16 @@ def tmux_title(view: SessionView) -> str:
     return f"{glyph} {title} · {label}"
 
 
+def flash_card(view: SessionView, detail: Iterable[str]) -> tuple[str, str, str, str]:
+    """Glyph, title, detail line and state colour for Ctrl+G's card."""
+    from rich.style import Style
+
+    glyph, style, label = session_style(view)
+    color = Style.parse(style).color
+    hex_color = color.get_truecolor().hex if color is not None else "#a8a8a8"
+    return glyph, _truncate(view.title, 60), " · ".join([label, *detail]), hex_color
+
+
 def state_badge(view: SessionView) -> Text:
     glyph, style, label = session_style(view)
     badge = Text()

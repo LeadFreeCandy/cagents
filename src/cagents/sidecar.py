@@ -52,6 +52,26 @@ class Sidecar:
     def set_session_title(self, title: str) -> None:
         self._work(["set-option", "-w", "-t", "=work:session", "@cagents_title", title])
 
+    def flash(self, glyph: str, title: str, detail: str, color: str) -> None:
+        """Ctrl+G's card over the conversation. Blocks until it closes."""
+        from rich.cells import cell_len, set_cell_size
+
+        def fit(text: str, cells: int) -> str:
+            return text if cell_len(text) <= cells else set_cell_size(text, cells - 1) + "…"
+
+        columns = self._work(["display-message", "-p", "-t", "=work:", "#{window_width}"])
+        room = max(int(columns or 80) - 6, 4)
+        title, detail = fit(title, room - 2), fit(detail, room)
+        rgb = ";".join(str(int(color[i:i + 2], 16)) for i in (1, 3, 5))
+        headline = f"\033[1;38;2;{rgb}m{glyph}\033[38;2;255;255;255m {title}\033[0m"
+        width = max(cell_len(f"{glyph} {title}"), cell_len(detail)) + 6
+        self._work([
+            "display-popup", "-E", "-x", "C", "-y", "S", "-w", str(width), "-h", "4",
+            "-b", "rounded", "-S", f"fg={color}", "-s", "bg=#1c1c1c",
+            "-e", f"CAGENTS_CARD1=  {headline}",
+            "-e", f"CAGENTS_CARD2=  \033[38;2;168;168;168m{detail}\033[0m",
+            "-t", "=work:", _flash_relay(),
+        ])
 
     def apply_page_scroll(self, enable: bool, ctx_prog: str, context_path: str) -> None:
         for command in page_scroll_commands(enable, ctx_prog, context_path):
@@ -714,6 +734,25 @@ def apply_dim_chat(enable: bool, runner=None) -> None:
             run(command)
         except RuntimeError:
             pass
+
+
+FLASH_MS = 4000
+
+
+def _flash_relay() -> str:
+    """The card's own process. A popup takes the keyboard, so the first
+    keystrokes are passed to the pane underneath and the card closes;
+    untouched, it closes after FLASH_MS."""
+    import shlex
+
+    forward = f"tmux -L {shlex.quote(WORK_SOCKET)} send-keys -t '=work:' -H $k"
+    script = (
+        "printf '\\033[?25l%s\\n%s' \"$CAGENTS_CARD1\" \"$CAGENTS_CARD2\"; "
+        f"stty raw -echo min 0 time {FLASH_MS // 100}; "
+        "k=$(dd bs=256 count=1 2>/dev/null | od -An -v -tx1); "
+        f'[ -z "$k" ] || {forward}'
+    )
+    return "sh -c " + shlex.quote(script)
 
 
 def session_tab_formats(selected: str) -> list[list[str]]:

@@ -638,6 +638,28 @@ class CagentsApp(App):
         except Exception as error:
             self._dbg(f"session tab title failed: {error}")
 
+    def _flash_landed(self, view: SessionView) -> None:
+        from .format import flash_card, human_age
+
+        flash = getattr(self.sidecar, "flash", None)
+        if flash is None:
+            return
+        waiting = sum(1 for v in self.snapshot.views if v.state in ALERT_STATES)
+        detail = [human_age(view.last_activity)]
+        if view.jira_key:
+            detail.append(f"{view.jira_key} {view.jira_status}".strip())
+        if waiting:
+            detail.append(f"1 of {waiting} in queue")
+        card = flash_card(view, detail)
+
+        def show() -> None:
+            try:
+                flash(*card)
+            except Exception as error:
+                self._dbg(f"Ctrl-G flash failed: {error}")
+
+        self.run_worker(show, thread=True, group="flash", exit_on_error=False)
+
     def _sync_viewer_blocking(self, view: SessionView) -> None:
         from textual.worker import get_current_worker
 
@@ -838,6 +860,8 @@ class CagentsApp(App):
         listing = self.query_one("#queue-list", SessionList)
         listing.action_first()
         landed = self.snapshot.by_id(listing.highlighted_session_id or "")
+        if landed is not None:
+            self._flash_landed(landed)
         if landed is not None and landed.state not in DONE_STATES:
             self._record_interaction(landed.session_id)
 
