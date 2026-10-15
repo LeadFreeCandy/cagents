@@ -643,12 +643,12 @@ class TmuxClient:
     def session_statusline_on(self, session_name: str, socket: str | None = None) -> None:
         socket = socket or self.create_socket
         for option, value in self._STATUS_OPTIONS.items():
-            self._run(socket, "set", "-t", f"={session_name}", option, value)
+            self._run(socket, "set", "-t", f"={session_name}:", option, value)
 
     def session_statusline_off(self, session_name: str, socket: str | None = None) -> None:
         socket = socket or self.create_socket
         for option in self._STATUS_OPTIONS:
-            self._run(socket, "set", "-u", "-t", f"={session_name}", option)
+            self._run(socket, "set", "-u", "-t", f"={session_name}:", option)
 
     def bind_left_detach(self, client_tty: str, socket: str | None = None) -> None:
         """Fullscreen-mode left-arrow capture: while a cagents attach is

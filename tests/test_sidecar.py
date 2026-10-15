@@ -1347,3 +1347,28 @@ async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
         assert "ensure-view:alpha:term" not in tmux.log
         after = [c[-1] for c in work.calls if c[0] == "respawn-pane" and "=work:term-1" in c]
         assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_a_fullscreen_attach_sets_its_statusline_on_the_session_and_clears_it_after(monkeypatch):
+    import subprocess
+    import uuid
+
+    from cagents.tmuxctl import TmuxClient
+
+    sessions = "cg-status-" + uuid.uuid4().hex[:10]
+
+    def session_options():
+        return subprocess.run(["tmux", "-L", sessions, "show-options", "-t", "=alpha:"],
+                              capture_output=True, text=True).stdout
+
+    try:
+        subprocess.run(["tmux", "-f", "/dev/null", "-L", sessions, "new-session", "-d", "-s", "alpha",
+                        "sleep 600"], check=True)
+        client = TmuxClient(sockets=(sessions,), create_socket=sessions)
+        client.session_statusline_on("alpha", socket=sessions)
+        assert 'status-left " cagents "' in session_options()
+        client.session_statusline_off("alpha", socket=sessions)
+        assert "status-left" not in session_options()
+    finally:
+        subprocess.run(["tmux", "-L", sessions, "kill-server"], capture_output=True)
