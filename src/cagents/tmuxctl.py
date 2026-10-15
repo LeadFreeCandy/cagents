@@ -404,6 +404,8 @@ class TmuxClient:
         socket = socket or self.create_socket
         if socket in self._scroll_configured:
             return
+        if socket == CREATE_SOCKET:
+            self._run(socket, "set", "-g", "prefix", "None")
         for command in terminal_input_commands():
             if self._run(socket, *command).returncode:
                 return
@@ -629,6 +631,7 @@ class TmuxClient:
     # Session-scoped statusline shown during fullscreen attaches, so the
     # cagents keys stay visible under the Claude terminal.
     _STATUS_OPTIONS = {
+        "prefix": "C-b",
         "status": "on",
         "status-position": "bottom",
         "status-style": "bg=colour235,fg=colour246",

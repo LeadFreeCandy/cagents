@@ -142,6 +142,7 @@ class Sidecar:
         for option in (
             ["set", "-g", "mouse", "on"],
             ["set", "-g", "escape-time", "10"],
+            ["set", "-g", "prefix", "None"],
             ["set", "-g", "status", "on"],
             ["set", "-g", "status-position", "top"],
             ["set", "-g", "status-style", "bg=colour236,fg=colour248"],
@@ -670,6 +671,7 @@ def container_setup_commands() -> list[list[str]]:
         ["set", "-g", "window-status-current-format", ""],
         ["set", "-g", "focus-events", "on"],
         ["set", "-g", "detach-on-destroy", "on"],
+        ["set", "-g", "prefix", "None"],
         # Intercept this at the outermost terminal even when the native CLI,
         # a workspace tab, or scrollback has focus. send-keys targets the rail
         # directly, so it neither re-enters this binding nor reaches the agent.

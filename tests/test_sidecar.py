@@ -1349,6 +1349,131 @@ async def test_a_stale_viewer_sync_never_yanks_the_terminal_tab_back(
         assert after == before, f"stale sync re-pointed term-1: {after[len(before):]}"
 
 
+def _attach_terminal(socket, session, rows=22, columns=90):
+    import fcntl
+    import os
+    import pty
+    import struct
+    import termios
+
+    env = {**os.environ, "TERM": "xterm-256color"}
+    env.pop("TMUX", None)
+    pid, master = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        os.execvpe("tmux", ["tmux", "-L", socket, "attach-session", "-t", f"={session}"], env)
+    return pid, master
+
+
+def _drain(master, until=lambda: False, seconds=3.0):
+    import os
+    import select
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not until():
+        if select.select([master], [], [], .02)[0]:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                return
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_ctrl_b_reaches_the_conversation_through_every_tmux_layer(tmp_path, monkeypatch):
+    import os
+    import shlex
+    import subprocess
+    import sys
+    import uuid
+
+    from cagents.tmuxctl import TmuxClient
+
+    outer, work, sessions = ("cg-prefix-" + uuid.uuid4().hex[:10] for _ in range(3))
+    monkeypatch.setattr("cagents.sidecar.WORK_SOCKET", work)
+    monkeypatch.setattr("cagents.tmuxctl.CREATE_SOCKET", sessions)
+    received = tmp_path / "received"
+    received.touch()
+    program = tmp_path / "record.py"
+    program.write_text("import os,sys,tty\ntty.setraw(0)\nwith open(sys.argv[1], 'ab', buffering=0) as f:\n"
+                       " while True: f.write(os.read(0, 4096))\n")
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    pid = master = None
+    try:
+        tmux(sessions, "new-session", "-d", "-s", "alpha", "-x", "90", "-y", "20",
+             shlex.join([sys.executable, str(program), str(received)]))
+        TmuxClient(sockets=(sessions,), create_socket=sessions).configure_scrolling(sessions)
+        tmux(work, "new-session", "-d", "-s", "keep")
+        sidecar = Sidecar(runner=FakeOuterTmux(), own_pane="%0")
+        sidecar.ensure_workspace()
+        sidecar.show_viewer(nested_attach_command(sessions, "alpha"))
+        tmux(outer, "new-session", "-d", "-s", "cagents", "-x", "90", "-y", "22",
+             f"env -u TMUX tmux -L {work} attach-session -t '=work'")
+        for command in container_setup_commands():
+            tmux(outer, *command)
+        pid, master = _attach_terminal(outer, "cagents")
+        _drain(master, lambda: tmux(sessions, "list-clients", "-F", "#{client_name}").strip())
+        _drain(master, seconds=.5)
+
+        os.write(master, b"\x02")
+        _drain(master, seconds=.2)
+        os.write(master, b"x")
+        _drain(master, lambda: len(received.read_bytes()) >= 2)
+        assert received.read_bytes() == b"\x02x"
+    finally:
+        for socket in (outer, work, sessions):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+        if master is not None:
+            os.close(master)
+        if pid:
+            os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_a_fullscreen_attach_still_detaches_with_ctrl_b_d(monkeypatch):
+    import os
+    import subprocess
+    import uuid
+
+    from cagents.tmuxctl import TmuxClient
+
+    sessions = "cg-prefix-" + uuid.uuid4().hex[:10]
+    monkeypatch.setattr("cagents.tmuxctl.CREATE_SOCKET", sessions)
+    pid = master = None
+    try:
+        subprocess.run(["tmux", "-f", "/dev/null", "-L", sessions, "new-session", "-d", "-s", "alpha",
+                        "sleep 600"], check=True)
+        client = TmuxClient(sockets=(sessions,), create_socket=sessions)
+        client.configure_scrolling(sessions)
+        client.session_statusline_on("alpha", socket=sessions)
+        pid, master = _attach_terminal(sessions, "alpha")
+        _drain(master, lambda: client.list_sessions()[0].attached if client.list_sessions() else False)
+        _drain(master, seconds=.3)
+
+        os.write(master, b"\x02")
+        _drain(master, seconds=.2)
+        os.write(master, b"d")
+
+        def detached():
+            nonlocal pid
+            if pid and os.waitpid(pid, os.WNOHANG)[0]:
+                pid = None
+            return pid is None
+
+        _drain(master, detached)
+        assert detached(), "ctrl-b d did not detach the fullscreen client"
+    finally:
+        subprocess.run(["tmux", "-L", sessions, "kill-server"], capture_output=True)
+        if master is not None:
+            os.close(master)
+        if pid:
+            os.waitpid(pid, 0)
+
+
 @pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
 def test_a_fullscreen_attach_sets_its_statusline_on_the_session_and_clears_it_after(monkeypatch):
     import subprocess
