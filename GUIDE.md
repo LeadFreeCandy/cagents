@@ -71,8 +71,8 @@ while you are on it:
 ```
 
 `ctrl+g` (top of the queue) also shows a card over the conversation for four seconds —
-title, state, age, Jira card and its place in the queue. Typing goes straight through
-to Claude and closes it.
+title, state, age, Jira card and its place in the queue. Typing and scrolling go straight
+through to Claude while it shows.
 
 - **session** — the live Claude attach / transcript (what browsing drives).
 - **diff** — **this worktree versus master**: committed + uncommitted, from the

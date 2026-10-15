@@ -633,21 +633,21 @@ async def test_ctrl_g_card_floats_over_the_conversation_and_lets_typing_through(
                  f"env -u TMUX tmux -L {work} attach-session -t '=work'")
             await until(lambda: "Alpha" in screen(), "workspace never attached")
             await pilot.press("ctrl+g")
-            await until(lambda: "╭" in screen() and "Alpha: fix auth" in screen(), "no card")
+            await until(lambda: "┌" in screen() and "Alpha: fix auth" in screen(), "no card")
             card = [line for line in screen().splitlines() if "│" in line]
             assert "Alpha: fix auth" in card[0]
             assert STATE_STYLE[app.snapshot.by_id(SID1).state][2] in card[1]
 
             tmux(term, "send-keys", "-t", "t", "-l", "\x1b[<35;10;15M")
             await pilot.pause(0.3)
-            assert "╭" in screen(), "pointer motion dismissed the card"
+            assert "┌" in screen(), "pointer motion dismissed the card"
             await pilot.pause(2.7)
-            assert "╭" in screen(), "the card closed within 3 seconds"
+            assert "┌" in screen(), "the card closed within 3 seconds"
 
             tmux(term, "send-keys", "-t", "t", "-l", "x")
-            await until(lambda: "╭" not in screen(), "typing did not close the card")
             await until(lambda: "x" in tmux(sessions, "capture-pane", "-p", "-t", "=alpha:"),
                         "the keystroke never reached the conversation")
+            await until(lambda: "┌" not in screen(), "the card never closed")
     finally:
         for socket in (term, work, sessions):
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
@@ -684,7 +684,7 @@ def test_ctrl_g_card_fits_a_narrow_terminal(monkeypatch):
         thread = threading.Thread(target=flash)
         thread.start()
         deadline = time.time() + 2
-        while "╭" not in tmux(term, "capture-pane", "-p", "-t", "t") and time.time() < deadline:
+        while "┌" not in tmux(term, "capture-pane", "-p", "-t", "t") and time.time() < deadline:
             time.sleep(0.05)
         card = [line for line in tmux(term, "capture-pane", "-p", "-t", "t").splitlines() if "│" in line]
         thread.join()
@@ -693,6 +693,125 @@ def test_ctrl_g_card_fits_a_narrow_terminal(monkeypatch):
     finally:
         for socket in (term, work):
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_a_second_ctrl_g_card_replaces_the_first(monkeypatch):
+    import subprocess
+    import threading
+    import time
+    import uuid
+
+    work, term = ("cg-card-" + uuid.uuid4().hex[:10] for _ in range(2))
+    monkeypatch.setattr("cagents.sidecar.WORK_SOCKET", work)
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    def screen():
+        return tmux(term, "capture-pane", "-p", "-t", "t")
+
+    def until(condition):
+        deadline = time.time() + 2
+        while not condition() and time.time() < deadline:
+            time.sleep(0.05)
+
+    flashes = []
+    try:
+        tmux(work, "new-session", "-d", "-s", "work", "-n", "session", "cat")
+        tmux(term, "new-session", "-d", "-s", "t", "-x", "80", "-y", "12",
+             f"env -u TMUX tmux -L {work} attach-session -t '=work'")
+        time.sleep(0.5)
+        sidecar = Sidecar(runner=FakeOuterTmux(), own_pane="%0")
+        for title in ("First conversation, with a much longer title", "Second"):
+            flashes.append(threading.Thread(target=sidecar.flash, args=("◆", title, "review", "#ffaf00")))
+            flashes[-1].start()
+            until(lambda: title in screen())
+        assert "Second" in screen()
+        assert "First" not in screen(), screen()
+    finally:
+        for socket in (term, work):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+        for flash in flashes:
+            flash.join(timeout=10)
+
+
+@pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
+def test_the_conversation_scrolls_and_takes_typing_under_the_ctrl_g_card(tmp_path, monkeypatch):
+    import os
+    import re
+    import shlex
+    import subprocess
+    import sys
+    import threading
+    import uuid
+
+    from cagents.tmuxctl import TmuxClient
+
+    outer, work, sessions = ("cg-card-" + uuid.uuid4().hex[:10] for _ in range(3))
+    monkeypatch.setattr("cagents.sidecar.WORK_SOCKET", work)
+    monkeypatch.setattr("cagents.tmuxctl.CREATE_SOCKET", sessions)
+    received = tmp_path / "received"
+    received.touch()
+    program = tmp_path / "record.py"
+    program.write_text("import os,sys,tty\nos.write(1, b'\\x1b[?1003h\\x1b[?1006h')\ntty.setraw(0)\n"
+                       "with open(sys.argv[1], 'ab', buffering=0) as f:\n"
+                       " while True: f.write(os.read(0, 4096))\n")
+
+    def tmux(socket, *args):
+        return subprocess.run(["tmux", "-f", "/dev/null", "-L", socket, *args],
+                              capture_output=True, text=True).stdout
+
+    def card_showing():
+        return "Alpha: fix auth" in tmux(outer, "capture-pane", "-p", "-t", "=cagents:")
+
+    pid = master = flashing = None
+    try:
+        tmux(sessions, "new-session", "-d", "-s", "alpha", "-x", "90", "-y", "20",
+             shlex.join([sys.executable, str(program), str(received)]))
+        tmux(sessions, "set", "-g", "mouse", "on")
+        TmuxClient(sockets=(sessions,), create_socket=sessions).configure_scrolling(sessions)
+        tmux(work, "new-session", "-d", "-s", "keep")
+        sidecar = Sidecar(runner=FakeOuterTmux(), own_pane="%0")
+        sidecar.ensure_workspace()
+        sidecar.apply_page_scroll(True, "true", str(tmp_path / "context.json"))
+        sidecar.show_viewer(nested_attach_command(sessions, "alpha"))
+        tmux(outer, "new-session", "-d", "-s", "cagents", "-x", "90", "-y", "22",
+             f"env -u TMUX tmux -L {work} attach-session -t '=work'")
+        for command in container_setup_commands():
+            tmux(outer, *command)
+        pid, master = _attach_terminal(outer, "cagents")
+        _drain(master, lambda: tmux(sessions, "list-clients", "-F", "#{client_name}").strip())
+        _drain(master, seconds=.5)
+
+        flashing = threading.Thread(target=sidecar.flash, args=("◆", "Alpha: fix auth", "review · 5m", "#ffaf00"))
+        flashing.start()
+        _drain(master, card_showing)
+        assert card_showing(), "the card never showed"
+        os.write(master, b"\x1b[<64;10;15M")
+        _drain(master, seconds=.2)
+        os.write(master, b"\x15")
+        _drain(master, seconds=.2)
+        for key in b"hello":
+            os.write(master, bytes([key]))
+            _drain(master, seconds=.04)
+        _drain(master, lambda: b"hello" in received.read_bytes(), seconds=2)
+
+        got = received.read_bytes()
+        assert re.search(rb"\x1b\[<64;\d+;\d+M", got), f"the wheel never reached the conversation: {got!r}"
+        assert b"\x1b[5~" in got, f"C-u did not scroll the conversation a page: {got!r}"
+        assert b"hello" in got, f"typing under the card was lost: {got!r}"
+        assert card_showing(), "scrolling or typing closed the card"
+    finally:
+        for socket in (outer, work, sessions):
+            subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+        if master is not None:
+            os.close(master)
+        if pid:
+            os.waitpid(pid, 0)
+        if flashing is not None:
+            flashing.join(timeout=10)
 
 
 async def test_ctrl_g_flashes_the_conversation_it_lands_on(world):
@@ -706,10 +825,10 @@ async def test_ctrl_g_flashes_the_conversation_it_lands_on(world):
         await pilot.pause(0.5)
         await pilot.press("j")
         await pilot.pause(0.3)
-        assert not any(c[0] == "display-popup" for c in work.calls)
+        assert not any(c[0] == "new-pane" for c in work.calls)
         await pilot.press("ctrl+g")
         await pilot.pause(0.3)
-        cards = [c for c in work.calls if c[0] == "display-popup"]
+        cards = [c for c in work.calls if c[0] == "new-pane"]
         assert len(cards) == 1
         assert any(a.startswith("CAGENTS_CARD1=") and "Alpha: fix auth" in a for a in cards[0])
 
