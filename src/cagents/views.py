@@ -102,6 +102,14 @@ class SessionList(OptionList):
         if sid:
             self.post_message(SessionInteracted(sid))
 
+    def action_cursor_up(self) -> None:
+        if self.highlighted is None or any(not option.disabled for option in self.options[:self.highlighted]):
+            super().action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        if self.highlighted is None or any(not option.disabled for option in self.options[self.highlighted + 1:]):
+            super().action_cursor_down()
+
     _NAV_KEYS = ("j", "k", "g", "G", "up", "down", "home", "end", "pageup", "pagedown", "left", "right")
 
     def on_key(self, event) -> None:

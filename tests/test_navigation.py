@@ -120,3 +120,29 @@ async def test_viewer_waits_for_the_last_keypress_in_a_burst(tmp_path, monkeypat
             await asyncio.sleep(VIEWER_COALESCE / 4)
         await asyncio.sleep(VIEWER_COALESCE)
         assert calls == ['third']
+
+
+@pytest.mark.parametrize("key,start", [("k", "first"), ("up", "first"), ("j", "last"), ("down", "last")])
+async def test_moving_past_either_end_of_the_list_stays_put(tmp_path, monkeypatch, key, start):
+    store = Store(tmp_path / "state.json")
+    app = CagentsApp(store=store, tmux=FakeTmux(), claude_dir=tmp_path / "claude")
+    monkeypatch.setattr(app, "refresh_data", lambda: None)
+    now = datetime.now(timezone.utc)
+    views = []
+    for i in range(5):
+        tracked = store.track(f"session-{i}", "/proj", now.isoformat())
+        parsed = ParsedSession(tracked.session_id, tmp_path / "unused", cwd="/proj", title=f"Task {i}",
+                               last_timestamp=now)
+        views.append(SessionView(tracked.session_id, tracked, parsed, SessionState.NEEDS_REVIEW, live=False,
+                                 rank_stable_since=float(i)))
+    app.snapshot = Snapshot(views=views)
+    async with app.run_test(size=(100, 15)) as pilot:
+        app.action_switch_view("queue")
+        await pilot.pause()
+        queue = app.query_one("#queue-list", SessionList)
+        queue.highlighted = 0 if start == "first" else queue.option_count - 1
+        await pilot.pause()
+        edge = queue.highlighted_session_id
+        await pilot.press(key)
+        await pilot.pause()
+        assert queue.highlighted_session_id == edge
