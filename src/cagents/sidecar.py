@@ -682,6 +682,7 @@ def container_setup_commands() -> list[list[str]]:
         # a workspace tab, or scrollback has focus. send-keys targets the rail
         # directly, so it neither re-enters this binding nor reaches the agent.
         queue_top_binding(),
+        done_and_next_binding(),
         # Re-selecting the focused pane must not trigger another resize.
         # This hook follows actual pane changes for both keys and clicks.
         ["set-hook", "-g", "-u", "after-select-pane"],
@@ -778,6 +779,12 @@ def queue_top_binding() -> list[str]:
     return ["bind", "-n", "C-g", "send-keys -t :.0 C-g"]
 
 
+def done_and_next_binding() -> list[str]:
+    """Ctrl+Q anywhere in the container: the rail marks the conversation
+    done and moves on as Ctrl+G does. Claude Code binds no Ctrl+Q."""
+    return ["bind", "-n", "C-q", "send-keys -t :.0 C-q"]
+
+
 def ctx_bind_commands(ctx_prog: str, context_path: str, page_scroll: bool = False) -> list[list[str]]:
     """C-t (shell in the session's dir) and C-d (diff vs master popup),
     C-t rather than C-s so Claude Code's own ctrl-s binding stays reachable;
@@ -797,6 +804,7 @@ def ctx_bind_commands(ctx_prog: str, context_path: str, page_scroll: bool = Fals
         ["bind", "-n", "C-t", "run-shell", "-b", f"{prog} shell --context {ctx}"],
         ctrl_d,
         queue_top_binding(),
+        done_and_next_binding(),
     ]
 
 

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from test_direct_panes import direct, eventually
-from cagents.sidecar import queue_top_binding
+from cagents.sidecar import done_and_next_binding, queue_top_binding
 
 
 @pytest.fixture
@@ -162,7 +162,9 @@ def test_selection_survives_release_and_unicode_paste_preserves_draft(terminal, 
     assert d.run(["display-message", "-p", "-t", a.pane_id, "#{pane_in_mode}"]) == "0"
 
 
-def test_ctrl_g_from_zoomed_agent_reaches_queue_without_unzooming(terminal):
+@pytest.mark.parametrize("binding, key", [(queue_top_binding, b"\x07"), (done_and_next_binding, b"\x11")],
+                         ids=["ctrl+g", "ctrl+q"])
+def test_ctrl_g_from_zoomed_agent_reaches_queue_without_unzooming(terminal, binding, key):
     t, d = terminal, terminal.d
     a, received = t.agent()
     rail_keys = d.path / "rail-keys"
@@ -171,12 +173,12 @@ def test_ctrl_g_from_zoomed_agent_reaches_queue_without_unzooming(terminal):
                         "with open(sys.argv[1],'ab',buffering=0) as f:\n"
                         " while True: f.write(os.read(0,4096))\n")
     d.run(["respawn-pane", "-k", "-t", d.rail, shlex.join([sys.executable, str(recorder), str(rail_keys)])])
-    d.run(queue_top_binding())
+    d.run(binding())
     d.sidecar.hide_rail()
     before = d.run(["display-message", "-p", "#{pane_id}:#{window_zoomed_flag}"])
     assert before.endswith(":1") and not before.startswith(d.rail)
-    t.write(b"\x07")
-    eventually(lambda: rail_keys.exists() and rail_keys.read_bytes() == b"\x07")
+    t.write(key)
+    eventually(lambda: rail_keys.exists() and rail_keys.read_bytes() == key)
     assert d.run(["display-message", "-p", "#{pane_id}:#{window_zoomed_flag}"]) == before
     assert received.read_bytes() == b""
 

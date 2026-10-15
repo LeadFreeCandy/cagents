@@ -436,6 +436,7 @@ HELP_TEXT = """\
   ctrl+g        return to the first conversation in the queue, even from chat
                 (a needs-review conversation left this way goes to the back
                 of the review line; bell = nothing else needs you)
+  ctrl+q        mark this conversation done and go on as ctrl+g does, even from chat
   g / G         first / last conversation while the list has focus
   j / k, ↑ / ↓  move (← / → move kanban columns when the list has focus)
   ← / →         shrink / grow the Claude pane: list ↔ small sidebar ↔ full width

@@ -123,6 +123,9 @@ turns this off (newest response on top, no re-queueing). `Ctrl+G` never moves
 focus or resizes the split: the conversation pane keeps its width (or full
 width) and simply starts showing the queue's first conversation.
 
+`Ctrl+Q` marks the conversation you are in done (as `d` does) and then goes on
+as `Ctrl+G` does. A conversation Claude is still working on stays where it is.
+
 Done conversations go to sleep after an hour idle, and browsing past one in the
 list never wakes it — only `Enter` or `→` on it does, so scrolling a long done
 list costs no memory. `:sleep` puts every idle conversation to sleep right now;

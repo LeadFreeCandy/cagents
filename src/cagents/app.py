@@ -155,6 +155,7 @@ class CagentsApp(App):
         Binding("2", "switch_view('grouped')", "Grouped", show=False),
         Binding("3", "switch_view('kanban')", "Kanban", show=False),
         Binding("ctrl+g", "queue_top", "Top of queue", show=False),
+        Binding("ctrl+q", "done_and_next", "Done, next", show=False),
         Binding("tab", "next_view", "Next view", show=False, priority=True),
         Binding("right", "grow_session", "Grow session", show=False),
         Binding("asterisk", "related", "Related", show=False),
@@ -867,6 +868,16 @@ class CagentsApp(App):
             self._flash_landed(landed)
         if landed is not None and landed.state not in DONE_STATES:
             self._record_interaction(landed.session_id)
+
+    def action_done_and_next(self) -> None:
+        """Ctrl+Q: mark the conversation done (as d does) and go on to the
+        next one as Ctrl+G does. A conversation still working stays put."""
+        view = self.selected_view()
+        if view is not None and view.state not in DONE_STATES:
+            self.action_toggle_done()
+            if view.state not in DONE_STATES:
+                return
+        self.action_queue_top()
 
     def action_grow_session(self) -> None:
         """→ with the rail focused (and no view consuming it): WIDE -> SMALL —
