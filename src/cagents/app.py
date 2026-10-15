@@ -1599,14 +1599,14 @@ exec {shlex.quote(real)} "$@"
         if view.state == SessionState.WAITING_EXTERNAL:
             self._checkpoint("waiting change")
             self.store.clear_waiting(view.session_id)
-            self._notify_undoable("No longer waiting on the PR.")
+            self._notify_undoable("No longer waiting.")
             self.refresh_data()
             return
-        if view.state in (SessionState.WORKING, SessionState.NEEDS_INPUT):
+        if view.state == SessionState.WORKING:
             self.notify("Still in flight — park it once Claude is finished.", severity="warning")
             return
         # Prefer a PR the session itself recorded; else the manual
-        # association; else look one up; else ask.
+        # association; else look one up; else wait on no PR.
         recorded = self._recorded_pr_url(view)
         if recorded:
             self._set_waiting(view.session_id, recorded)
@@ -1656,28 +1656,15 @@ exec {shlex.quote(real)} "$@"
     @work(thread=True, exclusive=True, group="findpr", exit_on_error=False)
     def _find_pr_worker(self, session_id: str, directory: str, expected_branch: str = "") -> None:
         url = gitops.find_pr_url(directory, runner=self.gh_runner, expected_branch=expected_branch)
-        if url:
-            self.call_from_thread(self._set_waiting, session_id, url)
-        else:
-            self.call_from_thread(
-                self.push_screen,
-                InputModal(
-                    "No PR found for this branch — paste the PR URL",
-                    placeholder="https://github.com/owner/repo/pull/123",
-                ),
-                lambda text: self._waiting_pr_entered(session_id, text),
-            )
-
-    def _waiting_pr_entered(self, session_id: str, text: str | None) -> None:
-        if not text or not text.strip():
-            return
-        self.store.set_pr_url(session_id, text.strip())  # remember for o / next time
-        self._set_waiting(session_id, text.strip())
+        self.call_from_thread(self._set_waiting, session_id, url or "")
 
     def _set_waiting(self, session_id: str, pr_url: str) -> None:
         self._checkpoint("waiting change")
         self.store.set_waiting(session_id, utcnow().isoformat(), pr_url)
-        self._notify_undoable(f"Waiting on {pr_url} — comments re-alert; merge marks it done.")
+        if pr_url:
+            self._notify_undoable(f"Waiting on {pr_url} — comments re-alert; merge marks it done.")
+        else:
+            self._notify_undoable("Waiting — anything new in the conversation brings it back.")
         self.refresh_data()
 
     def _poll_waiting_prs(self) -> None:

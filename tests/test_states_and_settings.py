@@ -323,6 +323,25 @@ class TestNewStates:
         state, _ = derive_state(parsed, _tracked(), live=True, now=now)
         assert state == SessionState.BACKGROUND
 
+    def test_a_wait_on_a_background_task_ends_when_the_task_reports_back(self, claude_dir, now):
+        b = TranscriptBuilder(SID1, "/proj/a")
+        b.user("run the long build")
+        b.assistant_tool_use("t1", "Bash", {"command": "make", "run_in_background": True})
+        b.raw_tool_result("t1", "Command running in background with ID: bv49j5apt. "
+                                "Output is being written to: /tmp/x.output")
+        b.assistant_text("Build started in the background.", ts="2026-08-18T10:00:10.000Z")
+        tracked = _tracked(waiting_since="2026-08-18T10:05:00+00:00")
+        state, detail = derive_state(self._parse(claude_dir, b), tracked, live=True, now=now)
+        assert (state, detail) == (SessionState.WAITING_EXTERNAL, "waiting")
+        b.raw({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-08-18T10:20:00.000Z",
+               "sessionId": SID1,
+               "content": "<task-notification>\n<task-id>bv49j5apt</task-id>\n"
+                          "<status>completed</status>\n<summary>Background command finished</summary>\n"
+                          "</task-notification>"})
+        b.assistant_text("The build passed.", ts="2026-08-18T10:20:01.000Z")
+        state, _ = derive_state(self._parse(claude_dir, b), tracked, live=True, now=now)
+        assert state == SessionState.NEEDS_REVIEW
+
     def test_pending_background_agents_yields_background(self, claude_dir, now):
         b = TranscriptBuilder(SID1, "/proj/a")
         b.user("kick off a sub-agent").assistant_text(
@@ -631,7 +650,7 @@ async def test_waiting_key_uses_recorded_pr(world, claude_dir, now):
         assert store.sessions[sid].waiting_since == ""
 
 
-async def test_waiting_key_prompts_when_no_pr_found(world):
+async def test_waiting_key_parks_without_a_pr_when_none_is_found(world):
     app, store, tmux = world
     app.gh_runner = lambda args, cwd=None: (_ for _ in ()).throw(RuntimeError("no PR"))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -640,15 +659,37 @@ async def test_waiting_key_prompts_when_no_pr_found(world):
 
         select_session(app, SID1)
         await pilot.pause()
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_REVIEW
         await pilot.press("w")
-        await pilot.pause(0.3)  # gh lookup worker fails -> prompt
+        await pilot.pause(0.3)
         from cagents.modals import InputModal
 
-        assert isinstance(app.screen, InputModal)
-        await pilot.press(*"https://github.com/o/r/pull/42")
-        await pilot.press("enter")
+        assert not isinstance(app.screen, InputModal)
+        assert store.sessions[SID1].waiting_since and store.sessions[SID1].waiting_pr == ""
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_EXTERNAL
+        await pilot.press("w")
         await pilot.pause(0.2)
-        assert store.sessions[SID1].waiting_pr == "https://github.com/o/r/pull/42"
+        assert store.sessions[SID1].waiting_since == ""
+
+
+async def test_waiting_key_parks_a_conversation_that_needs_you(world, now):
+    app, store, tmux = world
+    app.gh_runner = lambda args, cwd=None: (_ for _ in ()).throw(RuntimeError("no PR"))
+    tmux.sessions.append(TmuxSession(name="alpha", created=now - 60, activity=now, attached=False,
+                                     pane_pid=1, pane_path="/proj/alpha", socket="claude",
+                                     cagents_session_id=SID1))
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        from conftest import select_session
+
+        select_session(app, SID1)
+        await pilot.pause()
+        assert app.snapshot.by_id(SID1).state == SessionState.NEEDS_INPUT
+        await pilot.press("w")
+        await pilot.pause(0.3)
+        assert store.sessions[SID1].waiting_since
+        assert app.snapshot.by_id(SID1).state == SessionState.WAITING_EXTERNAL
 
 
 async def test_snooze_key_parks_and_unparks_using_the_configured_duration(world):

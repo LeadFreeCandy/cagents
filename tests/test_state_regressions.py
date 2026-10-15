@@ -168,6 +168,24 @@ def test_native_idle_preserves_finished_state_settings(policy, expected):
     assert derive_state(p, t, True, pane, now=NOW, agent_state={"status": "idle"})[0] == expected
 
 
+@pytest.mark.parametrize("source", ["pane", "agent", "hook"])
+def test_a_wait_parks_a_conversation_that_needs_you_until_it_moves(source):
+    signal = {
+        "pane": {"pane_text": "Do you want to proceed?\n❯ 1. Yes\n  2. No"},
+        "agent": {"agent_state": {"status": "waiting", "waitingFor": "permission"}},
+        "hook": {"events": {"Notification": NOW - 10, "notification_type": "permission_prompt",
+                            "message": "Claude needs your permission"}},
+    }[source]
+    p, t = pending(), tracked()
+    assert derive_state(p, t, True, now=NOW, **signal)[0] == SessionState.NEEDS_INPUT
+    t.waiting_since = iso(NOW - 100)
+    state, detail = derive_state(p, t, True, now=NOW, **signal)
+    assert state == SessionState.WAITING_EXTERNAL
+    assert detail.startswith("waiting")
+    p.last_timestamp = datetime.fromtimestamp(NOW - 50, timezone.utc)
+    assert derive_state(p, t, True, now=NOW, **signal)[0] == SessionState.NEEDS_INPUT
+
+
 @pytest.mark.parametrize("before,after", [("busy", "completed"), ("idle", "running")])
 def test_cached_runtime_state_cannot_override_new_transcript_activity(claude_dir, tmp_path, before, after):
     b = TranscriptBuilder(SID1, "/proj").user("go", ts=iso(NOW - 10))

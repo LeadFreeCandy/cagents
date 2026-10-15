@@ -127,10 +127,12 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
   working. Tracked through the tasks' real lifecycle: they persist across new
   messages and only end when the task's completion/timeout notification lands
   (monitors also expire at their declared timeout). No keybind.
-- `⧖ waiting` — you pressed `w`: done here, parked on its PR. Auto-found from the
-  branch via `gh` (or you paste the URL). Polled every ~5 min: **new PR
-  comments → back to `◆ review` marked "github comments"; merged → `✓ done`
-  marked "merged"**. New local activity also un-parks it.
+- `⧖ waiting` — you pressed `w`: parked, whether it was in review, waiting on a
+  background task, or needs you. New conversation activity un-parks it, so a
+  background task reporting back brings it back. Waiting never auto-sleeps. With a
+  PR (recorded, associated with `o`, or auto-found from the branch via `gh`) it is
+  polled every ~5 min: **new PR comments → back to `◆ review` marked "github
+  comments"; merged → `✓ done` marked "merged"**.
 - `✓ done` — accepted (`d`). New conversation activity re-alerts it automatically.
 - `✓ Done (auto)` — no interaction for **Auto done duration** (Settings, default
   **7d**, configurable or off; **Auto done read-only**, default **1d**, for
@@ -150,7 +152,7 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 |---|---|
 | `enter` | the session tab, focused (resuming the session first if dead, on cagents' private socket) |
 | `d` | done / un-done |
-| `w` | waiting on external (PR watch) |
+| `w` | waiting: park it until something new happens (PR watch when it has a PR) |
 | `f` | fork: branch this conversation into a new session and open it — no prompt asked for; starts under the source's title until it diverges |
 | `h` | handoff: choose Claude or Codex and a model for the successor; the source supplies a spec, the successor starts on it, and the source is marked done (`d` restores) |
 | `*` | related: parent / siblings / children of forks & handoffs; jump to one |

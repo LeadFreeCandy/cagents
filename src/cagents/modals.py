@@ -454,8 +454,10 @@ HELP_TEXT = """\
 [bold cyan]Act on a session[/bold cyan]
   enter         attach — the right pane IS the real session; enter focuses it
   d             mark done / un-done
-  w             waiting on external: parks it on its PR; new comments re-alert,
-                merge marks it done automatically
+  w             waiting: parks it, even one that needs you; anything new in the
+                conversation (a background task reporting back too) brings it
+                back. With a PR, new comments re-alert and merge marks it done.
+                Waiting never auto-sleeps
   s             snooze / un-snooze for a set time (settings: default 1h) —
                 purely time-based, new activity doesn't wake it early
   f             fork — branch this conversation into a new session

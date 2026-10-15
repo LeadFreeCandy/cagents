@@ -371,6 +371,8 @@ def derive_from_events(
             blocking = parsed.pending_tool_use
         if blocking:
             message = str(events.get("message") or "waiting on you")
+            if _waiting(parsed, tracked):
+                return (SessionState.WAITING_EXTERNAL, f"waiting — {message}"[:110])
             return (SessionState.NEEDS_INPUT, message[:110])
         return _finished_state(parsed, tracked, now)
     if t_stop == latest:
@@ -440,6 +442,8 @@ def derive_state(
         last = parsed.last_timestamp if parsed is not None else None
         if reviewed is not None and (last is None or reviewed >= last):
             return (SessionState.DONE, f"done — {detail}")
+        if _waiting(parsed, tracked):
+            return (SessionState.WAITING_EXTERNAL, f"waiting — {detail}")
         return (SessionState.NEEDS_INPUT, detail)
 
     if parsed is None:
@@ -596,6 +600,13 @@ def _lingering_background_activity(
     )
 
 
+def _waiting(parsed: ParsedSession | None, tracked: TrackedSession) -> bool:
+    """w parked it, and the conversation has not moved since."""
+    waiting = tracked.waiting_datetime()
+    last = parsed.last_timestamp if parsed is not None else None
+    return waiting is not None and (last is None or waiting >= last)
+
+
 def _finished_state(
     parsed: ParsedSession, tracked: TrackedSession, now: float, pane_text: str = ""
 ) -> tuple[SessionState, str]:
@@ -612,11 +623,11 @@ def _finished_state(
         # snoozed does not wake it early. Only the deadline (or an
         # explicit un-snooze) does.
         return (SessionState.SNOOZED, f"snoozed until {snoozed_until.strftime('%H:%M')}")
-    waiting = tracked.waiting_datetime()
-    if waiting is not None and (last is None or waiting >= last):
-        # Parked on the outside world; the PR poller resolves it. New local
-        # activity makes the comparison fail -> back to needs-review.
-        return (SessionState.WAITING_EXTERNAL, "waiting on PR")
+    if _waiting(parsed, tracked):
+        # Parked on the outside world; the PR poller resolves a PR wait. New
+        # local activity (a background task reporting back included) makes
+        # the comparison fail -> back to needs-review.
+        return (SessionState.WAITING_EXTERNAL, "waiting on PR" if tracked.waiting_pr else "waiting")
     external_update = tracked.external_update_datetime()
     if external_update is not None and (last is None or external_update >= last):
         # Reopened by the PR poller: something happened on the PR — a

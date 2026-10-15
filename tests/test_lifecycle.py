@@ -50,7 +50,7 @@ def test_auto_done_default_retroactive_and_duration_boundary(tmp_path):
     assert should_suspend(view, now)  # already idle over an hour, including on upgrade
 
 
-@pytest.mark.parametrize("state", [SessionState.WORKING, SessionState.SNOOZED])
+@pytest.mark.parametrize("state", [SessionState.WORKING, SessionState.SNOOZED, SessionState.WAITING_EXTERNAL])
 def test_auto_done_preserves_active_work_and_snooze(state):
     view = idle_view(time.time(), state=state)
     apply_auto_done(view, "7d", time.time())

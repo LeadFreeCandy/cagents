@@ -61,7 +61,8 @@ def apply_auto_done(view: SessionView, duration: object, now: float, readonly_du
     if view.suspended and reviewed and reviewed >= activity:
         view.state, view.state_detail = SessionState.DONE, "done"
     view.done_at = timestamp(view.tracked.reviewed_at) if view.state == SessionState.DONE else 0.0
-    if view.missing or view.state in (*DONE_STATES, SessionState.WORKING, SessionState.SNOOZED):
+    if view.missing or view.state in (*DONE_STATES, SessionState.WORKING, SessionState.SNOOZED,
+                                      SessionState.WAITING_EXTERNAL):
         return
     seconds = duration_seconds(duration)
     if seconds and read_only(view):
