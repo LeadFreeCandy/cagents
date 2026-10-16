@@ -24,6 +24,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.message import Message
 from textual.widgets import ContentSwitcher, Footer, OptionList, Static
 from textual.worker import Worker
 
@@ -112,6 +113,15 @@ def _new_terminal_seed_command(directory: str, recents: list[str]) -> str:
         menu.append("Run: claude or codex")
     commands.extend(f"echo {_shquote(line)}" for line in menu)
     return "; ".join(commands)
+
+
+class PartialSnapshot(Message):
+    def __init__(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+        super().__init__()
+
+    def can_replace(self, message: Message) -> bool:
+        return isinstance(message, PartialSnapshot)
 
 
 class CagentsApp(App):
@@ -236,6 +246,7 @@ class CagentsApp(App):
         self._interaction_dirty = False
         self._refreshing: Worker | None = None
         self._refresh_again = False
+        self._spinner = None
 
     # -- layout --------------------------------------------------------------
 
@@ -409,8 +420,11 @@ class CagentsApp(App):
         # edge case here must never take the whole app down with it
         # (spec §11: silent failure is the one unforgivable sin, and an
         # uncaught worker exception is fatal to the whole app by default).
+        def show_partial(partial: Snapshot) -> None:
+            self.post_message(PartialSnapshot(partial))
+
         try:
-            snapshot = self.registry.refresh()
+            snapshot = self.registry.refresh(on_partial=None if self._seen_first_snapshot else show_partial)
         except Exception as error:
             self.call_from_thread(self.notify, f"Refresh failed: {error}", severity="error")
             return
@@ -429,9 +443,17 @@ class CagentsApp(App):
         # than what's already showing.
         if snapshot.generated_at < self.snapshot.generated_at:
             return
+        if snapshot.partial and self._seen_first_snapshot:
+            return
         self.snapshot = snapshot
-        self._persist_lifecycle(snapshot)
-        self._sleep_done(snapshot)
+        if not snapshot.partial:
+            self._persist_lifecycle(snapshot)
+            self._sleep_done(snapshot)
+        if snapshot.partial and self._spinner is None:
+            self._spinner = self.set_interval(0.1, self._spin_loading_rows)
+        elif not snapshot.partial and self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
@@ -445,10 +467,19 @@ class CagentsApp(App):
         self._update_preview()
         self._write_context()
         self._schedule_viewer_sync()
+        if snapshot.partial:
+            return
         self._notify_transitions(snapshot)
         self._handle_select_request()
         self._handle_spawn_request()
         self._handle_toast_requests()
+
+    def on_partial_snapshot(self, message: PartialSnapshot) -> None:
+        self.apply_snapshot(message.snapshot)
+
+    def _spin_loading_rows(self) -> None:
+        for view_id in VIEW_IDS:
+            self.query_one(f"#{view_id}").spin_loading_row()
 
     def current_view(self):
         return self.query_one(f"#{self.active_view_id}")

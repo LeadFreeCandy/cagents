@@ -159,7 +159,7 @@ def test_name_index_handles_partial_writes_and_keeps_only_tracked_names(tmp_path
 
 
 def test_bad_thread_does_not_block_other_threads_names_or_renames(tmp_path, monkeypatch):
-    rollout(tmp_path, message("user", "Fallback prompt"))
+    os.utime(rollout(tmp_path, message("user", "Fallback prompt")), (NOW - 3600, NOW - 3600))  # bad thread first
     store = Store(tmp_path / "state.json")
     bad_key = "codex:missing-thread"
     store.track(bad_key, "/proj", TS)

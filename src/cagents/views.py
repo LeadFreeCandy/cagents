@@ -19,9 +19,9 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
-from .format import group_header, jira_header, kanban_card, row_widths, session_row
+from .format import group_header, jira_header, kanban_card, loading_row, row_widths, session_row
 from .sessions import DONE_STATES, SessionState, Snapshot, SessionView
 
 
@@ -252,6 +252,20 @@ class BaseSessionView(Widget):
             for option_id, label in self.pending_rows
         ]
 
+    def _loading_options(self, snapshot: Snapshot) -> list[Option]:
+        if not snapshot.partial:
+            return []
+        return [Option(loading_row(snapshot.remaining), id=LOADING_ROW_ID, disabled=True)]
+
+    def spin_loading_row(self) -> None:
+        if not self.snapshot.partial:
+            return
+        for session_list in self.query(SessionList):
+            try:
+                session_list.replace_option_prompt(LOADING_ROW_ID, loading_row(self.snapshot.remaining))
+            except OptionDoesNotExist:
+                pass
+
     def _emit_selection(self, session_id: str | None) -> None:
         if session_id == self.selected_id:
             return
@@ -277,6 +291,9 @@ class BaseSessionView(Widget):
         target = self.focus_target()
         if target is not None:
             target.focus()
+
+
+LOADING_ROW_ID = "loading"
 
 
 def _empty_option() -> Option:
@@ -330,7 +347,7 @@ class GroupedView(BaseSessionView):
                         id=view.session_id,
                     )
                 )
-        options = self._pending_options() + options
+        options = self._pending_options() + options + self._loading_options(snapshot)
         if not options:
             options = [_empty_option()]
         keep_id = None if self._pin_cursor_next else self.selected_id
@@ -379,7 +396,7 @@ class QueueView(BaseSessionView):
             )
             for view in ordered
         ]
-        options = self._pending_options() + options
+        options = self._pending_options() + options + self._loading_options(snapshot)
         if not options:
             options = [_empty_option()]
         keep_id = None if self._pin_cursor_next else self.selected_id

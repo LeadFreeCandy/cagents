@@ -22,7 +22,11 @@ just moves your focus into the pane that's already showing the session. Preview 
 attach cannot disagree because they are the same mechanism.
 
 Moving through the list re-points the pane after a ~150ms pause in navigation.
-Refreshes update rows in place, preserving scroll position. Conversations on the
+Refreshes update rows in place, preserving scroll position. At startup the newest
+few conversations show first and the rest fill in as their transcripts are read,
+with a `Loading N more conversations…` row below them; nothing is put to sleep or
+notified until every conversation is in.
+Conversations on the
 same tmux server reuse the viewer client when switching, avoiding a terminal
 teardown between selections. Arrow sizing runs on actual focus changes.
 Hover the pane and scroll with the mouse wheel.

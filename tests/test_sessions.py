@@ -696,6 +696,92 @@ def test_refresh_reparses_a_transcript_only_when_it_changed(claude_dir: Path, tm
     assert len(parses) == 2
 
 
+def test_the_first_partial_list_is_the_newest_few(claude_dir: Path, tmp_path: Path, now: float):
+    """The first list goes out once the newest few are read, not after a
+    fixed wait, and says how many are still to come."""
+    from cagents import sessions as S
+
+    store = Store.load(tmp_path / "state.json")
+    ids = [f"{c * 8}-{c * 4}-{c * 4}-{c * 4}-{c * 12}" for c in "abcdef"]
+    for age, sid in enumerate(ids):
+        TranscriptBuilder(sid, "/proj/load").user("go").assistant_text("done").write(
+            claude_dir, mtime=now - 60 * (age + 1))
+        store.track(sid, "/proj/load", ts_ago(3600))
+    registry = S.SessionRegistry(store, tmux=FakeTmuxEmpty(), claude_dir=claude_dir, agents_runner=lambda a: "[]")
+    partials: list = []
+    complete = registry.refresh(now=now, on_partial=partials.append)
+    assert partials, "nothing was shown before the complete list"
+    first = partials[0]
+    assert sorted(view.session_id for view in first.views) == sorted(ids[:S.FIRST_LIST_SIZE])
+    assert first.remaining == len(ids) - S.FIRST_LIST_SIZE
+    assert complete.remaining == 0 and len(complete.views) == len(ids)
+
+
+def test_a_conversation_without_a_transcript_sorts_by_when_it_was_last_used(
+    claude_dir: Path, tmp_path: Path, now: float,
+):
+    """Counting every conversation without a transcript as newest put
+    long-dead ones (7 of 136, tracked in August) ahead of today's work in
+    the first list. A new terminal that hasn't written one yet still leads."""
+    from cagents import sessions as S
+
+    store = Store.load(tmp_path / "state.json")
+    ids = [f"{c * 8}-{c * 4}-{c * 4}-{c * 4}-{c * 12}" for c in "abcdef"]
+    for age, sid in enumerate(ids[:4]):
+        TranscriptBuilder(sid, "/proj/load").user("go").assistant_text("done").write(
+            claude_dir, mtime=now - 60 * (age + 1))
+        store.track(sid, "/proj/load", ts_ago(3600))
+    fresh, stale = ids[4], ids[5]
+    store.track(fresh, "/proj/load", ts_ago(5))
+    store.track(stale, "/proj/load", "2026-08-19T00:24:00+00:00")
+    registry = S.SessionRegistry(store, tmux=FakeTmuxEmpty(), claude_dir=claude_dir, agents_runner=lambda a: "[]")
+    partials: list = []
+    registry.refresh(now=now, on_partial=partials.append)
+    assert partials
+    assert sorted(view.session_id for view in partials[0].views) == sorted([fresh, ids[0], ids[1]])
+
+
+def test_partial_lists_leave_the_needs_you_hold_to_the_complete_one(
+    claude_dir: Path, tmp_path: Path, now: float, monkeypatch,
+):
+    """A working conversation must look blocked on two refreshes in a row
+    before it reads as needs you. The partial lists a slow refresh shows on
+    the way are previews and must not count as one of the two."""
+    import os
+    import time
+
+    from cagents import sessions as S
+
+    TranscriptBuilder(SID1, "/proj/alpha").user("go", ts=ts_ago(5)).write(claude_dir, mtime=now - 5)
+    TranscriptBuilder(SID2, "/proj/beta").user("go").assistant_text("done").write(claude_dir, mtime=now - 900)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", ts_ago(60))
+    store.track(SID2, "/proj/beta", ts_ago(60))
+    tmux = FakeTmux()
+    tmux.sessions.append(TmuxSession("alpha", now - 60, now, False, 1, "/proj/alpha", cagents_session_id=SID1))
+    tmux.panes["alpha"] = "✻ Running… (esc to interrupt)"
+    registry = S.SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    working = registry.refresh(now=now).by_id(SID1)
+    assert working.state == SessionState.WORKING
+
+    real = S.parse_session_file
+
+    def slow(path, *args, **kwargs):
+        time.sleep(0.3)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(S, "parse_session_file", slow)
+    for path in claude_dir.glob("projects/*/*.jsonl"):
+        os.utime(path, (path.stat().st_mtime + 1,) * 2)
+    tmux.panes["alpha"] = "Do you want to proceed?\n❯ 1. Yes"
+    partials: list = []
+    held = registry.refresh(now=now + 2, on_partial=partials.append)
+    assert [[view.session_id for view in partial.views] for partial in partials] == [[SID1]]
+    assert held.by_id(SID1).state == SessionState.WORKING
+    assert held.by_id(SID1).rank_stable_since == working.rank_stable_since
+    assert registry.refresh(now=now + 4).by_id(SID1).state == SessionState.NEEDS_INPUT
+
+
 class FakeTmuxEmpty:
     create_socket = "claude"
 

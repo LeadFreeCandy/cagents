@@ -361,6 +361,14 @@ def preview_renderable(view: SessionView, now: datetime | None = None, width: in
     return Group(*parts)
 
 
+def loading_row(remaining: int) -> Text:
+    import time
+
+    frame = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 10]
+    return Text(f"  {frame} Loading {remaining} more conversation{'s' if remaining != 1 else ''}…",
+                style="italic dim")
+
+
 def header_summary(counts: dict[SessionState, int]) -> Text:
     """The one-line status summary in the app header."""
     text = Text()

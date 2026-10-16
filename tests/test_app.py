@@ -127,6 +127,110 @@ async def test_a_refresh_asked_for_during_another_runs_after_it(world, slow_tran
     assert sorted(slow_transcripts) == sorted(set(slow_transcripts))
 
 
+async def _wait_for_complete_list(app, pilot, frames: list | None = None) -> None:
+    import time
+
+    session_list = app.query_one("#queue-list", SessionList)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        options = [session_list.get_option_at_index(i) for i in range(session_list.option_count)]
+        rows = sorted(option.id for option in options if option.id and not option.disabled)
+        last = render_text(options[-1].prompt) if options and options[-1].disabled else ""
+        frame = (rows, last[last.index("Loading"):].strip() if "Loading" in last else "")
+        if frames is not None and rows and (not frames or frames[-1] != frame):
+            frames.append(frame)
+        if len(rows) == 3 and not frame[1]:
+            return
+        await pilot.pause(0.05)
+
+
+async def test_startup_lists_the_newest_conversations_while_older_ones_load(world, slow_transcripts):
+    """Startup read every transcript before showing a single row: 2.8s warm
+    and ~11s after a long break, measured on 136 conversations. Rows now
+    appear as their transcripts are read, newest first, with a row below
+    them saying how many are still loading."""
+    app, *_ = world
+    frames: list = []
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_complete_list(app, pilot, frames)
+    assert frames == [
+        ([SID2], "Loading 2 more conversations…"),
+        (sorted([SID1, SID2]), "Loading 1 more conversation…"),
+        (sorted([SID1, SID2, SID3]), ""),
+    ]
+
+
+async def test_reading_keeps_going_while_the_screen_is_busy(world, slow_transcripts):
+    """The reader used to wait for each partial list to be drawn, so anything
+    holding up the screen (the 0.64s workspace setup at launch) held up the
+    reading too."""
+    import time
+
+    app, *_ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        started = time.monotonic()
+        app.call_later(lambda: time.sleep(1.0))
+        await _wait_for_complete_list(app, pilot)
+        assert time.monotonic() - started < 1.4
+
+
+async def test_a_notification_click_waiting_at_startup_reaches_a_conversation_that_loads_last(
+    world, slow_transcripts,
+):
+    """Reading a click consumes it. Read against a partial list, a click on a
+    conversation that hadn't loaded yet was thrown away."""
+    app, store, *_ = world
+    (store.path.parent / "select-request").write_text(SID3 + "\n")
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_complete_list(app, pilot)
+        await pilot.pause()
+        assert app.selected_session_id == SID3
+
+
+async def test_a_late_partial_list_never_replaces_the_complete_one(world, slow_transcripts):
+    """Partial lists reach the screen as messages and the complete one as a
+    callback, so a partial can still be queued when the complete one lands."""
+    app, store, tmux, claude_dir = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_complete_list(app, pilot)
+        late: list = []
+        SessionRegistry(store, tmux=tmux, claude_dir=claude_dir).refresh(on_partial=late.append)
+        assert late and late[0].generated_at > app.snapshot.generated_at
+        app.apply_snapshot(late[0])
+        await pilot.pause()
+        assert len(app.snapshot.views) == 3
+        frames: list = []
+        await _wait_for_complete_list(app, pilot, frames)
+        assert frames == [(sorted([SID1, SID2, SID3]), "")]
+
+
+async def test_a_partial_list_does_not_wake_a_sleeping_conversation(claude_dir, tmp_path, now, slow_transcripts):
+    """Until every transcript in a directory is read, a terminal there can be
+    credited to the wrong conversation. A partial list's guess must not be
+    saved: here it would clear the newer conversation's sleep."""
+    TranscriptBuilder(SID1, "/proj/alpha").ai_title("Alpha: newer").user("go").assistant_text(
+        "nothing on screen"
+    ).write(claude_dir, mtime=now - 10)
+    TranscriptBuilder(SID2, "/proj/alpha").ai_title("Alpha: older").user("go").assistant_text(
+        "the reply this terminal is showing"
+    ).write(claude_dir, mtime=now - 60)
+    store = Store.load(tmp_path / "state.json")
+    store.track(SID1, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    store.track(SID2, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+    store.sessions[SID1].suspended_at = ts_ago(30)
+    tmux = FakeTmux()
+    tmux.sessions.append(TmuxSession(name="alpha", created=now - 300, activity=now, attached=False,
+                                     pane_pid=42, pane_path="/proj/alpha", socket="claude"))
+    tmux.panes["alpha"] = "⏺ the reply this terminal is showing\n❯ "
+    registry = SessionRegistry(store, tmux=tmux, claude_dir=claude_dir)
+    app = CagentsApp(store=store, registry=registry, tmux=tmux, claude_dir=claude_dir)
+    async with app.run_test(size=(120, 40)) as pilot:
+        while len(app.snapshot.views) < 2 or app.snapshot.partial:
+            await pilot.pause(0.05)
+        assert app.snapshot.by_id(SID2).live and not app.snapshot.by_id(SID1).live
+        assert store.sessions[SID1].suspended_at
+
+
 async def test_navigation_updates_preview(world):
     app, *_ = world
     async with app.run_test(size=(120, 40)) as pilot:

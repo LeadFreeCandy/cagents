@@ -39,6 +39,8 @@ from .tmuxctl import (
 # pane text, so it gets its own, slower clock rather than riding every
 # refresh — which also runs on demand after most actions, not just the tick.
 AGENT_POLL_SECONDS = 10.0
+PARTIAL_SNAPSHOT_SECONDS = 0.25
+FIRST_LIST_SIZE = 3
 
 
 class SessionState(Enum):
@@ -880,6 +882,11 @@ class Snapshot:
 
     views: list[SessionView] = field(default_factory=list)
     generated_at: float = 0.0
+    remaining: int = 0
+
+    @property
+    def partial(self) -> bool:
+        return self.remaining > 0
 
     def by_id(self, session_id: str) -> SessionView | None:
         for view in self.views:
@@ -941,7 +948,7 @@ class SessionRegistry:
         # every 2s was most of an idle refresh's CPU.
         self._parse_cache: dict[Path, tuple[tuple[int, int], ParsedSession]] = {}
 
-    def refresh(self, now: float | None = None) -> Snapshot:
+    def refresh(self, now: float | None = None, on_partial=None) -> Snapshot:
         import time
 
         now = time.time() if now is None else now
@@ -956,21 +963,24 @@ class SessionRegistry:
         self._codex_thread_retry_at = {sid: retry for sid, retry in self._codex_thread_retry_at.items()
                                       if sid in codex_ids}
 
-        pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
-        seen_paths: set[Path] = set()
+        located: list[tuple[TrackedSession, Path | None]] = []
         for tracked in list(self.store.sessions.values()):
             if tracked.archived:
                 continue  # hidden from views; still in the store's history
-            path = self._find_session_file(tracked)
-            parsed = self._parse(path, tracked.provider) if path is not None else None
+            located.append((tracked, self._find_session_file(tracked)))
+
+        def recency(item: tuple[TrackedSession, Path | None]) -> float:
+            from .lifecycle import timestamp
+
+            tracked, path = item
             if path is not None:
-                seen_paths.add(path)
-            pairs.append((tracked, parsed))
-        # Archived/untracked sessions never reach _parse again, so their
-        # entries would sit on a ParsedSession apiece for the process's
-        # lifetime — the same sweep _env_cache does per list.
-        for gone in self._parse_cache.keys() - seen_paths:
-            del self._parse_cache[gone]
+                try:
+                    return path.stat().st_mtime
+                except OSError:
+                    pass
+            return max(timestamp(tracked.added_at), timestamp(tracked.last_interacted_at))
+
+        located.sort(key=recency, reverse=True)
 
         pane_cache: dict[str, str] = {}
 
@@ -978,6 +988,26 @@ class SessionRegistry:
             if tmux.key not in pane_cache:
                 pane_cache[tmux.key] = self.tmux.capture_pane(tmux.name, socket=tmux.socket)
             return pane_cache[tmux.key]
+
+        pairs: list[tuple[TrackedSession, ParsedSession | None]] = []
+        seen_paths: set[Path] = set()
+        shown_at = time.monotonic()
+        for tracked, path in located:
+            parsed = self._parse(path, tracked.provider) if path is not None else None
+            if path is not None:
+                seen_paths.add(path)
+            pairs.append((tracked, parsed))
+            if (on_partial is not None and len(pairs) < len(located)
+                    and (len(pairs) == FIRST_LIST_SIZE
+                         or time.monotonic() - shown_at >= PARTIAL_SNAPSHOT_SECONDS)):
+                on_partial(self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now,
+                                          remaining=len(located) - len(pairs)))
+                shown_at = time.monotonic()
+        # Archived/untracked sessions never reach _parse again, so their
+        # entries would sit on a ParsedSession apiece for the process's
+        # lifetime — the same sweep _env_cache does per list.
+        for gone in self._parse_cache.keys() - seen_paths:
+            del self._parse_cache[gone]
 
         return self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now)
 
@@ -989,6 +1019,7 @@ class SessionRegistry:
         agent_states: dict[str, dict],
         codex_names: dict[str, str],
         now: float,
+        remaining: int = 0,
     ) -> Snapshot:
         mapping = map_tmux_sessions(pairs, tmux_sessions, pane_text_fn=pane_text_of)
 
@@ -1072,11 +1103,13 @@ class SessionRegistry:
             from .lifecycle import apply_auto_done
             apply_auto_done(view, self.store.get_setting("auto_done_duration"), now,
                             self.store.get_setting("auto_done_readonly_duration"))
-            previous_state = self._last_state.get(tracked.session_id)
-            view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
-            if view.state != previous_state or tracked.session_id not in self._state_since:
-                self._state_since[tracked.session_id] = now
-            view.rank_stable_since = view.done_at if view.state in DONE_STATES else self._state_since[tracked.session_id]
+            if not remaining:
+                previous_state = self._last_state.get(tracked.session_id)
+                view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
+                if view.state != previous_state or tracked.session_id not in self._state_since:
+                    self._state_since[tracked.session_id] = now
+            view.rank_stable_since = (view.done_at if view.state in DONE_STATES
+                                      else self._state_since.get(tracked.session_id, now))
             view.did_line, view.needs_line = derive_did_needs(view.state, view.state_detail, parsed, pane_text)
             if suspended:
                 view.state_detail += (" · asleep — Enter to resume" if view.state in DONE_STATES
@@ -1133,7 +1166,7 @@ class SessionRegistry:
                 -(v.last_activity.timestamp() if v.last_activity else 0.0),
             )
         )
-        return Snapshot(views=views, generated_at=now)
+        return Snapshot(views=views, generated_at=now, remaining=remaining)
 
     def _debounce(
         self, session_id: str, state: SessionState, detail: str
