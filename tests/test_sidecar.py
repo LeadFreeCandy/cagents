@@ -506,7 +506,10 @@ async def test_viewer_follows_highlight_after_debounce(world):
 
 
 @pytest.mark.skipif(__import__("shutil").which("tmux") is None, reason="tmux required")
-def test_tab_bar_shows_the_conversation_and_only_the_tab_you_are_on():
+def test_tab_bar_shows_the_conversation_the_terminal_tab_and_diff_only_while_on_it():
+    """The terminal tab left the bar along with diff when the bar started
+    naming the conversation; it is back, and diff still shows only while
+    you are on it."""
     import subprocess
     import uuid
 
@@ -534,7 +537,8 @@ def test_tab_bar_shows_the_conversation_and_only_the_tab_you_are_on():
         tmux("set-option", "-w", "-t", "=work:session", "@cagents_title", "Alpha ##1 · review")
         assert "Alpha ##1 · review" in render("session", tab)
         assert "Alpha ##1 · review" in render("session", current)
-        assert render("diff", tab) == "" and render("term-1", tab) == ""
+        assert render("diff", tab) == ""
+        assert "term-1" in render("term-1", tab)
         assert "diff" in render("diff", current) and "term-1" in render("term-1", current)
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)

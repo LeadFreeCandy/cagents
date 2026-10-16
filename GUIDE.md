@@ -67,11 +67,11 @@ to Claude's own agents view.
 ## The right side is tabbed
 
 The pane hosts three tabs. The bar across its top names the conversation you are
-viewing — its state glyph, title and state — and shows the diff or terminal tab only
-while you are on it:
+viewing — its state glyph, title and state — next to the terminal tab, and shows the
+diff tab only while you are on it:
 
 ```
-  ◆ Documents Page Redesign · review
+  ◆ Documents Page Redesign · review    term-1
 ```
 
 `ctrl+g` (top of the queue) also shows a card over the conversation for four seconds —

@@ -761,11 +761,13 @@ def _flash_card() -> str:
 
 def session_tab_formats(selected: str) -> list[list[str]]:
     """The tab bar shows the conversation (@cagents_title on the session
-    window); the diff and terminal tabs show only while you are on them."""
+    window) and the terminal tab; the diff tab shows only while you are on it."""
     title = "#{?#{@cagents_title},#{@cagents_title},session}"
     in_session = "#{==:#{window_name},session}"
+    in_terminal = "#{==:#{window_name},term-1}"
     return [
-        ["set", "-g", "window-status-format", "#{?" + in_session + ",  " + title + "  ,}"],
+        ["set", "-g", "window-status-format",
+         "#{?" + in_session + ",  " + title + "  ,#{?" + in_terminal + ",  #W  ,}}"],
         ["set", "-g", "window-status-current-format", "  #{?" + in_session + "," + title + ",#W}  "],
         ["set", "-g", "window-status-current-style", f"{selected},bold"],
     ]
