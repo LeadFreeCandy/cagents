@@ -201,23 +201,16 @@ def _proc(returncode: int, stdout: str):
     return proc
 
 
-def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypatch):
-    """The CAGENTS_SESSION_ID env var is one `tmux show-environment`
-    subprocess per session per list — 28 spawns every 2s tick on a busy
-    socket, for a value that never changes while the session lives. Cache it
-    by (socket, name, created); a killed-and-recreated session (same name,
-    new created stamp) is looked up afresh."""
+def _batched_env_run(listing, env_calls, stop_at=None):
+    """A fake TmuxClient._run that answers list-panes and the batched
+    show-environment / display-message chain the way tmux 3.7 does: a
+    show-environment on a missing session fails the call and nothing after
+    it runs."""
     import subprocess
 
-    from cagents.tmuxctl import _FIELD_SEP, _LIST_FORMAT, TmuxClient
+    from cagents.tmuxctl import _FIELD_SEP, _LIST_FORMAT
 
-    client = TmuxClient(sockets=("claude",), create_socket="claude")
-    fields = _LIST_FORMAT.count(_FIELD_SEP) + 1  # name, created, activity, attached, pid, path[, ...]
-    listing = [
-        ["alpha", "100", "100", "0", "11", "/proj/alpha"],
-        ["beta", "200", "200", "0", "12", "/proj/beta"],
-    ]
-    env_calls: list[str] = []
+    fields = _LIST_FORMAT.count(_FIELD_SEP) + 1
 
     def fake_run(socket, *args, timeout=5.0):
         if args[0] == "list-panes":
@@ -225,19 +218,106 @@ def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypat
             out = "\n".join(_FIELD_SEP.join(row) for row in rows) + "\n"
             return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
         if args[0] == "show-environment":
-            env_calls.append(args[2])
-            return subprocess.CompletedProcess(args, 0, stdout=f"CAGENTS_SESSION_ID=id-for-{args[2]}\n", stderr="")
+            env_calls.append([])
+            out = ""
+            for i, arg in enumerate(args):
+                if arg == "show-environment":
+                    target = args[i + 2]
+                    if target == stop_at:
+                        return subprocess.CompletedProcess(args, 1, stdout=out, stderr="can't find session")
+                    env_calls[-1].append(target)
+                    out += f"CAGENTS_SESSION_ID=id-for-{target}\n"
+                elif arg == "display-message":
+                    out += args[i + 3] + "\n"
+            return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
         raise AssertionError(f"unexpected tmux call {args}")
 
-    monkeypatch.setattr(client, "_run", fake_run)
+    return fake_run
+
+
+def test_list_sessions_reads_each_session_id_once_per_session_lifetime(monkeypatch):
+    """The CAGENTS_SESSION_ID env var is one `tmux show-environment`
+    subprocess per session per list — 28 spawns every 2s tick on a busy
+    socket, for a value that never changes while the session lives. Cache it
+    by (socket, name, created); a killed-and-recreated session (same name,
+    new created stamp) is looked up afresh."""
+    client = TmuxClient(sockets=("claude",), create_socket="claude")
+    listing = [
+        ["alpha", "100", "100", "0", "11", "/proj/alpha"],
+        ["beta", "200", "200", "0", "12", "/proj/beta"],
+    ]
+    env_calls: list[list[str]] = []
+    monkeypatch.setattr(client, "_run", _batched_env_run(listing, env_calls))
     first = client.list_sessions()
     assert {s.name: s.cagents_session_id for s in first} == {"alpha": "id-for-=alpha", "beta": "id-for-=beta"}
-    assert len(env_calls) == 2
+    assert env_calls == [["=alpha", "=beta"]]
     client.list_sessions()
-    assert len(env_calls) == 2, "unchanged sessions were re-queried"
+    assert len(env_calls) == 1, "unchanged sessions were re-queried"
     listing[1][1] = "300"  # beta was killed and recreated under the same name
     client.list_sessions()
-    assert env_calls[2:] == ["=beta"]
+    assert env_calls[1:] == [["=beta"]]
+
+
+def test_a_session_gone_mid_lookup_does_not_lose_the_ids_after_it(monkeypatch):
+    """One failed lookup stops tmux running the rest of the batch. The
+    sessions it never reached are asked again next time, not remembered as
+    untagged — that would show a live conversation as dead until restart."""
+    client = TmuxClient(sockets=("claude",), create_socket="claude")
+    listing = [
+        ["alpha", "100", "100", "0", "11", "/proj/alpha"],
+        ["beta", "200", "200", "0", "12", "/proj/beta"],
+        ["gamma", "300", "300", "0", "13", "/proj/gamma"],
+    ]
+    env_calls: list[list[str]] = []
+    monkeypatch.setattr(client, "_run", _batched_env_run(listing, env_calls, stop_at="=beta"))
+    first = {s.name: s.cagents_session_id for s in client.list_sessions()}
+    assert first["alpha"] == "id-for-=alpha" and first["beta"] == ""
+    del listing[1]
+    monkeypatch.setattr(client, "_run", _batched_env_run(listing, env_calls))
+    assert {s.name: s.cagents_session_id for s in client.list_sessions()} == {
+        "alpha": "id-for-=alpha", "gamma": "id-for-=gamma"}
+
+
+def test_list_sessions_reads_every_id_in_one_tmux_call(monkeypatch, tmp_path):
+    """One `show-environment` spawn per session was 0.43s for 51 sessions at
+    startup (one batched call: 0.013s, measured on the real socket), plus 38
+    more for '--term' views, which host no conversation."""
+    import shutil
+    import subprocess
+    import uuid
+
+    import pytest
+
+    if not shutil.which("tmux"):
+        pytest.skip("tmux required")
+    import cagents.tmuxctl as tmuxctl
+
+    socket = "cg-envtest-" + uuid.uuid4().hex[:8]
+    def tmux(*args):
+        subprocess.run(["tmux", "-L", socket, *args], check=True, capture_output=True, timeout=5)
+    try:
+        tmux("new-session", "-d", "-s", "alpha", "-e", "CAGENTS_SESSION_ID=id-alpha")
+        tmux("new-session", "-d", "-s", "untagged")
+        tmux("new-session", "-d", "-s", "odd#name", "-e", "CAGENTS_SESSION_ID=id-odd")
+        tmux("new-session", "-d", "-s", "alpha--term", "-t", "=alpha")
+        real_run = subprocess.run
+        lookups: list[list[str]] = []
+
+        def counting_run(args, *rest, **kwargs):
+            if "show-environment" in args:
+                lookups.append(list(args))
+            return real_run(args, *rest, **kwargs)
+
+        monkeypatch.setattr(tmuxctl.subprocess, "run", counting_run)
+        client = TmuxClient(sockets=(socket,), create_socket=socket)
+        ids = {s.name: s.cagents_session_id for s in client.list_sessions()}
+        assert ids == {"alpha": "id-alpha", "untagged": "", "odd#name": "id-odd", "alpha--term": ""}
+        assert len(lookups) == 1
+        assert "=alpha--term" not in lookups[0]
+        client.list_sessions()
+        assert len(lookups) == 1
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, timeout=5)
 
 
 def test_client_activity_ignores_input_from_before_the_client_arrived(monkeypatch):

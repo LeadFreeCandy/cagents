@@ -206,19 +206,22 @@ class TmuxClient:
             except ValueError:
                 continue
         found = list(sessions.values())
-        for sess in found:
+        unknown = [sess for sess in found
+                   if not sess.is_view and (socket, sess.name, sess.created) not in self._env_cache]
+        ids = self._session_ids([sess.name for sess in unknown], socket) if unknown else {}
+        for sess in unknown:
+            if sess.name not in ids:
+                continue
             key = (socket, sess.name, sess.created)
-            if key not in self._env_cache:
-                self._env_cache[key] = self.get_session_env(
-                    sess.name, "CAGENTS_SESSION_ID", socket=socket
-                )
-                if not self._env_cache[key] and socket.startswith("cagents2-sessions-"):
-                    tagged = self._run(socket, "show-option", "-qv", "-t", sess.name, "@cagents2_key").stdout.strip()
-                    if tagged.startswith("claude:"):
-                        self._env_cache[key] = tagged.partition(":")[2]
-                    elif tagged.startswith("codex:"):
-                        self._env_cache[key] = tagged
-            sess.cagents_session_id = self._env_cache[key]
+            self._env_cache[key] = ids[sess.name]
+            if not self._env_cache[key] and socket.startswith("cagents2-sessions-"):
+                tagged = self._run(socket, "show-option", "-qv", "-t", sess.name, "@cagents2_key").stdout.strip()
+                if tagged.startswith("claude:"):
+                    self._env_cache[key] = tagged.partition(":")[2]
+                elif tagged.startswith("codex:"):
+                    self._env_cache[key] = tagged
+        for sess in found:
+            sess.cagents_session_id = self._env_cache.get((socket, sess.name, sess.created), "")
         live = {(socket, s.name, s.created) for s in found}
         for key in [k for k in self._env_cache if k[0] == socket and k not in live]:
             del self._env_cache[key]
@@ -344,6 +347,28 @@ class TmuxClient:
 
     def _respawn_environment(self, pane_id: str, socket: str) -> list[str]:
         return []  # legacy sessions already persist their environment in tmux
+
+    def _session_ids(self, names: list[str], socket: str) -> dict[str, str]:
+        """CAGENTS_SESSION_ID for each session, in one tmux call. A failed
+        lookup stops tmux running the rest, so a session whose marker never
+        printed is left out to be asked again."""
+        args: list[str] = []
+        for name in names:
+            args += ["show-environment", "-t", f"={name}", ";",
+                     "display-message", "-l", "-p", f"{_FIELD_SEP}{name}", ";"]
+        try:
+            proc = self._run(socket, *args[:-1])
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        ids: dict[str, str] = {}
+        session_id = ""
+        for line in proc.stdout.splitlines():
+            if line.startswith(_FIELD_SEP):
+                ids[line[len(_FIELD_SEP):]] = session_id
+                session_id = ""
+            elif line.startswith("CAGENTS_SESSION_ID="):
+                session_id = line.split("=", 1)[1]
+        return ids
 
     def get_session_env(self, session_name: str, var: str, socket: str | None = None) -> str:
         socket = socket or self.create_socket
