@@ -241,3 +241,30 @@ def test_header_summary_counts():
     assert "2 working" in text
     assert "3 done" in text
     assert "review" not in text  # zero counts are hidden
+
+
+def test_provider_mark_is_lit_only_while_a_process_is_resident(claude_dir: Path):
+    """Which rows are holding a process was invisible: state names attention
+    (done/review), ☾ marks only cagents' own suspensions, and a bold title
+    reads as nothing. Rather than add a column, the provider mark every row
+    already carries is lit while a CLI is resident and dimmed when not —
+    zero extra width, and the legend fits in one sentence."""
+    from cagents.format import kanban_card, provider_icon
+
+    resident = _view(claude_dir, state=SessionState.DONE)
+    dormant = _view(claude_dir, state=SessionState.DONE)
+    dormant.live = False
+
+    def mark_style(text):
+        start = text.plain.index("✳")
+        return next(str(s.style) for s in text.spans if s.start <= start < s.end)
+
+    assert mark_style(session_row(resident, NOW)) == "dark_orange"
+    assert mark_style(session_row(dormant, NOW)) == "dim"
+    assert mark_style(kanban_card(resident, NOW)) == "dark_orange"
+    assert mark_style(kanban_card(dormant, NOW)) == "dim"
+    # Codex keeps its own colour when resident, and dims the same way.
+    assert str(provider_icon("codex").style) == "cyan"
+    assert str(provider_icon("codex", live=False).style) == "dim"
+    # Places without a process to speak of (the track picker, search) stay lit.
+    assert str(provider_icon("claude").style) == "dark_orange"
