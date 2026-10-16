@@ -12,8 +12,8 @@ from cagents.sessions import SessionState
 from cagents.store import Store
 from cagents.tmuxctl import TmuxSession
 from cagents.views import SelectionChanged
-from conftest import SID1, SID2, SID3, TranscriptBuilder, ts_ago
-from test_lifecycle import LifecycleTmux, idle_world  # noqa: F401 — fixture re-export
+from conftest import SID1, SID2, SID3, TranscriptBuilder, select_session, ts_ago
+from test_lifecycle import LifecycleTmux, idle_world, idle_world_beside_fresh  # noqa: F401 — fixture re-export
 
 
 def resumes(tmux, sid):
@@ -31,8 +31,8 @@ async def settle(app, pilot):
 
 
 class TestDoneWakesOnlyExplicitly:
-    async def test_hover_selection_and_keys_leave_done_asleep(self, idle_world):
-        app, store, tmux, path = idle_world
+    async def test_hover_selection_and_keys_leave_done_asleep(self, idle_world_beside_fresh):
+        app, store, tmux, path = idle_world_beside_fresh
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(app, pilot)
             view = app.snapshot.by_id(SID1)
@@ -48,11 +48,12 @@ class TestDoneWakesOnlyExplicitly:
             assert not store.sessions[SID1].last_interacted_at
             assert app.snapshot.by_id(SID1).suspended and app.snapshot.by_id(SID1).auto_done
 
-    async def test_enter_wakes_done_and_walks_in(self, idle_world):
-        app, store, tmux, path = idle_world
+    async def test_enter_wakes_done_and_walks_in(self, idle_world_beside_fresh):
+        app, store, tmux, path = idle_world_beside_fresh
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(app, pilot)
             assert len(tmux.replacements) == 1
+            select_session(app, SID1)
             await pilot.press("enter")
             await settle(app, pilot)
             assert len(resumes(tmux, SID1)) == 1
@@ -62,19 +63,20 @@ class TestDoneWakesOnlyExplicitly:
             assert store.sessions[SID1].last_interacted_at
             assert tmux.attached_to  # Enter walks in after the resume
 
-    async def test_right_arrow_wakes_done_and_walks_in(self, idle_world):
-        app, store, tmux, path = idle_world
+    async def test_right_arrow_wakes_done_and_walks_in(self, idle_world_beside_fresh):
+        app, store, tmux, path = idle_world_beside_fresh
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(app, pilot)
             assert len(tmux.replacements) == 1
+            select_session(app, SID1)
             await pilot.press("right")
             await settle(app, pilot)
             assert len(resumes(tmux, SID1)) == 1
             assert not app.snapshot.by_id(SID1).suspended
             assert tmux.attached_to
 
-    async def test_asleep_placeholder_names_the_wake_keys(self, idle_world):
-        app, store, tmux, path = idle_world
+    async def test_asleep_placeholder_names_the_wake_keys(self, idle_world_beside_fresh):
+        app, store, tmux, path = idle_world_beside_fresh
         async with app.run_test(size=(120, 40)) as pilot:
             await settle(app, pilot)
             detail = app.snapshot.by_id(SID1).state_detail
@@ -107,6 +109,51 @@ def busy_world(claude_dir, tmp_path, monkeypatch):
     app = CagentsApp(store=store, tmux=tmux, claude_dir=claude_dir)
     monkeypatch.setattr(app, "_agent_bin", lambda p: f"/opt/bin/{p}")
     return app, store, tmux
+
+
+@pytest.fixture
+def two_idle_world(claude_dir, tmp_path, monkeypatch):
+    """Two live conversations, both quiet for a week, with auto sleep off."""
+    now = time.time()
+    root = tmp_path / "repo"
+    root.mkdir()
+    for sid, age in ((SID1, 7 * 86400), (SID2, 8 * 86400)):
+        TranscriptBuilder(sid, str(root)).ai_title(f"Idle {sid[:4]}").user("go", ts=ts_ago(age + 60)).assistant_text(
+            "finished", ts=ts_ago(age)).write(claude_dir, mtime=now - age)
+    store = Store.load(tmp_path / "state.json")
+    store.set_setting("auto_done_duration", "off")
+    tmux = LifecycleTmux()
+    for i, sid in enumerate((SID1, SID2)):
+        store.track(sid, str(root), ts_ago(10 * 86400))
+        tmux.sessions.append(TmuxSession(f"agent{i}", now - 10 * 86400, now, False, 100 + i, str(root),
+                                          cagents_session_id=sid, pane_command="claude", pane_id=f"%{i + 1}"))
+    app = CagentsApp(store=store, tmux=tmux, claude_dir=claude_dir)
+    monkeypatch.setattr(app, "_agent_bin", lambda p: f"/opt/bin/{p}")
+    return app, store, tmux
+
+
+async def test_the_selected_conversation_is_exempt_from_auto_sleep(two_idle_world):
+    """Auto sleep put the conversation you were on to sleep under you. The
+    selected one stays awake; it sleeps once the cursor moves off it."""
+    from conftest import select_session
+
+    app, store, tmux = two_idle_world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await settle(app, pilot)
+        select_session(app, SID1)
+        await settle(app, pilot)
+        store.set_setting("auto_done_duration", "1h")
+        app.refresh_data()
+        await settle(app, pilot)
+        assert app.selected_session_id == SID1
+        assert app.snapshot.by_id(SID1).state != SessionState.AUTO_SLEEP
+        assert not sleeps(tmux, SID1)
+        assert app.snapshot.by_id(SID2).state == SessionState.AUTO_SLEEP and sleeps(tmux, SID2)
+        select_session(app, SID2)
+        await settle(app, pilot)
+        app.refresh_data()
+        await settle(app, pilot)
+        assert app.snapshot.by_id(SID1).state == SessionState.AUTO_SLEEP and sleeps(tmux, SID1)
 
 
 async def type_command(app, pilot, text):

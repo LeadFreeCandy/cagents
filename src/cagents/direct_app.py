@@ -75,7 +75,7 @@ class DirectApp(CagentsApp):
             self.sidecar.detach()
 
     def _can_auto_suspend(self, view):
-        return view.tmux_socket == self.tmux.create_socket
+        return super()._can_auto_suspend(view) and view.tmux_socket == self.tmux.create_socket
 
     def _fullscreen_attach(self, name, socket):
         if self.sidecar is None:

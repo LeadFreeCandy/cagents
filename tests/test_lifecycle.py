@@ -18,7 +18,7 @@ from cagents.sessions import SessionRegistry, SessionState, SessionView
 from cagents.store import Store, TrackedSession
 from cagents.tmuxctl import TmuxClient, TmuxSession
 from cagents.views import SelectionChanged, attention_sort_key
-from conftest import FakeTmux, SID1, SID2, TranscriptBuilder, ts_ago
+from conftest import FakeTmux, SID1, SID2, TranscriptBuilder, select_session, ts_ago
 
 
 def iso(when):
@@ -118,13 +118,14 @@ def test_read_only_timer_only_shortens_the_general_one():
     assert not view.auto_done
 
 
-async def test_read_only_setting_cycles_and_applies(idle_world):
-    app, store, tmux, _ = idle_world
+async def test_read_only_setting_cycles_and_applies(idle_world_beside_fresh):
+    app, store, tmux, _ = idle_world_beside_fresh
     store.set_setting("auto_done_readonly_duration", "off")
     store.set_setting("auto_done_duration", "30d")
     async with app.run_test(size=(120, 48)) as pilot:
         await pilot.pause()
         assert not app.snapshot.by_id(SID1).auto_done
+        select_session(app, SID2)
         await pilot.press("comma")
         options = app.screen.query_one("#settings-list", OptionList)
         options.highlighted = next(i for i in range(options.option_count)
@@ -223,8 +224,20 @@ def idle_world(claude_dir, tmp_path, monkeypatch):
     return app, store, tmux, path
 
 
-async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world):
+@pytest.fixture
+def idle_world_beside_fresh(idle_world, claude_dir):
+    """idle_world plus a conversation that finished a minute ago, which the
+    cursor starts on: the selected conversation is never put to sleep."""
     app, store, tmux, path = idle_world
+    root = store.sessions[SID1].project_dir
+    TranscriptBuilder(SID2, root).user("new task", ts=ts_ago(120)).assistant_text(
+        "done", ts=ts_ago(60)).write(claude_dir, mtime=time.time() - 60)
+    store.track(SID2, root, ts_ago(300))
+    return app, store, tmux, path
+
+
+async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world_beside_fresh):
+    app, store, tmux, path = idle_world_beside_fresh
     before = path.read_bytes()
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
@@ -250,6 +263,7 @@ async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world
         assert len(tmux.replacements) == 1
         assert not store.sessions[SID1].last_interacted_at
         # Enter is the explicit wake: resume once, reopen, transcript untouched.
+        select_session(app, SID1)
         await pilot.press("enter")
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -263,13 +277,13 @@ async def test_first_launch_auto_done_suspends_and_enter_resumes_once(idle_world
         assert path.read_bytes() == before
 
 
-async def test_tmux_client_activity_never_counts_as_use(idle_world):
+async def test_tmux_client_activity_never_counts_as_use(idle_world_beside_fresh):
     """tmux's client_activity is every event a client receives: Claude's
     panes turn on any-motion mouse tracking (mouse_all_flag), so the mouse
     merely passing over the viewer read as "just used" and idle review rows
     never reached auto sleep. Use is conversation activity or an explicit
     action in cagents (Enter / → / click / d), never this clock."""
-    app, store, tmux, _ = idle_world
+    app, store, tmux, _ = idle_world_beside_fresh
     tmux.input_activity[f"{tmux.create_socket}:agent"] = time.time()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -299,11 +313,12 @@ async def test_restart_key_preserves_conversation_and_uses_provider(idle_world):
         assert ["resume", SID1] == shlex.split(command)[4:6]
 
 
-async def test_settings_changes_duration_and_persists(idle_world):
-    app, store, tmux, _ = idle_world
+async def test_settings_changes_duration_and_persists(idle_world_beside_fresh):
+    app, store, tmux, _ = idle_world_beside_fresh
     store.set_setting("auto_done_duration", "off")
     async with app.run_test(size=(120, 48)) as pilot:
         await pilot.pause()
+        select_session(app, SID2)
         await pilot.press("comma")
         options = app.screen.query_one("#settings-list", OptionList)
         options.highlighted = next(i for i in range(options.option_count)
@@ -351,8 +366,8 @@ async def test_restart_failure_preserves_dashboard_and_reports_error(idle_world,
         assert any("Restart incomplete" in message and "agent changed" in message for message in notices)
 
 
-async def test_keyboard_selection_leaves_done_asleep_and_right_arrow_wakes(idle_world):
-    app, store, tmux, _ = idle_world
+async def test_keyboard_selection_leaves_done_asleep_and_right_arrow_wakes(idle_world_beside_fresh):
+    app, store, tmux, _ = idle_world_beside_fresh
     async with app.run_test() as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()

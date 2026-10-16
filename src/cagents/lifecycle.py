@@ -53,8 +53,10 @@ def read_only(view: SessionView) -> bool:
     )
 
 
-def apply_auto_done(view: SessionView, duration: object, now: float, readonly_duration: object = "off") -> None:
-    """Derive the annotation; the UI persists new transitions with its store writes."""
+def apply_auto_done(view: SessionView, duration: object, now: float, readonly_duration: object = "off",
+                    keep_awake: bool = False) -> None:
+    """Derive the annotation; the UI persists new transitions with its store writes.
+    keep_awake (the selected conversation) stops a new sleep, not one already taken."""
     view.auto_done = False
     reviewed = timestamp(view.tracked.reviewed_at)
     activity = view.last_activity.timestamp() if view.last_activity else 0.0
@@ -71,6 +73,8 @@ def apply_auto_done(view: SessionView, duration: object, now: float, readonly_du
     if not seconds or not last or now - last < seconds:
         return
     previous = timestamp(view.tracked.auto_done_at)
+    if keep_awake and previous < last:
+        return
     view.auto_done = True
     view.done_at = previous if previous >= last else now
     view.state = SessionState.AUTO_SLEEP

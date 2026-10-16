@@ -447,7 +447,8 @@ class CagentsApp(App):
             self.post_message(PartialSnapshot(partial))
 
         try:
-            snapshot = self.registry.refresh(on_partial=None if self._seen_first_snapshot else show_partial)
+            snapshot = self.registry.refresh(on_partial=None if self._seen_first_snapshot else show_partial,
+                                             selected=self.selected_session_id)
         except Exception as error:
             self.call_from_thread(self.notify, f"Refresh failed: {error}", severity="error")
             return
@@ -555,7 +556,8 @@ class CagentsApp(App):
                 from .lifecycle import apply_auto_done
                 view.state = SessionState.NEEDS_REVIEW
                 apply_auto_done(view, self.store.get_setting("auto_done_duration"), snapshot.generated_at,
-                                self.store.get_setting("auto_done_readonly_duration"))
+                                self.store.get_setting("auto_done_readonly_duration"),
+                                keep_awake=view.session_id == self.selected_session_id)
             value = datetime.fromtimestamp(view.done_at, timezone.utc).isoformat() if view.auto_done else ""
             if tracked.auto_done_at != value:
                 tracked.auto_done_at = value
@@ -2713,7 +2715,7 @@ exec {shlex.quote(real)} "$@"
                 self._begin_lifecycle(view, "suspend")
 
     def _can_auto_suspend(self, view: SessionView) -> bool:
-        return True
+        return view.session_id != self.selected_session_id
 
     def _resume_command(self, view: SessionView) -> tuple[str, str]:
         import shlex
@@ -2740,7 +2742,7 @@ exec {shlex.quote(real)} "$@"
         import time
         from .lifecycle import should_suspend
         view = self.snapshot.by_id(session_id)
-        return bool(view and should_suspend(view, time.time()))
+        return bool(view and self._can_auto_suspend(view) and should_suspend(view, time.time()))
 
     def _replace_instance(self, view: SessionView, operation: str) -> bool:
         """operation: "suspend" (idle policy, re-validated), "sleep" (:sleep —

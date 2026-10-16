@@ -948,7 +948,7 @@ class SessionRegistry:
         # every 2s was most of an idle refresh's CPU.
         self._parse_cache: dict[Path, tuple[tuple[int, int], ParsedSession]] = {}
 
-    def refresh(self, now: float | None = None, on_partial=None) -> Snapshot:
+    def refresh(self, now: float | None = None, on_partial=None, selected: str | None = None) -> Snapshot:
         import time
 
         now = time.time() if now is None else now
@@ -1004,7 +1004,7 @@ class SessionRegistry:
                     and (len(pairs) == FIRST_LIST_SIZE
                          or time.monotonic() - shown_at >= PARTIAL_SNAPSHOT_SECONDS)):
                 on_partial(self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now,
-                                          remaining=len(located) - len(pairs)))
+                                          selected, remaining=len(located) - len(pairs)))
                 shown_at = time.monotonic()
         # Archived/untracked sessions never reach _parse again, so their
         # entries would sit on a ParsedSession apiece for the process's
@@ -1015,7 +1015,7 @@ class SessionRegistry:
             self._agent_states = agent_states = asking_agents.result()
             self._agent_states_at = now
 
-        return self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now)
+        return self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now, selected)
 
     def _snapshot(
         self,
@@ -1025,6 +1025,7 @@ class SessionRegistry:
         agent_states: dict[str, dict],
         codex_names: dict[str, str],
         now: float,
+        selected: str | None = None,
         remaining: int = 0,
     ) -> Snapshot:
         mapping = map_tmux_sessions(pairs, tmux_sessions, pane_text_fn=pane_text_of)
@@ -1108,7 +1109,8 @@ class SessionRegistry:
             )
             from .lifecycle import apply_auto_done
             apply_auto_done(view, self.store.get_setting("auto_done_duration"), now,
-                            self.store.get_setting("auto_done_readonly_duration"))
+                            self.store.get_setting("auto_done_readonly_duration"),
+                            keep_awake=tracked.session_id == selected)
             if not remaining:
                 previous_state = self._last_state.get(tracked.session_id)
                 view.state, view.state_detail = self._debounce(tracked.session_id, view.state, view.state_detail)
