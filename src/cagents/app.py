@@ -25,6 +25,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import ContentSwitcher, Footer, OptionList, Static
+from textual.worker import Worker
 
 from . import gitops
 from . import jira
@@ -233,6 +234,8 @@ class CagentsApp(App):
         self._lifecycle_busy: set[str] = set()
         self._wake_after_stop: set[str] = set()
         self._interaction_dirty = False
+        self._refreshing: Worker | None = None
+        self._refresh_again = False
 
     # -- layout --------------------------------------------------------------
 
@@ -374,6 +377,9 @@ class CagentsApp(App):
     # -- data flow -----------------------------------------------------------
 
     def refresh_data(self) -> None:
+        if self._refreshing is not None and not self._refreshing.is_finished:
+            self._refresh_again = True
+            return
         try:
             self.store.sync_shared()
             from .shared import bridge_path
@@ -389,7 +395,12 @@ class CagentsApp(App):
             if str(error) != getattr(self, "_sharing_error", ""):
                 self.notify(f"Conversation sharing: {error}", severity="warning")
             self._sharing_error = str(error)
-        self._refresh_worker()
+        self._refreshing = self._refresh_worker()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker is self._refreshing and event.worker.is_finished and self._refresh_again:
+            self._refresh_again = False
+            self.refresh_data()
 
     @work(thread=True, exclusive=True, group="refresh", exit_on_error=False)
     def _refresh_worker(self) -> None:

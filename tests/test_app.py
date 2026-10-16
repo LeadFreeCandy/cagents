@@ -84,6 +84,49 @@ async def test_startup_shows_queue_default(world):
         assert "2 review" in summary
 
 
+@pytest.fixture
+def slow_transcripts(monkeypatch):
+    """Every transcript takes 0.3s to read. Returns each path as it's read."""
+    import time
+
+    from cagents import sessions
+
+    real = sessions.parse_session_file
+    reads: list[Path] = []
+
+    def slow(path, *args, **kwargs):
+        reads.append(path)
+        time.sleep(0.3)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(sessions, "parse_session_file", slow)
+    return reads
+
+
+async def test_a_refresh_asked_for_during_another_runs_after_it(world, slow_transcripts, now):
+    """The 2s timer and every action start a refresh, and each one used to
+    start while the last was still reading. At startup three read the same
+    transcripts at once and the first took 2.99s instead of ~1.5s. One runs
+    at a time now, and a request made meanwhile still gets its refresh,
+    well before the next tick would have picked the change up."""
+    import time
+
+    app, store, _tmux, claude_dir = world
+    sid4 = "44444444-4444-4444-4444-444444444444"
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+        TranscriptBuilder(sid4, "/proj/beta").ai_title("Beta: tracked mid-refresh").user("go").write(
+            claude_dir, mtime=now)
+        store.track(sid4, "/proj/beta", "2026-08-18T09:20:00+00:00")
+        app.refresh_data()
+        app.refresh_data()
+        deadline = time.monotonic() + 1.5
+        while app.snapshot.by_id(sid4) is None and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+        assert app.snapshot.by_id(sid4) is not None
+    assert sorted(slow_transcripts) == sorted(set(slow_transcripts))
+
+
 async def test_navigation_updates_preview(world):
     app, *_ = world
     async with app.run_test(size=(120, 40)) as pilot:
