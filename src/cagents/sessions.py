@@ -953,9 +953,12 @@ class SessionRegistry:
 
         now = time.time() if now is None else now
         tmux_sessions = self.tmux.list_sessions()
+        asking_agents = None
         if any(t.provider == "claude" for t in self.store.sessions.values()) and now - self._agent_states_at >= AGENT_POLL_SECONDS:
-            self._agent_states = fetch_agent_states(runner=self.agents_runner)
-            self._agent_states_at = now
+            from concurrent.futures import ThreadPoolExecutor
+            pool = ThreadPoolExecutor(max_workers=1)
+            asking_agents = pool.submit(fetch_agent_states, runner=self.agents_runner)
+            pool.shutdown(wait=False)
         agent_states = self._agent_states
         codex_ids = {t.session_id for t in self.store.sessions.values()
                      if t.provider == "codex" and not t.archived}
@@ -1008,6 +1011,9 @@ class SessionRegistry:
         # lifetime — the same sweep _env_cache does per list.
         for gone in self._parse_cache.keys() - seen_paths:
             del self._parse_cache[gone]
+        if asking_agents is not None:
+            self._agent_states = agent_states = asking_agents.result()
+            self._agent_states_at = now
 
         return self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now)
 

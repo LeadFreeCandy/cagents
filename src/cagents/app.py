@@ -64,6 +64,7 @@ from .tmuxctl import TmuxClient
 from .views import GroupedView, KanbanView, QueueView, SelectionChanged, SessionInteracted
 
 REFRESH_SECONDS = 2.0
+WORKSPACE_SETUP_LATEST = 1.0
 # Viewer sync is leading-edge: a selection change attaches IMMEDIATELY (any
 # delay reads as lag — user-tested both ways). Only follow-up changes inside
 # this window coalesce into one trailing sync, so holding an arrow key down
@@ -247,6 +248,8 @@ class CagentsApp(App):
         self._refreshing: Worker | None = None
         self._refresh_again = False
         self._spinner = None
+        self._workspace_started = False
+        self._workspace_set_up = False
 
     # -- layout --------------------------------------------------------------
 
@@ -267,6 +270,7 @@ class CagentsApp(App):
             self.query_one("#body").add_class("sidecar")
         self._apply_compact(self.size.width)
         self.refresh_data()
+        self.set_timer(WORKSPACE_SETUP_LATEST, self._set_up_workspace)
         self.set_interval(REFRESH_SECONDS, self.refresh_data)
         self.set_interval(PR_POLL_SECONDS, self._poll_waiting_prs)
         self.set_interval(JIRA_POLL_SECONDS, self._poll_jira_prs)
@@ -276,15 +280,28 @@ class CagentsApp(App):
 
         _ctx.init_log(self.store.path.parent)
         _ctx._log(f"app started: {_ctx.version_stamp()} sidecar={self.sidecar is not None}")
+
+    def _set_up_workspace(self) -> None:
+        if self._workspace_started:
+            return
+        self._workspace_started = True
+        self._workspace_worker()
+
+    @work(thread=True, group="workspace", exit_on_error=False)
+    def _workspace_worker(self) -> None:
+        def warn(message: str, severity: str = "warning") -> None:
+            self.call_from_thread(self.notify, message, severity=severity)
+
         if os.environ.get("CAGENTS_SIDECAR") == "1" and self.sidecar is not None:
             try:
                 self._configure_container()
             except Exception as error:
-                self.notify(f"Container key setup failed: {error}", severity="warning")
+                warn(f"Container key setup failed: {error}")
         try:
             self._write_claude_shim()
         except OSError as error:
-            self.notify(f"claude shim not written: {error}", severity="warning")
+            warn(f"claude shim not written: {error}")
+        ready = False
         if self.sidecar is not None:
             try:
                 self.sidecar.ensure_workspace(
@@ -298,10 +315,16 @@ class CagentsApp(App):
                     apply_page_scroll(bool(self.store.get_setting("page_scroll_keys")),
                                       self._ctx_prog(), str(self._context_path()))
                 self._workspace_ready()
-                if self.theme.startswith("vim-"):
-                    self._apply_color_theme(self.theme)
+                ready = True
             except Exception as error:
-                self.notify(f"Workspace setup failed: {error}", severity="error")
+                warn(f"Workspace setup failed: {error}", "error")
+        self.call_from_thread(self._workspace_finished, ready)
+
+    def _workspace_finished(self, ready: bool) -> None:
+        self._workspace_set_up = True
+        if ready and self.theme.startswith("vim-"):
+            self._apply_color_theme(self.theme)
+        self._schedule_viewer_sync()
 
     def _workspace_ready(self) -> None:
         pass
@@ -467,6 +490,8 @@ class CagentsApp(App):
         self._update_preview()
         self._write_context()
         self._schedule_viewer_sync()
+        if not self._workspace_started:
+            self.call_after_refresh(self._set_up_workspace)
         if snapshot.partial:
             return
         self._notify_transitions(snapshot)
@@ -621,7 +646,7 @@ class CagentsApp(App):
         return self._attach_command(socket, view.tmux_name)
 
     def _sync_viewer(self) -> None:
-        if self.sidecar is None:
+        if self.sidecar is None or not self._workspace_set_up:
             return
         import time as _time
 

@@ -52,6 +52,10 @@ async def test_hover_leaves_native_pane_and_process_in_place(direct, tmp_path, m
 
     async with app.run_test(size=(70, 35)) as pilot:
         app.action_switch_view("queue")
+        for _ in range(60):
+            if app._workspace_set_up:
+                break
+            await pilot.pause(0.05)
         await pilot.pause(VIEWER_COALESCE * 2)
         await app.workers.wait_for_complete()
         assert d.visible() == panes[0].pane_id

@@ -174,6 +174,33 @@ async def test_reading_keeps_going_while_the_screen_is_busy(world, slow_transcri
         assert time.monotonic() - started < 1.4
 
 
+async def test_the_list_is_drawn_before_the_workspace_is_set_up(world, slow_transcripts, monkeypatch):
+    """The workspace setup (0.64s of tmux calls at launch) ran on the
+    screen's thread before the first list could be drawn, and reading only
+    began after it. It now starts once the first conversations are on
+    screen and runs beside them, so the list keeps filling in."""
+    import time
+
+    real = CagentsApp._write_claude_shim
+    setup: dict = {}
+
+    def slow_setup(self):
+        setup["rows"] = self.query_one("#queue-list", SessionList).option_count
+        time.sleep(1.0)
+        setup["done"] = True
+        return real(self)
+
+    monkeypatch.setattr(CagentsApp, "_write_claude_shim", slow_setup)
+    app, *_ = world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_complete_list(app, pilot)
+        completed_during_setup = "rows" in setup and "done" not in setup
+        while "done" not in setup:
+            await pilot.pause(0.05)
+    assert setup["rows"] >= 1
+    assert completed_during_setup
+
+
 async def test_a_notification_click_waiting_at_startup_reaches_a_conversation_that_loads_last(
     world, slow_transcripts,
 ):

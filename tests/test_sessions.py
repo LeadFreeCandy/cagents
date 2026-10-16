@@ -741,6 +741,38 @@ def test_a_conversation_without_a_transcript_sorts_by_when_it_was_last_used(
     assert sorted(view.session_id for view in partials[0].views) == sorted([fresh, ids[0], ids[1]])
 
 
+def test_the_first_partial_list_does_not_wait_for_claude_agents(claude_dir: Path, tmp_path: Path, now: float):
+    """`claude agents --json --all` boots the whole CLI: 0.33s at launch
+    before the first list could show. It runs alongside the reading now,
+    and the complete list still uses its answer."""
+    import json
+    import time
+
+    from cagents import sessions as S
+
+    store = Store.load(tmp_path / "state.json")
+    ids = [f"{c * 8}-{c * 4}-{c * 4}-{c * 4}-{c * 12}" for c in "abcdef"]
+    for age, sid in enumerate(ids):
+        TranscriptBuilder(sid, "/proj/load").user("go", ts=ts_ago(90)).assistant_text("done", ts=ts_ago(80)).write(
+            claude_dir, mtime=now - 60 * (age + 1))
+        store.track(sid, "/proj/load", ts_ago(120))
+    tmux = FakeTmux()
+    tmux.sessions.append(TmuxSession("live", now - 600, now, False, 7, "/proj/load", cagents_session_id=ids[0]))
+    answered: list[float] = []
+
+    def runner(args):
+        time.sleep(0.5)
+        answered.append(time.monotonic())
+        return json.dumps([{"sessionId": ids[0], "status": "waiting", "waitingFor": "permission prompt"}])
+
+    registry = S.SessionRegistry(store, tmux=tmux, claude_dir=claude_dir, agents_runner=runner)
+    shown: list[float] = []
+    complete = registry.refresh(now=now, on_partial=lambda partial: shown.append(time.monotonic()))
+    assert shown and answered and shown[0] < answered[0]
+    view = complete.by_id(ids[0])
+    assert (view.state, view.state_detail) == (SessionState.NEEDS_INPUT, "permission prompt")
+
+
 def test_partial_lists_leave_the_needs_you_hold_to_the_complete_one(
     claude_dir: Path, tmp_path: Path, now: float, monkeypatch,
 ):
