@@ -979,6 +979,17 @@ class SessionRegistry:
                 pane_cache[tmux.key] = self.tmux.capture_pane(tmux.name, socket=tmux.socket)
             return pane_cache[tmux.key]
 
+        return self._snapshot(pairs, tmux_sessions, pane_text_of, agent_states, codex_names, now)
+
+    def _snapshot(
+        self,
+        pairs: list[tuple[TrackedSession, ParsedSession | None]],
+        tmux_sessions: list[TmuxSession],
+        pane_text_of,
+        agent_states: dict[str, dict],
+        codex_names: dict[str, str],
+        now: float,
+    ) -> Snapshot:
         mapping = map_tmux_sessions(pairs, tmux_sessions, pane_text_fn=pane_text_of)
 
         views: list[SessionView] = []
