@@ -1360,109 +1360,186 @@ async def test_pr_poll_reacts_to_close_and_any_update(world):
 # ------------------------------------------------------- conversation search ---
 
 
-async def test_search_action_gated_by_setting(world):
-    app, store, _ = world
-    assert store.get_setting("conversation_search") is False
-    captured = []
-    import textual.app as textual_app
-
-    original = textual_app.App.notify
-
-    def spy(self, message, **kwargs):
-        captured.append(kwargs.get("severity", "information"))
-
-    textual_app.App.notify = spy
-    try:
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("slash")
-            await pilot.pause(0.1)
-            from cagents.modals import SearchModal
-
-            assert not isinstance(app.screen, SearchModal)
-            assert "warning" in captured
-    finally:
-        textual_app.App.notify = original
+SID_SEARCH = "33333333-3333-3333-3333-333333333333"
+SID_FOUND = "77777777-7777-7777-7777-777777777777"
 
 
-async def test_search_flow_tracks_and_selects_the_chosen_result(world, claude_dir, now):
-    app, store, tmux = world
+@pytest.fixture
+def search_world(claude_dir: Path, tmp_path: Path, now: float):
+    """Three tracked conversations; "Fix auth bug" matches "auth" best,
+    "Add unit tests here" only as scattered letters and more recently."""
+    store = Store.load(tmp_path / "state.json")
+    for sid, title, age in ((SID1, "Fix auth bug", 900), (SID2, "Build the search bar", 600),
+                            (SID_SEARCH, "Add unit tests here", 60)):
+        TranscriptBuilder(sid, "/proj/alpha").ai_title(title).user("go").assistant_text("done").write(
+            claude_dir, mtime=now - age)
+        store.track(sid, "/proj/alpha", "2026-08-18T09:00:00+00:00")
+        store.sessions[sid].last_interacted_at = ts_ago(600)
     store.set_setting("conversation_search", True)
-    sid = "77777777-7777-7777-7777-777777777777"
-    TranscriptBuilder(sid, "/proj/found-me").ai_title("Found session").user(
-        "go"
-    ).assistant_text("the unobtainium widget needs recalibration").write(
-        claude_dir, mtime=now - 10
-    )
+    tmux = FakeTmux()
+    app = CagentsApp(store=store, registry=SessionRegistry(store, tmux=tmux, claude_dir=claude_dir),
+                     tmux=tmux, claude_dir=claude_dir)
+    return app, store, claude_dir
+
+
+def _search_rows(app) -> list[str]:
+    from textual.widgets import OptionList
+
+    results = app.query_one("#search-results", OptionList)
+    return [results.get_option_at_index(i).id for i in range(results.option_count)
+            if not results.get_option_at_index(i).disabled]
+
+
+async def _wait_for(pilot, condition, seconds: float = 3.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        await pilot.pause(0.05)
+
+
+async def test_slash_opens_a_search_bar_in_the_rail_that_matches_titles_as_you_type(search_world):
+    """Search was a window scanning every transcript on disk. It is a bar at
+    the top of the rail now: titles match in memory on each keystroke, the
+    best match first, and Enter takes the first hit."""
+    from textual.widgets import ContentSwitcher, Input
+
+    from cagents.views import SessionList
+
+    app, store, _ = search_world
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
+        screen = app.screen
         await pilot.press("slash")
-        await pilot.pause(0.1)
-        from cagents.modals import SearchModal
-
-        assert isinstance(app.screen, SearchModal)
-        await pilot.press(*"unobtainium")
+        await pilot.pause()
+        assert app.screen is screen
+        assert app.query_one("#views", ContentSwitcher).current == "search"
+        assert isinstance(app.focused, Input)
+        await pilot.press(*"search")
+        await pilot.pause()
+        assert _search_rows(app) == [SID2]
+        await pilot.press("backspace", "backspace", "backspace", "backspace", "backspace", "backspace", *"auth")
+        await pilot.pause()
+        assert _search_rows(app) == [SID1, SID_SEARCH]
         await pilot.press("enter")
-        await pilot.pause(0.5)  # background search worker
-        await pilot.press("enter")  # select the (only) result
+        await pilot.pause()
+        assert app.query_one("#views", ContentSwitcher).current == "queue"
+        assert app.selected_session_id == SID1
+        assert app.query_one("#queue-list", SessionList).highlighted_session_id == SID1
+
+
+async def test_title_search_reads_no_transcripts_until_ctrl_slash(search_world, monkeypatch):
+    """Opening the bar used to start a scan of every transcript on disk
+    (512MB on the real machine), which slowed the startup load it was
+    opened during. Titles come from the list; only ctrl+/ reads history."""
+    import cagents.search as search
+
+    scans: list[str] = []
+    monkeypatch.setattr(search, "scan_all_sessions", lambda *a, **k: scans.append("scan"))
+    monkeypatch.setattr(search, "search_all_sessions", lambda *a, **k: scans.append("search") or [])
+    app, store, _ = search_world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("slash", *"auth")
+        await pilot.pause(0.3)
+        assert _search_rows(app) == [SID1, SID_SEARCH]
+        assert scans == []
+        await pilot.press("ctrl+underscore")
+        await _wait_for(pilot, lambda: scans)
+        assert scans
+
+
+async def test_escape_closes_the_search_bar_and_keeps_the_selection(search_world):
+    from textual.widgets import ContentSwitcher
+
+    from conftest import select_session
+
+    app, store, _ = search_world
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        select_session(app, SID_SEARCH)
+        await pilot.pause()
+        await pilot.press("slash", *"auth")
+        await pilot.pause()
+        await pilot.press("tab", "escape")
+        await pilot.pause()
+        assert app.query_one("#views", ContentSwitcher).current == "queue"
+        assert app.selected_session_id == SID_SEARCH
+
+
+async def test_ctrl_slash_searches_full_history_and_tracks_the_chosen_result(search_world, now):
+    app, store, claude_dir = search_world
+    TranscriptBuilder(SID_FOUND, "/proj/found-me").ai_title("Found session").user("go").assistant_text(
+        "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("slash", *"unobtainium")
+        await pilot.pause()
+        assert _search_rows(app) == []
+        await pilot.press("ctrl+underscore")
+        await _wait_for(pilot, lambda: _search_rows(app))
+        assert _search_rows(app) == [SID_FOUND]
+        await pilot.press("enter")
         await pilot.pause(0.2)
-        assert sid in store.sessions
-        assert store.sessions[sid].project_dir == "/proj/found-me"
-        assert app.selected_session_id == sid
+        assert SID_FOUND in store.sessions
+        assert store.sessions[SID_FOUND].project_dir == "/proj/found-me"
+        assert app.selected_session_id == SID_FOUND
 
 
-async def test_search_updates_as_you_type_and_arrows_pick_without_leaving_the_input(world, claude_dir, now):
+async def test_full_history_search_is_gated_by_setting(search_world, now):
+    app, store, claude_dir = search_world
+    store.set_setting("conversation_search", False)
+    TranscriptBuilder(SID_FOUND, "/proj/found-me").ai_title("Found session").user("go").assistant_text(
+        "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
+    warnings = []
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        real_notify = app.notify
+        app.notify = lambda message, **kw: (warnings.append(kw.get("severity")), real_notify(message, **kw))
+        await pilot.press("slash", *"fix")
+        await pilot.pause()
+        assert _search_rows(app) == [SID1]
+        await pilot.press("ctrl+underscore")
+        await pilot.pause(0.5)
+        assert "warning" in warnings
+        assert _search_rows(app) == [SID1]
+
+
+async def test_full_history_results_update_as_you_type_and_arrows_pick_without_leaving_the_input(
+    search_world, now,
+):
     from textual.widgets import Input, OptionList
 
-    from cagents.modals import SearchModal
-
-    app, store, tmux = world
-    store.set_setting("conversation_search", True)
-    for sid, title in (("77777777-7777-7777-7777-777777777777", "Widget alpha"),
-                       ("88888888-8888-8888-8888-888888888888", "Widget beta")):
+    app, store, claude_dir = search_world
+    for sid, title in ((SID_FOUND, "Widget alpha"), ("88888888-8888-8888-8888-888888888888", "Widget beta")):
         TranscriptBuilder(sid, "/proj/found-me").ai_title(title).user("go").assistant_text(
             "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        await pilot.press("slash")
-        await pilot.pause(0.1)
-        modal = app.screen
-        assert isinstance(modal, SearchModal)
-        await pilot.press(*"unobtain")
+        await pilot.press("slash", "ctrl+underscore", *"unobtain")
+        await _wait_for(pilot, lambda: len(_search_rows(app)) == 2)
+        results = app.query_one("#search-results", OptionList)
+        assert len(_search_rows(app)) == 2 and isinstance(app.focused, Input)
+        await pilot.press(*"ium")
         await pilot.pause(0.5)
-        results = modal.query_one("#results", OptionList)
-        assert results.option_count == 2
-        assert isinstance(app.focused, Input)
-        await pilot.press("ium")
-        await pilot.pause(0.5)
-        assert results.option_count == 2 and results.highlighted == 0
+        assert len(_search_rows(app)) == 2 and results.highlighted == 0
         await pilot.press("down")
         assert results.highlighted == 1 and isinstance(app.focused, Input)
         await pilot.press("up", "ctrl+n")
         assert results.highlighted == 1
-        chosen = modal.results[1].session_id
+        chosen = _search_rows(app)[1]
         await pilot.press("enter")
         await pilot.pause(0.2)
-        assert not isinstance(app.screen, SearchModal)
         assert app.selected_session_id == chosen
 
 
-async def test_search_enter_before_results_opens_the_top_one_when_they_land(world, claude_dir, now):
-    from cagents.modals import SearchModal
-
-    app, store, tmux = world
-    store.set_setting("conversation_search", True)
-    sid = "77777777-7777-7777-7777-777777777777"
-    TranscriptBuilder(sid, "/proj/found-me").ai_title("Found session").user("go").assistant_text(
+async def test_full_history_enter_before_results_opens_the_top_one_when_they_land(search_world, now):
+    app, store, claude_dir = search_world
+    TranscriptBuilder(SID_FOUND, "/proj/found-me").ai_title("Found session").user("go").assistant_text(
         "the unobtainium widget needs recalibration").write(claude_dir, mtime=now - 10)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        await pilot.press("slash")
-        await pilot.pause(0.1)
-        await pilot.press(*"unobtainium", "enter")
-        await pilot.pause(0.5)
-        assert not isinstance(app.screen, SearchModal)
-        assert app.selected_session_id == sid
+        await pilot.press("slash", "ctrl+underscore", *"unobtainium", "enter")
+        await _wait_for(pilot, lambda: app.selected_session_id == SID_FOUND)
+        assert app.selected_session_id == SID_FOUND
 
 
 class TestTimeOrderedQueue:

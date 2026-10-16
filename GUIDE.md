@@ -166,6 +166,7 @@ rather than a rung. Reorder any of it in the settings panel's Priority tab.
 | `z` | undo the last change to cagents' bookkeeping (done, waiting, rename, untrack, track, PR association — up to 20 steps). Never touches Claude's data or running processes: undoing a fork/new session just untracks it |
 | `n` / `a` | new session via the dialog (launch-dir default, tab completes, `ctrl+t` shell-pick) / track existing |
 | `N` | **the shell way to start sessions**: jumps to the terminal tab. `cd`/`z`/`mkdir` around like always, then type `claude` — it opens as a managed cagents session in that directory (tracked, selected, session tab focused). `claude --resume <id>` works too. If cagents isn't running, the shim falls back to real claude |
+| `/` | search bar over the list: titles match as you type, best match first; `enter` takes the first hit (`↑`/`↓` pick), `esc` closes. `ctrl+/` there searches every conversation's full history (the **Full-history search** setting) |
 | `1 2 3` `tab` | queue (default) / grouped / kanban (←/→ move kanban columns) |
 | `ctrl+r` | restart the selected Claude/Codex process, resuming the same conversation |
 | `:restart` | restart running tracked agents and reload cagents; interrupts in-flight work, keeps history, terminal tabs, and suspended sessions |

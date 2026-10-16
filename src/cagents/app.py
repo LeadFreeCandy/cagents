@@ -44,7 +44,6 @@ from .modals import (
     CommandModal,
     LinkCandidateModal,
     RelatedModal,
-    SearchModal,
     SettingsModal,
     TrackModal,
     WorktreeModal,
@@ -61,7 +60,7 @@ from .sidecar import (
 )
 from .store import Store
 from .tmuxctl import TmuxClient
-from .views import GroupedView, KanbanView, QueueView, SelectionChanged, SessionInteracted
+from .views import GroupedView, KanbanView, QueueView, SearchView, SelectionChanged, SessionInteracted
 
 REFRESH_SECONDS = 2.0
 WORKSPACE_SETUP_LATEST = 1.0
@@ -260,6 +259,7 @@ class CagentsApp(App):
                 yield QueueView(id="queue")
                 yield GroupedView(id="grouped")
                 yield KanbanView(id="kanban")
+                yield SearchView(id="search")
             with VerticalScroll(id="preview-pane"):
                 yield Static(id="preview-content")
         yield Footer()
@@ -406,7 +406,13 @@ class CagentsApp(App):
 
         if isinstance(self.screen, ModalScreen):
             return action in ("focus_next", "focus_previous")
-        return True
+        return not self._searching()
+
+    def _searching(self) -> bool:
+        try:
+            return self.query_one("#views", ContentSwitcher).current == "search"
+        except Exception:
+            return False
 
     # -- data flow -----------------------------------------------------------
 
@@ -481,6 +487,8 @@ class CagentsApp(App):
         self.query_one("#summary", Static).update(header_summary(snapshot.counts()))
         for view_id in VIEW_IDS:
             self.query_one(f"#{view_id}").update_snapshot(snapshot)
+        if self._searching():
+            self.query_one("#search", SearchView).update_snapshot(snapshot)
         if self._pending_highlight and snapshot.by_id(self._pending_highlight):
             # A session we just created/tracked: select it in the list so
             # the viewer previews it (selection follows the highlight).
@@ -2473,13 +2481,24 @@ exec {shlex.quote(real)} "$@"
         self._notify_undoable("Session tracked.")
 
     def action_search(self) -> None:
-        if not self.store.get_setting("conversation_search"):
-            self.notify(
-                "Conversation search is off — enable it in Settings (,).",
-                severity="warning",
-            )
+        self.query_one("#views", ContentSwitcher).current = "search"
+        self.query_one("#search", SearchView).open(self.snapshot)
+
+    def _close_search(self) -> None:
+        self.query_one("#views", ContentSwitcher).current = self.active_view_id
+        self.current_view().focus_list()
+
+    def on_search_view_closed(self, message: SearchView.Closed) -> None:
+        self._close_search()
+
+    def on_search_view_chosen(self, message: SearchView.Chosen) -> None:
+        self._close_search()
+        if message.result is not None:
+            self._search_chosen(message.result)
             return
-        self.push_screen(SearchModal(self.claude_dir, self.codex_dir), self._search_chosen)
+        if self.active_view_id == "kanban":
+            self.action_switch_view("queue")
+        self._highlight_session(message.session_id)
 
     def _search_chosen(self, result) -> None:
         if result is None:

@@ -11,17 +11,20 @@ cursor out from under you (spec §4.2).
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from rich.text import Text
+from textual import work
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
+from textual.worker import get_current_worker
 
-from .format import group_header, jira_header, kanban_card, loading_row, row_widths, session_row
+from .format import group_header, jira_header, kanban_card, loading_row, provider_icon, row_widths, session_row
 from .sessions import DONE_STATES, SessionState, Snapshot, SessionView
 
 
@@ -540,3 +543,188 @@ class KanbanView(BaseSessionView):
                     self.active_column = i
                     self._emit_selection(self._current_selection())
                 break
+
+
+_SEARCH_LOCK = threading.Lock()
+
+
+def title_hits(views: list[SessionView], query: str) -> list[SessionView]:
+    """Conversations whose title matches, best match first, newest first among equals."""
+    from .search import fuzzy_score
+
+    scored = [(score, view) for view in views if (score := fuzzy_score(query, view.title)) is not None]
+    scored.sort(key=lambda hit: (-hit[0], -(hit[1].last_activity.timestamp() if hit[1].last_activity else 0.0)))
+    return [view for _, view in scored]
+
+
+class SearchView(Widget):
+    """`/`: a search bar over the rail. Titles match in memory on every
+    keystroke, best match first; ctrl+/ switches to full-history search.
+    Enter takes the highlighted hit (the first, unless ↑/↓ moved it)."""
+
+    DEFAULT_CSS = """
+    SearchView { height: 1fr; }
+    SearchView > #search-status { height: 1; padding: 0 1; color: $text-muted; }
+    SearchView > OptionList { height: 1fr; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", show=False),
+        Binding("down,ctrl+n", "move(1)", show=False, priority=True),
+        Binding("up,ctrl+p", "move(-1)", show=False, priority=True),
+        Binding("ctrl+slash,ctrl+underscore", "toggle_full_history", show=False, priority=True),
+    ]
+
+    class Chosen(Message):
+        def __init__(self, session_id: str, result=None) -> None:
+            self.session_id = session_id
+            self.result = result
+            super().__init__()
+
+    class Closed(Message):
+        pass
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.views: list[SessionView] = []
+        self.full_history = False
+        self.results: list = []
+        self._results_query = ""
+        self._open_when_ready = False
+        self._debounce = None
+
+    def compose(self):
+        yield Input(placeholder="search titles…", id="search-input")
+        yield Static("", id="search-status")
+        yield OptionList(id="search-results")
+
+    @property
+    def query_text(self) -> str:
+        return self.query_one("#search-input", Input).value.strip()
+
+    def open(self, snapshot: Snapshot) -> None:
+        self.views = snapshot.views
+        self.full_history = False
+        self._open_when_ready = False
+        search_input = self.query_one("#search-input", Input)
+        search_input.value = ""
+        self._show_titles()
+        search_input.focus()
+
+    def update_snapshot(self, snapshot: Snapshot) -> None:
+        self.views = snapshot.views
+        if not self.full_history:
+            self._show_titles()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._open_when_ready = False
+        if not self.full_history:
+            self._show_titles()
+            return
+        if self._debounce is not None:
+            self._debounce.stop()
+        query = self.query_text
+        if not query:
+            self._show_results("", [])
+            return
+        self._debounce = self.set_timer(0.06, lambda: self._run_full_history_search(query))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        if self.full_history and self._results_query != self.query_text:
+            self._open_when_ready = True
+            return
+        self._choose(self.query_one("#search-results", OptionList).highlighted)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self._choose(event.option_index)
+
+    def _choose(self, index: int | None) -> None:
+        results = self.query_one("#search-results", OptionList)
+        if index is None or index >= results.option_count:
+            return
+        session_id = results.get_option_at_index(index).id
+        result = next((r for r in self.results if r.session_id == session_id), None) if self.full_history else None
+        self.post_message(self.Chosen(session_id, result))
+
+    def action_close(self) -> None:
+        self.post_message(self.Closed())
+
+    def action_move(self, step: int) -> None:
+        results = self.query_one("#search-results", OptionList)
+        if results.option_count:
+            current = results.highlighted or 0
+            results.highlighted = max(0, min(results.option_count - 1, current + step))
+
+    def action_toggle_full_history(self) -> None:
+        if not self.full_history and not self.app.store.get_setting("conversation_search"):
+            self.app.notify("Conversation search is off — enable it in Settings (,).", severity="warning")
+            return
+        self.full_history = not self.full_history
+        self.query_one("#search-input", Input).placeholder = (
+            "search full history…" if self.full_history else "search titles…")
+        if self.full_history:
+            self._show_results("", [])
+            self._run_full_history_search(self.query_text)
+        else:
+            self._show_titles()
+
+    def _show_titles(self) -> None:
+        query = self.query_text
+        hits = title_hits(self.views, query) if query else []
+        results = self.query_one("#search-results", OptionList)
+        widths = row_widths(hits, self.app.store.get_setting("conversation_title_width"))
+        now = datetime.now(timezone.utc)
+        results.set_options([Option(session_row(view, now, show_project=True, widths=widths), id=view.session_id)
+                             for view in hits])
+        if hits:
+            results.highlighted = 0
+        noun = "title match" if len(hits) == 1 else "title matches"
+        self.query_one("#search-status", Static).update(
+            f"{len(hits)} {noun} · ctrl+/ searches full history" if query
+            else "type to search titles · ctrl+/ searches full history")
+
+    @work(thread=True, exclusive=True, group="conversation-search")
+    def _run_full_history_search(self, query: str) -> None:
+        from .search import scan_all_sessions, search_all_sessions
+
+        with _SEARCH_LOCK:
+            if get_current_worker().is_cancelled:
+                return
+            if not query:
+                scan_all_sessions(self.app.claude_dir, codex_dir=self.app.codex_dir)
+                return
+            results = search_all_sessions(self.app.claude_dir, query, codex_dir=self.app.codex_dir)
+        self.app.call_from_thread(self._show_results, query, results)
+
+    def _show_results(self, query: str, results: list) -> None:
+        from .search import MatchKind
+
+        if not self.full_history or query != self.query_text:
+            return
+        self.results, self._results_query = results, query
+        if self._open_when_ready and results:
+            self._open_when_ready = False
+            self.post_message(self.Chosen(results[0].session_id, results[0]))
+            return
+        options = []
+        for result in results:
+            is_title_match = result.kind in (MatchKind.TITLE_EXACT, MatchKind.TITLE_FUZZY)
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append_text(provider_icon("codex" if result.session_id.startswith("codex:") else "claude"))
+            row.append(" ")
+            row.append(f"{result.title[:60]:<60}", style="bold cyan" if is_title_match else "bold")
+            row.append(f"  [{result.kind.label}]\n", style="dim italic")
+            row.append(f"  {result.project_dir}\n", style="dim cyan")
+            row.append(f"  {result.snippet}", style="italic dim")
+            options.append(Option(row, id=result.session_id))
+        results_list = self.query_one("#search-results", OptionList)
+        results_list.set_options(options)
+        if options:
+            results_list.highlighted = 0
+        noun = "match" if len(results) == 1 else "matches"
+        self.query_one("#search-status", Static).update(
+            f"full history · {len(results)} {noun} · ctrl+/ titles" if query
+            else "type to search full history · ctrl+/ titles")
